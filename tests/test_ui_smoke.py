@@ -32,7 +32,7 @@ def test_compare_tab(qapp, make_pdf, tmp_path):
 def test_main_window(qapp):
     from pdflex.app import MainWindow
     w = MainWindow()
-    assert w.tabs.count() == 3
+    assert w.tabs.count() == 4
 
 
 def test_compare_scrolls_together(qapp, make_pdf, tmp_path):

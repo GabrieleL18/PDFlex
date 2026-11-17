@@ -15,6 +15,7 @@ from pdflex import ui
 from pdflex.batch import BatchTab
 from pdflex.compare import CompareTab
 from pdflex.editor import EditorTab
+from pdflex.pages import PagesTab
 
 
 class MainWindow(QMainWindow):
@@ -26,8 +27,9 @@ class MainWindow(QMainWindow):
         self.editor = EditorTab()
         self.compare = CompareTab()
         self.batch = BatchTab()
+        self.pages = PagesTab()
         self.tabs = QStackedWidget()
-        for w in (self.editor, self.compare, self.batch):
+        for w in (self.editor, self.compare, self.batch, self.pages):
             self.tabs.addWidget(w)
 
         rail = QFrame(objectName="Rail")
@@ -40,7 +42,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(logo)
         rl.addSpacing(14)
         group = QButtonGroup(self)
-        for i, (glyph, label) in enumerate([("form", "Moduli"), ("compare", "Confronta"), ("batch", "In serie")]):
+        for i, (glyph, label) in enumerate([("form", "Moduli"), ("compare", "Confronta"), ("batch", "In serie"), ("list", "Pagine")]):
             b = QToolButton()
             b.setText(label)
             b.setIcon(ui.icon(glyph, ui.ACCENT))
