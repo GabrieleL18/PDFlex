@@ -1,7 +1,7 @@
 import os
 import re
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -12,7 +12,13 @@ from pdflex import open_pdf
 
 RED = (1, 0, 0)
 GREEN = (0, 0.7, 0)
+BLUE = (0.18, 0.44, 0.86)  # moved text
+PURPLE = (0.48, 0.31, 0.82)  # same words, different formatting
 OPACITY = 0.3
+SIDE_COLORS = {"delete": (RED, None), "insert": (None, GREEN), "replace": (RED, GREEN), "move": (BLUE, BLUE),
+               "format": (PURPLE, PURPLE)}  # (original, new version)
+KIND_TITLES = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato", "move": "Spostato",
+               "format": "Formattazione"}
 FONT = "C:/Windows/Fonts/arial.ttf"
 
 
@@ -21,11 +27,12 @@ class Word:
     page: int
     rect: tuple[float, float, float, float]
     text: str
+    style: tuple = field(default=(), compare=False)  # (bold, italic, size) when known
 
 
 @dataclass
 class Change:
-    kind: str  # "delete" | "insert" | "replace"
+    kind: str  # "delete" | "insert" | "replace" | "move" | "format"
     old: list[Word]
     new: list[Word]
     old_at: Word | None
@@ -39,7 +46,44 @@ class Change:
             return f"Rimosso (p. {self.old[0].page + 1}): {short(self.old)}"
         if self.kind == "insert":
             return f"Aggiunto (p. {self.new[0].page + 1}): {short(self.new)}"
+        if self.kind == "move":
+            return f"Spostato (p. {self.old[0].page + 1} → p. {self.new[0].page + 1}): {short(self.old)}"
+        if self.kind == "format":
+            return f"Formattazione (p. {self.new[0].page + 1}): {short(self.new)} — {_style_change(self)}"
         return f"Modificato (p. {self.old[0].page + 1}): {short(self.old)} → {short(self.new)}"
+
+
+def _style_change(c: Change) -> str:
+    a, b = c.old[0].style, c.new[0].style
+    parts = []
+    if a[0] != b[0]:
+        parts.append("grassetto" if b[0] else "tolto il grassetto")
+    if a[1] != b[1]:
+        parts.append("corsivo" if b[1] else "tolto il corsivo")
+    if a[2] != b[2]:
+        parts.append(f"dimensione {a[2]:g} → {b[2]:g}")
+    return ", ".join(parts)
+
+
+def _styles(page, words) -> list[tuple]:
+    """(bold, italic, size) of each word, from the text span under its centre."""
+    spans = [s for b in page.get_text("dict")["blocks"] for line in b.get("lines", []) for s in line["spans"]]
+    rows = {}
+    for s in spans:
+        rows.setdefault(round((s["bbox"][1] + s["bbox"][3]) / 8), []).append(s)  # bucket by line height
+    out = []
+    for w in words:
+        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+        near = rows.get(round(cy / 4), []) + rows.get(round(cy / 4) - 1, []) + rows.get(round(cy / 4) + 1, [])
+        s = next((s for s in near if s["bbox"][0] - 1 <= cx <= s["bbox"][2] + 1 and s["bbox"][1] - 1 <= cy <= s["bbox"][3] + 1),
+                 None)
+        if s is None:
+            out.append(())
+            continue
+        font = s["font"].lower()
+        out.append((bool(s["flags"] & 16) or "bold" in font or "-bd" in font,
+                    bool(s["flags"] & 2) or "italic" in font or "oblique" in font, round(s["size"], 1)))
+    return out
 
 
 def ocr_available() -> bool:
@@ -54,16 +98,22 @@ def extract_words(doc: pymupdf.Document, ocr: bool = False) -> list[Word]:
     out = []
     for page in doc:
         words = page.get_text("words")
-        if not words and ocr and ocr_available():  # a scanned page: read the image
+        styles = None
+        if not words and ocr and ocr_available():  # a scanned page: read the image (no formatting to read)
             tp = page.get_textpage_ocr(language="ita+eng", dpi=300, full=True)
             words = page.get_text("words", textpage=tp)
+            styles = [()] * len(words)
+        styles = styles or _styles(page, words)
         # get_text gives unrotated coordinates; turn them into what the reader sees
-        out += [Word(page.number, tuple(pymupdf.Rect(w[:4]) * page.rotation_matrix), w[4]) for w in words]
+        out += [Word(page.number, tuple(pymupdf.Rect(w[:4]) * page.rotation_matrix), w[4], st)
+                for w, st in zip(words, styles)]
     return out
 
 
 def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
-               ignore_punct: bool = False) -> list[Change]:
+               ignore_punct: bool = False, formatting: bool = False) -> list[Change]:
+    """Changes in reading order. A piece removed in one place and added unchanged elsewhere is one "move";
+    with formatting=True, same words in bold/italic/another size are a "format" change."""
     def key(w):
         t = w.text.lower() if ignore_case else w.text
         return re.sub(r"[^\w]", "", t) if ignore_punct else t
@@ -82,15 +132,54 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
     while hi < min(len(a), len(b)) - lo and a[-1 - hi] == b[-1 - hi]:
         hi += 1
     sm = SequenceMatcher(None, a[lo:len(a) - hi], b[lo:len(b) - hi], autojunk=False)
-    changes = []
+    keyed = []  # (position in the original, change)
+    same = [(k, k) for k in range(lo)]  # pairs of identical words, to look at their formatting
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            continue
         i1, i2, j1, j2 = i1 + lo, i2 + lo, j1 + lo, j2 + lo
+        if tag == "equal":
+            same += list(zip(range(i1, i2), range(j1, j2)))
+            continue
         old_at = old[min(i1, len(old) - 1)] if old else None
         new_at = new[min(j1, len(new) - 1)] if new else None
-        changes.append(Change(tag, old[i1:i2], new[j1:j2], old_at, new_at))
-    return changes
+        keyed.append((i1, Change(tag, old[i1:i2], new[j1:j2], old_at, new_at)))
+    same += [(len(a) - hi + k, len(b) - hi + k) for k in range(hi)]
+    keyed = _find_moves(keyed, key)
+    if formatting:
+        run = []
+        for i, j in same + [(None, None)]:
+            differs = i is not None and old[i].style and new[j].style and old[i].style != new[j].style
+            if differs and (not run or (i == run[-1][0] + 1 and old[i].style == old[run[0][0]].style
+                                        and new[j].style == new[run[0][1]].style)):
+                run.append((i, j))
+                continue
+            if run:
+                keyed.append((run[0][0], Change("format", [old[i] for i, _ in run], [new[j] for _, j in run],
+                                                old[run[0][0]], new[run[0][1]])))
+            run = [(i, j)] if differs else []
+    return [c for _, c in sorted(keyed, key=lambda kc: kc[0])]
+
+
+def _find_moves(keyed, key):
+    """Pair a removal with an addition of the very same text (2+ words, 8+ letters) into one move."""
+    inserts = {}
+    for n, (_, c) in enumerate(keyed):
+        if c.kind == "insert":
+            inserts.setdefault(" ".join(key(w) for w in c.new), []).append(n)
+    pairs = {}  # removal index -> addition index
+    for n, (_, c) in enumerate(keyed):
+        text = " ".join(key(w) for w in c.old) if c.kind == "delete" else ""
+        if len(c.old) >= 2 and len(text) >= 8:
+            match = next((m for m in inserts.get(text, []) if m not in pairs.values()), None)
+            if match is not None:
+                pairs[n] = match
+    out = []
+    for n, (pos, c) in enumerate(keyed):
+        if n in pairs:
+            ins = keyed[pairs[n]][1]
+            out.append((pos, Change("move", c.old, ins.new, c.old_at, ins.new_at)))
+        elif n not in pairs.values():
+            out.append((pos, c))
+    return out
 
 
 def _summary_pages(out, old_path, new_path, changes):
@@ -134,13 +223,14 @@ def export_report(old_path, new_path, changes: list[Change], out_path, summary: 
             page.show_pdf_page(pymupdf.Rect(r_old.width, 0, r_old.width + r_new.width, r_new.height), new, i,
                                rotate=-rn[i][1])
         for c in changes:
+            left, right = SIDE_COLORS[c.kind]
             for w in c.old:
                 if w.page == i:
-                    page.draw_rect(pymupdf.Rect(w.rect), color=None, fill=RED, fill_opacity=OPACITY)
+                    page.draw_rect(pymupdf.Rect(w.rect), color=None, fill=left, fill_opacity=OPACITY)
             for w in c.new:
                 if w.page == i:
                     page.draw_rect(pymupdf.Rect(w.rect) + (r_old.width, 0, r_old.width, 0),
-                                   color=None, fill=GREEN, fill_opacity=OPACITY)
+                                   color=None, fill=right, fill_opacity=OPACITY)
     out.save(out_path, garbage=3, deflate=True)
 
 
@@ -151,8 +241,8 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
     ws = wb.active
     ws.title = "Modifiche"
     ws.append(["N.", "Tipo", "Pagina originale", "Pagina nuova", f"Testo in {old_name}", f"Testo in {new_name}"])
-    names = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato"}
-    fills = {"delete": "FBE3E3", "insert": "E2F4E8", "replace": "FFF3D6"}
+    names = KIND_TITLES
+    fills = {"delete": "FBE3E3", "insert": "E2F4E8", "replace": "FFF3D6", "move": "E1EAFB", "format": "ECE5F8"}
     for i, c in enumerate(changes, 1):
         ws.append([i, names[c.kind],
                    c.old[0].page + 1 if c.old else (c.old_at.page + 1 if c.old_at else None),
@@ -178,8 +268,8 @@ from PySide6.QtWidgets import (  # noqa: E402
 from pdflex import ui  # noqa: E402
 from pdflex.ui import DocView, button, dot, info, warn  # noqa: E402
 
-KIND_NAMES = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato"}
-KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER}
+KIND_NAMES = KIND_TITLES
+KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1"}
 HINT = "Trascina qui il PDF o clicca per sceglierlo"
 NO_OCR = ("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
           "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex.")
@@ -288,17 +378,22 @@ class CompareTab(QWidget):
         opts.setContentsMargins(14, 0, 14, 8)
         self.kind_filter = QComboBox()
         for label, kind in (("Tutte le modifiche", ""), ("Solo aggiunte", "insert"), ("Solo rimozioni", "delete"),
-                            ("Solo sostituzioni", "replace")):
+                            ("Solo sostituzioni", "replace"), ("Solo testo spostato", "move"),
+                            ("Solo formattazione", "format")):
             self.kind_filter.addItem(label, kind)
         self.kind_filter.currentIndexChanged.connect(self._apply_filter)
         self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
         self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
+        self.formatting = ui.Toggle("Segnala grassetto, corsivo e dimensione")
+        self.formatting.setChecked(True)
+        self.formatting.toggled.connect(self._rediff)
         self.include_list = ui.Toggle("Elenco modifiche nel PDF esportato")
         self.include_list.setChecked(True)
         self.include_list.setToolTip("Spento: il PDF esportato contiene solo le pagine affiancate")
         for c in (self.ignore_case, self.ignore_punct):
             c.toggled.connect(self._rediff)
             opts.addWidget(c)
+        opts.addWidget(self.formatting)
         opts.addWidget(self.include_list)
         opts.addWidget(self.kind_filter)
         sl.addLayout(opts)
@@ -408,20 +503,23 @@ class CompareTab(QWidget):
             self.old_view.show_doc(self.docs[0])
             self.new_view.show_doc(self.docs[1])
             self.changes = diff_words(*self.words, ignore_case=self.ignore_case.isChecked(),
-                                      ignore_punct=self.ignore_punct.isChecked())
+                                      ignore_punct=self.ignore_punct.isChecked(),
+                                      formatting=self.formatting.isChecked())
         finally:
             QApplication.restoreOverrideCursor()
         counts = {k: sum(c.kind == k for c in self.changes) for k in KIND_NAMES}
         for c in self.changes:
-            self.old_view.highlight(c.old, RED, OPACITY)
-            self.new_view.highlight(c.new, GREEN, OPACITY)
+            left, right = SIDE_COLORS[c.kind]
+            self.old_view.highlight(c.old, left or RED, OPACITY)
+            self.new_view.highlight(c.new, right or GREEN, OPACITY)
             body = c.label().split(": ", 1)[1]
             page = (c.old or c.new)[0].page + 1
             self.list.addItem(QListWidgetItem(dot(KIND_COLORS[c.kind]),
                                               f"{body}\n{KIND_NAMES[c.kind]}, pagina {page}"))
         if self.changes:
             parts = [f"{n} {word}" for n, word in ((counts["insert"], "aggiunte"), (counts["delete"], "rimozioni"),
-                                                    (counts["replace"], "sostituzioni")) if n]
+                                                    (counts["replace"], "sostituzioni"), (counts["move"], "spostamenti"),
+                                                    (counts["format"], "di formattazione")) if n]
             self.summary.setText(f"{len(self.changes)} modifiche: " + ", ".join(parts))
         else:
             self.summary.setText("Nessuna differenza nel testo")

@@ -1,3 +1,4 @@
+import pymupdf
 import time
 
 from pdflex import open_pdf
@@ -116,3 +117,38 @@ def test_export_without_list_of_changes(make_pdf, tmp_path):
     export_report(old, new, changes, out, summary=False)
     doc = open_pdf(out)
     assert doc.page_count == 1 and "Confronto PDF" not in doc[0].get_text()
+
+
+def _w(text, style=(False, False, 11), page=0, i=[0]):  # noqa: B006 (counter on purpose)
+    i[0] += 1
+    return Word(page, (i[0] * 10, 0, i[0] * 10 + 8, 10), text, style)
+
+
+def test_moved_paragraph_is_one_move_not_delete_plus_insert():
+    para = "il pagamento avviene entro trenta giorni".split()
+    old = [_w(t) for t in ["Premessa", "uno"] + para + ["Articolo", "due", "fine"]]
+    new = [_w(t) for t in ["Premessa", "uno", "Articolo", "due"] + para + ["fine"]]
+    changes = diff_words(old, new)
+    assert [c.kind for c in changes] == ["move"]
+    # either reading is right: the paragraph went down, or "Articolo due" came up
+    assert " ".join(w.text for w in changes[0].old) in (" ".join(para), "Articolo due")
+    assert "Spostato" in changes[0].label()
+
+
+def test_formatting_change_reported_only_when_asked():
+    bold = (True, False, 11)
+    old = [_w(t) for t in "il canone è dovuto".split()]
+    new = [_w("il"), _w("canone", bold), _w("è"), _w("dovuto")]
+    assert diff_words(old, new) == []
+    changes = diff_words(old, new, formatting=True)
+    assert [c.kind for c in changes] == ["format"] and [w.text for w in changes[0].new] == ["canone"]
+    assert "Formattazione" in changes[0].label() and "grassetto" in changes[0].label()
+
+
+def test_extract_words_reads_bold(tmp_path):
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 72), "normale", fontname="helv")
+    p.insert_text((72, 100), "grassetto", fontname="hebo")
+    words = {w.text: w for w in extract_words(doc)}
+    assert words["grassetto"].style[0] is True and words["normale"].style[0] is False
