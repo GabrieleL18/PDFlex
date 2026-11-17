@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap, QTextDocument
+from PySide6.QtGui import (
+    QBrush, QColor, QGuiApplication, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QTextDocument,
+)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
@@ -17,7 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-INK = "#1D2633"
+INK = "#1D2633"  # on the page (always white paper) and as the light theme's text
 MUTED = "#5B6675"
 LINE = "#E3E7EE"
 DESK = "#E9EDF2"
@@ -27,79 +29,117 @@ RED = "#D64545"
 GREEN = "#2E9E5B"
 AMBER = "#C98A00"
 
-QSS = f"""
-QWidget {{ font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 10pt; color: {INK}; }}
-QMainWindow, #Root {{ background: #F6F7FA; }}
-#Rail {{ background: #FFFFFF; border-right: 1px solid {LINE}; }}
-#Rail QToolButton {{ border: none; border-radius: 10px; padding: 10px 4px 8px 4px; color: {MUTED}; font-size: 9pt; }}
-#Rail QToolButton:hover:!checked {{ background: #F1F3F7; }}
-#Rail QToolButton:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; font-weight: 600; }}
-#Bar {{ background: #FFFFFF; border-bottom: 1px solid {LINE}; }}
-#Panel {{ background: #FFFFFF; }}
-#PanelLeft {{ background: #FFFFFF; border-right: 1px solid {LINE}; }}
-#PanelRight {{ background: #FFFFFF; border-left: 1px solid {LINE}; }}
-QPushButton {{ border: 1px solid #D9DEE7; border-radius: 8px; padding: 6px 12px; background: #FFFFFF; }}
-QPushButton:hover {{ background: #F1F3F7; border-color: #C3C9D4; }}
-QPushButton:pressed {{ background: #E4E7EE; }}
-QPushButton:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; border-color: #C9CCF6; font-weight: 600; }}
-QPushButton:focus {{ border-color: {ACCENT}; }}
-QPushButton:disabled {{ color: #A9B0BB; border-color: {LINE}; background: #FAFBFC; }}
-QPushButton#Primary {{ background: {ACCENT}; color: white; border: none; font-weight: 600; padding: 7px 16px; }}
-QPushButton#Primary:hover {{ background: #3236A0; }}
-QPushButton#Primary:pressed {{ background: #292D8A; }}
-QPushButton#Primary:disabled {{ background: #AEB1DE; }}
+THEMES = {
+    "light": {
+        "ink": INK, "muted": MUTED, "line": LINE, "desk": DESK, "bg": "#F6F7FA", "surface": "#FFFFFF",
+        "hover": "#F1F3F7", "pressed": "#E4E7EE", "border": "#D9DEE7", "border_strong": "#C3C9D4",
+        "disabled": "#A9B0BB", "disabled_bg": "#FAFBFC", "accent": ACCENT, "accent_bg": ACCENT,
+        "accent_hover": "#3236A0", "accent_pressed": "#292D8A", "accent_disabled": "#AEB1DE",
+        "accent_soft": ACCENT_SOFT, "accent_soft_border": "#C9CCF6", "danger": RED, "danger_bg": "#FDEEEE",
+        "danger_border": "#F0C2C2", "tip_bg": INK, "tip_fg": "#FFFFFF", "hot_bg": "#FAFAFF", "row_hover": "#F5F6F9",
+        "handle": "#C3C9D4", "marks_handle": "rgba(91, 102, 117, 90)", "green": GREEN, "loaded_bg": "#F3FBF6",
+        "toggle_off": "#C5CCD6", "focus_ring": "#DCE0F7", "text_red": "#B42318", "text_green": "#1E7B45",
+        "white": "#FFFFFF",
+    },
+    "dark": {
+        "ink": "#E4E8EE", "muted": "#9AA4B2", "line": "#2F3540", "desk": "#14171C", "bg": "#1A1E24",
+        "surface": "#21262D", "hover": "#2A3039", "pressed": "#333A45", "border": "#3A414D",
+        "border_strong": "#4C5563", "disabled": "#5E6775", "disabled_bg": "#1E232A", "accent": "#A3A7F7",
+        "accent_bg": "#4E53CC", "accent_hover": "#5A5FD9", "accent_pressed": "#4247B8", "accent_disabled": "#353966",
+        "accent_soft": "#2C3057", "accent_soft_border": "#474C8F", "danger": "#F27272", "danger_bg": "#3A2427",
+        "danger_border": "#6E363C", "tip_bg": "#E4E8EE", "tip_fg": "#1A1E24", "hot_bg": "#252A3B",
+        "row_hover": "#272D35", "handle": "#4C5563", "marks_handle": "rgba(210, 215, 225, 70)", "green": "#4CB873",
+        "loaded_bg": "#1B2D23", "toggle_off": "#4C5563", "focus_ring": "#3A3F73", "text_red": "#F97066",
+        "text_green": "#5BD08E", "white": "#FFFFFF",
+    },
+}
+THEME = "light"  # the one in use: apply_theme() changes it
+
+
+def color(key: str) -> str:
+    """A colour of the theme in use (window chrome; the PDF pages stay white paper)."""
+    return THEMES[THEME][key]
+
+
+QSS = """
+QWidget {{ font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 10pt; color: {ink}; }}
+QMainWindow, #Root {{ background: {bg}; }}
+QDialog {{ background: {surface}; }}
+#Rail {{ background: {surface}; border-right: 1px solid {line}; }}
+#Rail QToolButton {{ border: none; border-radius: 10px; padding: 10px 4px 8px 4px; color: {muted}; font-size: 9pt; }}
+#Rail QToolButton:hover:!checked {{ background: {hover}; }}
+#Rail QToolButton:checked {{ background: {accent_soft}; color: {accent}; font-weight: 600; }}
+#Bar {{ background: {surface}; border-bottom: 1px solid {line}; }}
+#Panel {{ background: {surface}; }}
+#PanelLeft {{ background: {surface}; border-right: 1px solid {line}; }}
+#PanelRight {{ background: {surface}; border-left: 1px solid {line}; }}
+#Column {{ background: {surface}; padding: 8px 14px; font-weight: 600; }}
+QFrame#Sep {{ background: {line}; margin: 6px 4px; }}
+QPushButton {{ border: 1px solid {border}; border-radius: 8px; padding: 6px 12px; background: {surface}; }}
+QPushButton:hover {{ background: {hover}; border-color: {border_strong}; }}
+QPushButton:pressed {{ background: {pressed}; }}
+QPushButton:checked {{ background: {accent_soft}; color: {accent}; border-color: {accent_soft_border}; font-weight: 600; }}
+QPushButton:focus {{ border-color: {accent}; }}
+QPushButton:disabled {{ color: {disabled}; border-color: {line}; background: {disabled_bg}; }}
+QPushButton#Primary {{ background: {accent_bg}; color: white; border: none; font-weight: 600; padding: 7px 16px; }}
+QPushButton#Primary:hover {{ background: {accent_hover}; }}
+QPushButton#Primary:pressed {{ background: {accent_pressed}; }}
+QPushButton#Primary:disabled {{ background: {accent_disabled}; }}
 QPushButton#Ghost {{ border: 1px solid transparent; background: transparent; padding: 6px 8px; }}
-QPushButton#Ghost:hover {{ background: #F1F3F7; }}
-QPushButton#Ghost:pressed {{ background: #E4E7EE; }}
-QPushButton#Ghost:checked {{ background: {ACCENT_SOFT}; }}
+QPushButton#Ghost:hover {{ background: {hover}; }}
+QPushButton#Ghost:pressed {{ background: {pressed}; }}
+QPushButton#Ghost:checked {{ background: {accent_soft}; }}
 QPushButton#Ghost:disabled {{ background: transparent; }}
-QPushButton#Danger {{ color: {RED}; }}
-QPushButton#Danger:hover {{ background: #FDEEEE; border-color: #F0C2C2; }}
-QToolTip {{ background: {INK}; color: #FFFFFF; border: none; padding: 5px 8px; }}
-QProgressDialog {{ background: #FFFFFF; }}
-QProgressBar {{ border: none; background: {LINE}; border-radius: 4px; max-height: 8px; color: transparent; }}
-QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
-QScrollArea {{ border: none; background: #FFFFFF; }}
-#DropZone[loaded="true"] {{ border: 2px solid {GREEN}; background: #F3FBF6; }}
+QPushButton#Danger {{ color: {danger}; }}
+QPushButton#Danger:hover {{ background: {danger_bg}; border-color: {danger_border}; }}
+QToolTip {{ background: {tip_bg}; color: {tip_fg}; border: none; padding: 5px 8px; }}
+QProgressDialog {{ background: {surface}; }}
+QProgressBar {{ border: none; background: {line}; border-radius: 4px; max-height: 8px; color: transparent; }}
+QProgressBar::chunk {{ background: {accent_bg}; border-radius: 4px; }}
+QScrollArea {{ border: none; background: {surface}; }}
+#DropZone[loaded="true"] {{ border: 2px solid {green}; background: {loaded_bg}; }}
 #Palette QToolButton {{ border: none; border-radius: 8px; padding: 8px 10px; text-align: left; }}
-#Palette QToolButton:hover:!checked {{ background: #F1F3F7; }}
-#Palette QToolButton:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; font-weight: 600; }}
-QGraphicsView {{ background: {DESK}; border: none; }}
-QLineEdit, QPlainTextEdit {{ border: 1px solid #D9DEE7; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; selection-background-color: {ACCENT}; }}
-QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
-QComboBox {{ border: 1px solid #D9DEE7; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }}
-QComboBox:hover {{ border-color: #C3C9D4; }}
-QComboBox:focus, QComboBox:on {{ border-color: {ACCENT}; }}
-QComboBox:disabled {{ color: #A9B0BB; background: #F6F7FA; }}
+#Palette QToolButton:hover:!checked {{ background: {hover}; }}
+#Palette QToolButton:checked {{ background: {accent_soft}; color: {accent}; font-weight: 600; }}
+QGraphicsView {{ background: {desk}; border: none; }}
+QLineEdit, QPlainTextEdit {{ border: 1px solid {border}; border-radius: 6px; padding: 5px 8px; background: {surface}; selection-background-color: {accent_bg}; selection-color: white; }}
+QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {accent}; }}
+QComboBox {{ border: 1px solid {border}; border-radius: 6px; padding: 5px 8px; background: {surface}; }}
+QComboBox:hover {{ border-color: {border_strong}; }}
+QComboBox:focus, QComboBox:on {{ border-color: {accent}; }}
+QComboBox:disabled {{ color: {disabled}; background: {bg}; }}
 QComboBox::drop-down {{ border: none; width: 24px; }}
-QComboBox QAbstractItemView {{ border: 1px solid {LINE}; background: #FFFFFF; outline: none; padding: 4px;
-    selection-background-color: {ACCENT_SOFT}; selection-color: {INK}; }}
-#Desk {{ background: {DESK}; }}
-QPushButton#Recent {{ border: none; background: transparent; text-align: left; padding: 7px 10px; color: {INK}; }}
-QPushButton#Recent:hover {{ background: #FFFFFF; }}
+QComboBox QAbstractItemView {{ border: 1px solid {line}; background: {surface}; outline: none; padding: 4px;
+    selection-background-color: {accent_soft}; selection-color: {ink}; }}
+#Desk {{ background: {desk}; }}
+QPushButton#Recent {{ border: none; background: transparent; text-align: left; padding: 7px 10px; color: {ink}; }}
+QPushButton#Recent:hover {{ background: {surface}; }}
 QLabel#H1 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 14pt; font-weight: 600; }}
 QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11pt; font-weight: 600; }}
-QLabel#Muted {{ color: {MUTED}; }}
-#DropZone {{ border: 2px dashed #C3C9D4; border-radius: 16px; background: #FFFFFF; }}
-#DropZone:hover, #DropZone[hot="true"] {{ border-color: {ACCENT}; background: #FAFAFF; }}
-QListWidget#Changes {{ border: none; background: #FFFFFF; outline: none; }}
+QLabel#Muted {{ color: {muted}; }}
+#DropZone {{ border: 2px dashed {border_strong}; border-radius: 16px; background: {surface}; }}
+#DropZone:hover, #DropZone[hot="true"] {{ border-color: {accent}; background: {hot_bg}; }}
+QListWidget#Changes {{ border: none; background: {surface}; outline: none; }}
 QListWidget#Changes::item {{ padding: 8px 6px; border-radius: 8px; margin: 1px 6px; }}
-QListWidget#Changes::item:selected {{ background: {ACCENT_SOFT}; color: {INK}; }}
-QListWidget#Changes::item:hover:!selected {{ background: #F5F6F9; }}
-QSplitter::handle {{ background: {LINE}; }}
+QListWidget#Changes::item:selected {{ background: {accent_soft}; color: {ink}; }}
+QListWidget#Changes::item:hover:!selected {{ background: {row_hover}; }}
+QSplitter::handle {{ background: {line}; }}
 QSplitter::handle:horizontal {{ width: 4px; }}
 QSplitter::handle:vertical {{ height: 4px; }}
-QSplitter::handle:hover {{ background: {ACCENT}; }}
+QSplitter::handle:hover {{ background: {accent}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #C3C9D4; border-radius: 4px; min-height: 30px; }}
-QScrollBar#Marks:vertical {{ width: 16px; background: #F1F3F7; }}
-QScrollBar#Marks::handle:vertical {{ background: rgba(91, 102, 117, 90); }}
+QScrollBar::handle:vertical {{ background: {handle}; border-radius: 4px; min-height: 30px; }}
+QScrollBar#Marks:vertical {{ width: 16px; background: {hover}; }}
+QScrollBar#Marks::handle:vertical {{ background: {marks_handle}; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: #C3C9D4; border-radius: 4px; min-width: 30px; }}
+QScrollBar::handle:horizontal {{ background: {handle}; border-radius: 4px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none; border: none; width: 0; height: 0; }}
-QMessageBox {{ background: #FFFFFF; }}
+QSlider::groove:horizontal {{ height: 4px; background: {line}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {accent_bg}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {surface}; border: 1px solid {border_strong}; width: 14px; margin: -6px 0; border-radius: 7px; }}
+QMessageBox {{ background: {surface}; }}
 QMessageBox QLabel#qt_msgbox_label {{ min-width: 320px; max-width: 460px; font-size: 10.5pt; padding: 4px 0 8px 6px; }}
-QMessageBox QLabel#qt_msgbox_informativelabel {{ color: {MUTED}; padding-left: 6px; }}
+QMessageBox QLabel#qt_msgbox_informativelabel {{ color: {muted}; padding-left: 6px; }}
 QMessageBox QPushButton {{ min-width: 84px; padding: 7px 14px; }}
 """
 
@@ -143,6 +183,8 @@ _ICONS = {
     "page": '<rect x="6" y="3.5" width="12" height="17" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
     "columns": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
     "rows": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 12h17"/>',
+    "moon": '<path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10z"/>',
+    "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
     "refresh": '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15"/>',
 }
 
@@ -219,10 +261,52 @@ def add_recent(path: str) -> None:
 
 
 def stylesheet() -> str:
-    """QSS plus the combo arrow, which QSS can only take from a file (needs a running QApplication)."""
-    arrow = Path(tempfile.gettempdir()) / "pdflex-down.png"
-    icon("down", MUTED).pixmap(24, 24).save(str(arrow))
-    return QSS + f'QComboBox::down-arrow {{ image: url("{arrow.as_posix()}"); width: 12px; height: 12px; }}'
+    """QSS of the theme in use, plus the combo arrow, which QSS can only take from a file."""
+    arrow = Path(tempfile.gettempdir()) / f"pdflex-down-{THEME}.png"
+    icon("down", color("muted")).pixmap(24, 24).save(str(arrow))
+    return (QSS.format(**THEMES[THEME]) +
+            f'QComboBox::down-arrow {{ image: url("{arrow.as_posix()}"); width: 12px; height: 12px; }}')
+
+
+def preferred_theme() -> str:
+    """The theme chosen with the button, or else the one Windows uses."""
+    saved = load_json("tema.json", {}).get("tema")
+    if saved in THEMES:
+        return saved
+    return "dark" if QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark else "light"
+
+
+def set_glyph(widget, glyph: str, tone: str = "ink", size: int = 0) -> None:
+    """An icon that follows the theme: tone is a key of THEMES. Labels get a picture of `size` px."""
+    widget.setProperty("glyph", glyph)
+    widget.setProperty("tone", tone)
+    widget.setProperty("glyph_size", size)
+    pic = icon(glyph, color(tone))
+    widget.setPixmap(pic.pixmap(size, size)) if size else widget.setIcon(pic)
+
+
+def apply_theme(app, name: str) -> None:
+    """Light or dark window chrome, applied live: colours, and the icons drawn in them."""
+    global THEME
+    THEME = name
+    t = THEMES[name]
+    pal = QPalette()
+    for role, key in ((QPalette.Window, "bg"), (QPalette.WindowText, "ink"), (QPalette.Base, "surface"),
+                      (QPalette.AlternateBase, "hover"), (QPalette.Text, "ink"), (QPalette.Button, "surface"),
+                      (QPalette.ButtonText, "ink"), (QPalette.ToolTipBase, "tip_bg"), (QPalette.ToolTipText, "tip_fg"),
+                      (QPalette.PlaceholderText, "disabled"), (QPalette.Highlight, "accent_bg"),
+                      (QPalette.HighlightedText, "white"), (QPalette.Mid, "border"), (QPalette.Light, "surface"),
+                      (QPalette.Dark, "border_strong"), (QPalette.BrightText, "white")):
+        pal.setColor(role, QColor(t[key]))
+    pal.setColor(QPalette.Disabled, QPalette.Text, QColor(t["disabled"]))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(t["disabled"]))
+    pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor(t["disabled"]))
+    app.setPalette(pal)
+    app.setStyleSheet(stylesheet())
+    for w in app.allWidgets():
+        if w.property("glyph"):
+            set_glyph(w, w.property("glyph"), w.property("tone") or "ink", w.property("glyph_size") or 0)
+        w.update()
 
 
 def app_icon() -> QIcon:
@@ -299,7 +383,7 @@ class DropZone(QFrame):
         lay.setSpacing(8)
         self.glyph, self.default_hint = glyph, hint
         self.pic = QLabel()
-        self.pic.setPixmap(icon(glyph, ACCENT).pixmap(44, 44))
+        set_glyph(self.pic, glyph, "accent", 44)
         self.pic.setAlignment(Qt.AlignCenter)
         self.title = QLabel(title, objectName="H2", alignment=Qt.AlignCenter)
         self.hint = QLabel(hint, objectName="Muted", alignment=Qt.AlignCenter)
@@ -312,9 +396,9 @@ class DropZone(QFrame):
         self.setProperty("loaded", bool(path))
         self.style().unpolish(self)
         self.style().polish(self)
-        self.pic.setPixmap(icon("checkbox" if path else self.glyph, GREEN if path else ACCENT).pixmap(44, 44))
+        set_glyph(self.pic, "checkbox" if path else self.glyph, "green" if path else "accent", 44)
         self.hint.setText(f"{Path(path).name}\nCaricato. Clicca per cambiarlo." if path else self.default_hint)
-        self.hint.setStyleSheet(f"color: {GREEN}; font-weight: 600;" if path else "")
+        self.hint.setStyleSheet(f"color: {color('green')}; font-weight: 600;" if path else "")
 
     def _hot(self, on):
         self.setProperty("hot", on)
@@ -350,7 +434,7 @@ def pdf_from_drop(e, exts=(".pdf",)) -> str | None:
 def button(text, glyph=None, name=None, tip=None) -> QPushButton:
     b = QPushButton(text)
     if glyph:
-        b.setIcon(icon(glyph, "#FFFFFF" if name == "Primary" else INK))
+        set_glyph(b, glyph, "white" if name == "Primary" else "ink")
     if name:
         b.setObjectName(name)
     if tip:
@@ -393,11 +477,11 @@ class Toggle(QCheckBox):
         if not self.isEnabled():
             p.setOpacity(0.45)
         y = (self.height() - self.H) / 2
-        on = QColor(ACCENT)
-        off = QColor("#C5CCD6")
+        on = QColor(color("accent_bg"))
+        off = QColor(color("toggle_off"))
         track = QColor.fromRgbF(*(a + (b - a) * self._pos for a, b in zip(off.getRgbF()[:3], on.getRgbF()[:3])))
         if self.hasFocus():
-            p.setPen(QPen(QColor(ACCENT_SOFT if self.isChecked() else "#DCE0F7"), 4))
+            p.setPen(QPen(QColor(color("accent_soft") if self.isChecked() else color("focus_ring")), 4))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(QRectF(1, y - 1, self.W, self.H + 2), self.H / 2 + 1, self.H / 2 + 1)
         p.setPen(Qt.NoPen)
@@ -409,7 +493,7 @@ class Toggle(QCheckBox):
         p.drawEllipse(QRectF(x, y + 3.6, d, d))
         p.setBrush(QColor("#FFFFFF"))
         p.drawEllipse(QRectF(x, y + 3, d, d))
-        p.setPen(QColor(INK))
+        p.setPen(QColor(color("ink")))
         p.drawText(self.rect().adjusted(self.W + 10, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, self.text())
 
 
@@ -422,9 +506,9 @@ def message(parent, text: str, kind: str = "info", buttons=("OK",), note: str = 
     box.setText(text)
     if note:
         box.setInformativeText(note)
-    glyph, color = {"info": ("info", ACCENT), "ask": ("help", ACCENT), "warn": ("alert", AMBER),
-                    "error": ("alert", RED)}[kind]
-    box.setIconPixmap(icon(glyph, color).pixmap(40, 40))
+    glyph, tint = {"info": ("info", color("accent")), "ask": ("help", color("accent")), "warn": ("alert", AMBER),
+                   "error": ("alert", RED)}[kind]
+    box.setIconPixmap(icon(glyph, tint).pixmap(40, 40))
     made = []
     for i, label in enumerate(buttons):
         b = box.addButton(label, QMessageBox.AcceptRole if i == 0 else
@@ -537,6 +621,7 @@ class HtmlDelegate(QStyledItemDelegate):
         d = QTextDocument()
         d.setDefaultFont(option.font)
         d.setDocumentMargin(0)
+        d.setDefaultStyleSheet(f"body {{ color: {color('ink')}; }}")  # else black, even on the dark theme
         d.setHtml(index.data(Qt.UserRole + 1) or "")
         d.setTextWidth(max(self.parent().viewport().width() - 2 * self.PAD - 4, 80))
         return d

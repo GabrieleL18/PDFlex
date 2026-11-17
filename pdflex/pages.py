@@ -160,7 +160,7 @@ class PageGrid(QListWidget):
         if self.marker and self.count():
             _, x, top, bottom = self.marker
             p = QPainter(self.viewport())
-            p.setPen(QPen(QColor(ui.ACCENT), 4, Qt.SolidLine, Qt.RoundCap))
+            p.setPen(QPen(QColor(ui.color("accent")), 4, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(x, top, x, bottom)
 
 

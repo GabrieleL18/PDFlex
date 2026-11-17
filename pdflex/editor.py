@@ -827,7 +827,6 @@ class SignatureDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Firma a mano")
-        self.setStyleSheet("QDialog { background: #FFFFFF; }")
         self.png: bytes | None = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 18)
@@ -924,7 +923,10 @@ class EditorTab(QWidget):
         for mode, label in [("select", "Seleziona e sposta"), *((k, v) for k, v in KIND_LABELS.items() if k != "image")]:
             b = QToolButton()
             b.setText(label)
-            b.setIcon(icon(mode, KIND_COLORS.get(mode, "#1D2633")))
+            if mode in KIND_COLORS:
+                b.setIcon(icon(mode, KIND_COLORS[mode]))
+            else:
+                ui.set_glyph(b, mode)  # "select": ink, follows the theme
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             b.setCheckable(True)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -936,7 +938,7 @@ class EditorTab(QWidget):
             if mode == "select":
                 sep = QFrame()
                 sep.setFixedHeight(1)
-                sep.setStyleSheet("background:#E3E7EE; margin: 6px 4px;")
+                sep.setObjectName("Sep")
                 tl.addWidget(sep)
         self.mode_buttons["select"].setChecked(True)
         pl.addWidget(tools)

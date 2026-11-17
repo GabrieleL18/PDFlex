@@ -270,3 +270,21 @@ def test_window_remembers_its_place_and_stays_on_screen(qapp):
     assert ui.load_json("finestra.json", {}).get("geometria")
     w2 = MainWindow()  # saved larger than this test screen, as from a big monitor to a laptop
     assert qapp.primaryScreen().availableGeometry().contains(w2.frameGeometry())
+
+
+def test_dark_theme_switch_and_remember(qapp):
+    from PySide6.QtGui import QPalette
+    from pdflex import ui
+    from pdflex.app import MainWindow
+    w = MainWindow()
+    before = w.editor.b_open.icon().pixmap(24, 24).toImage()
+    try:
+        w.toggle_theme()
+        assert ui.THEME == "dark" and ui.preferred_theme() == "dark"  # remembered
+        assert qapp.palette().color(QPalette.Window).lightness() < 80
+        assert w.editor.b_open.icon().pixmap(24, 24).toImage() != before  # icons redrawn in the light ink
+        assert w.b_theme.text() == "Chiaro"
+        w.toggle_theme()
+        assert ui.THEME == "light" and w.b_theme.text() == "Scuro"
+    finally:
+        ui.apply_theme(qapp, "light")

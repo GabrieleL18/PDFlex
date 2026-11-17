@@ -50,7 +50,7 @@ class MainWindow(QMainWindow):
         for i, (glyph, label) in enumerate([("form", "Moduli"), ("compare", "Confronta"), ("batch", "In serie"), ("list", "Pagine")]):
             b = QToolButton()
             b.setText(label)
-            b.setIcon(ui.icon(glyph, ui.ACCENT))
+            ui.set_glyph(b, glyph, "accent")
             b.setIconSize(QSize(24, 24))
             b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             b.setCheckable(True)
@@ -61,6 +61,14 @@ class MainWindow(QMainWindow):
             group.addButton(b)
             rl.addWidget(b, alignment=Qt.AlignHCenter)
         rl.addStretch()
+        self.b_theme = QToolButton()
+        self.b_theme.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.b_theme.setIconSize(QSize(22, 22))
+        self.b_theme.setFixedWidth(76)
+        self.b_theme.setCursor(Qt.PointingHandCursor)
+        self.b_theme.clicked.connect(self.toggle_theme)
+        rl.addWidget(self.b_theme, alignment=Qt.AlignHCenter)
+        self._theme_button()
 
         root = QWidget(objectName="Root")
         h = QHBoxLayout(root)
@@ -75,6 +83,18 @@ class MainWindow(QMainWindow):
         self.esc.setEnabled(False)  # only while full screen: elsewhere Esc belongs to the widgets
         if path:  # "Apri con PDFlex" or double click on a PDF
             self.editor.open(path)
+
+    def _theme_button(self):
+        dark = ui.THEME == "dark"
+        ui.set_glyph(self.b_theme, "sun" if dark else "moon", "muted")
+        self.b_theme.setText("Chiaro" if dark else "Scuro")
+        self.b_theme.setToolTip("Passa al tema chiaro" if dark else "Passa al tema scuro")
+
+    def toggle_theme(self):
+        name = "light" if ui.THEME == "dark" else "dark"
+        ui.apply_theme(QApplication.instance(), name)
+        ui.save_json("tema.json", {"tema": name})  # chosen once: no longer follows Windows
+        self._theme_button()
 
     def changeEvent(self, e):
         super().changeEvent(e)
@@ -113,7 +133,7 @@ def _show_error(exc_type, exc, tb):
 
 def setup(app: QApplication) -> None:
     app.setStyle("Fusion")
-    app.setStyleSheet(ui.stylesheet())
+    ui.apply_theme(app, ui.preferred_theme())
     app.setWindowIcon(ui.app_icon())
 
 

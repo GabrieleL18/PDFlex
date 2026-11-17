@@ -17,9 +17,10 @@ BLUE = (0.18, 0.44, 0.86)  # moved text
 PURPLE = (0.48, 0.31, 0.82)  # same words, different formatting
 OPACITY = 0.3
 SIDE_COLORS = {"delete": (RED, None), "insert": (None, GREEN), "replace": (RED, GREEN), "move": (BLUE, BLUE),
-               "format": (PURPLE, PURPLE)}  # (original, new version)
+               "format": (PURPLE, PURPLE), "image": (RED, GREEN)}  # (original, new version)
 KIND_TITLES = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato", "move": "Spostato",
-               "format": "Formattazione"}
+               "format": "Formattazione", "image": "Immagine"}
+IMAGE = "[immagine]"  # the "text" of an image in lists and exports
 FONT = "C:/Windows/Fonts/arial.ttf"
 
 
@@ -46,10 +47,15 @@ class Change:
         verb = "aggiunt" if self.kind == "insert" else "rimoss"
         return f"Pagina {n[0]} {verb}a" if len(n) == 1 else f"Pagine {', '.join(n)} {verb}e"
 
+    def image_text(self) -> str:
+        return "Immagine cambiata" if self.old and self.new else "Immagine aggiunta" if self.new else "Immagine rimossa"
+
     def label(self) -> str:
         def short(words):
             s = " ".join(w.text for w in words)
             return s if len(s) <= 60 else s[:59] + "…"
+        if self.kind == "image":
+            return f"{self.image_text()} (p. {(self.new or self.old)[0].page + 1})"
         if self.whole:
             return f"{self.pages_text()} per intero: {short(self.old or self.new)}"
         if self.kind == "delete":
@@ -120,6 +126,51 @@ def extract_words(doc: pymupdf.Document, ocr: bool = False, on_page=None) -> lis
         out += [Word(page.number, tuple(pymupdf.Rect(w[:4]) * page.rotation_matrix), w[4], st)
                 for w, st in zip(words, styles)]
     return out
+
+
+def extract_images(doc: pymupdf.Document, on_page=None) -> list[tuple[Word, bytes]]:
+    """(where, fingerprint) of each picture, in reading order. Two pictures with the same fingerprint are
+    the same picture. A picture covering most of the page is a scan: its text is compared, not its pixels."""
+    out = []
+    for page in doc:
+        if on_page:
+            on_page(page.number)
+        area = page.rect.width * page.rect.height
+        found = []
+        for info in page.get_image_info(hashes=True):
+            r = pymupdf.Rect(info["bbox"]) * page.rotation_matrix
+            if r.width < 8 or r.height < 8 or r.width * r.height > 0.8 * area:
+                continue  # specks and lines, or a scanned page
+            found.append((Word(page.number, tuple(r), IMAGE), info["digest"]))
+        out += sorted(found, key=lambda wd: (round(wd[0].rect[1]), wd[0].rect[0]))
+    return out
+
+
+def diff_images(old: list[tuple[Word, bytes]], new: list[tuple[Word, bytes]]) -> list[Change]:
+    """Pictures added, removed or replaced by another one; the same picture elsewhere is no change."""
+    sm = SequenceMatcher(None, [d for _, d in old], [d for _, d in new], autojunk=False)
+    out = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        for k in range(max(i2 - i1, j2 - j1)):
+            a = [old[i1 + k][0]] if i1 + k < i2 else []
+            b = [new[j1 + k][0]] if j1 + k < j2 else []
+            out.append(Change("image", a, b, a[0] if a else None, b[0] if b else None))
+    return out
+
+
+def merge_changes(text: list[Change], images: list[Change]) -> list[Change]:
+    """Picture changes slotted among the text ones by page and height, text order untouched."""
+    def at(c):
+        w = (c.new or c.old or [c.new_at or c.old_at])[0]
+        return (w.page, w.rect[1]) if w else (0, 0)
+    out, pending = [], sorted(images, key=at)
+    for c in text:
+        while pending and at(pending[0]) < at(c):
+            out.append(pending.pop(0))
+        out.append(c)
+    return out + pending
 
 
 def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
@@ -218,15 +269,21 @@ def _find_moves(keyed, key):
 TEXT_RED, TEXT_GREEN = "#B42318", "#1E7B45"
 
 
-def change_html(c: Change, color: str) -> str:
+def change_html(c: Change, color: str, red: str = TEXT_RED, green: str = TEXT_GREEN, muted: str = "#5B6675") -> str:
     """One row of the list: what kind of change and where, then the words themselves, coloured."""
+    muted = f"color:{muted};"
+    if c.kind == "image":
+        w = (c.new or c.old)[0]
+        size = f"{w.rect[2] - w.rect[0]:.0f} × {w.rect[3] - w.rect[1]:.0f} pt"
+        return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{c.image_text()}</span>'
+                f'<span style="{muted}"> &nbsp;pagina {w.page + 1} · {size}</span>')
+
     def words(ws, style):
         t = " ".join(w.text for w in ws)
         t = t if len(t) <= 160 else t[:159] + "…"
         return f'<span style="{style}">{html.escape(t)}</span>'
-    old = words(c.old, f"color:{TEXT_RED}; text-decoration:line-through;")
-    new = words(c.new, f"color:{TEXT_GREEN}; font-weight:600;")
-    muted = "color:#5B6675;"
+    old = words(c.old, f"color:{red}; text-decoration:line-through;")
+    new = words(c.new, f"color:{green}; font-weight:600;")
     page = (c.old or c.new)[0].page + 1
     if c.kind == "replace":
         body = f"{old} &nbsp;→&nbsp; {new}"
@@ -307,7 +364,8 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
     ws.title = "Modifiche"
     ws.append(["N.", "Tipo", "Pagina originale", "Pagina nuova", f"Testo in {old_name}", f"Testo in {new_name}"])
     names = KIND_TITLES
-    fills = {"delete": "FBE3E3", "insert": "E2F4E8", "replace": "FFF3D6", "move": "E1EAFB", "format": "ECE5F8"}
+    fills = {"delete": "FBE3E3", "insert": "E2F4E8", "replace": "FFF3D6", "move": "E1EAFB", "format": "ECE5F8",
+             "image": "FBE1EE"}
     for i, c in enumerate(changes, 1):
         ws.append([i, names[c.kind],
                    c.old[0].page + 1 if c.old else (c.old_at.page + 1 if c.old_at else None),
@@ -334,7 +392,8 @@ from pdflex import ui  # noqa: E402
 from pdflex.ui import DocView, button, info, warn  # noqa: E402
 
 KIND_NAMES = KIND_TITLES
-KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1"}
+KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1",
+               "image": "#C2357A"}
 HINT = "Trascina qui il PDF o clicca per sceglierlo"
 NO_OCR = ("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
           "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex.")
@@ -432,8 +491,8 @@ class CompareTab(QWidget):
             v = QVBoxLayout(w)
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(0)
-            label.setStyleSheet(f"background:#FFFFFF; padding: 8px 14px; border-bottom: 3px solid {color};"
-                                "font-weight: 600;")
+            label.setObjectName("Column")
+            label.setStyleSheet(f"border-bottom: 3px solid {color};")
             v.addWidget(label)
             v.addWidget(view)
             return w
@@ -449,7 +508,7 @@ class CompareTab(QWidget):
         self.kind_filter = QComboBox()
         for label, kind in (("Tutte le modifiche", ""), ("Solo aggiunte", "insert"), ("Solo rimozioni", "delete"),
                             ("Solo sostituzioni", "replace"), ("Solo testo spostato", "move"),
-                            ("Solo formattazione", "format")):
+                            ("Solo formattazione", "format"), ("Solo immagini", "image")):
             self.kind_filter.addItem(label, kind)
         self.kind_filter.currentIndexChanged.connect(self._apply_filter)
         self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
@@ -552,9 +611,12 @@ class CompareTab(QWidget):
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)  # OCR of a scan can take a while
         try:
-            with ui.progress(self, "Leggo il testo delle pagine...", old.page_count + new.page_count) as step:
+            n_old, n = old.page_count, old.page_count + new.page_count
+            with ui.progress(self, "Leggo testo e immagini delle pagine...", 2 * n) as step:
                 old_words = extract_words(old, ocr=True, on_page=step)
-                new_words = extract_words(new, ocr=True, on_page=lambda n: step(old.page_count + n))
+                new_words = extract_words(new, ocr=True, on_page=lambda i: step(n_old + i))
+                images = diff_images(extract_images(old, lambda i: step(n + i)),
+                                     extract_images(new, lambda i: step(n + n_old + i)))
         finally:
             QApplication.restoreOverrideCursor()
         empty = [Path(p).name for p, w in ((old_path, old_words), (new_path, new_words)) if not w]
@@ -562,7 +624,7 @@ class CompareTab(QWidget):
             info(self, NO_OCR.format(", ".join(empty)))
             return
         self.old_path, self.new_path = old_path, new_path
-        self.docs, self.words = (old, new), (old_words, new_words)
+        self.docs, self.words, self.images = (old, new), (old_words, new_words), images
         self.old_label.setText(f"Originale  {Path(old_path).name}")
         self.new_label.setText(f"Nuova versione  {Path(new_path).name}")
         self.stack.setCurrentIndex(1)
@@ -580,7 +642,8 @@ class CompareTab(QWidget):
             self.new_view.show_doc(self.docs[1])
             options = dict(ignore_case=self.ignore_case.isChecked(), ignore_punct=self.ignore_punct.isChecked(),
                            formatting=self.formatting.isChecked())
-            self.changes = ui.run_busy(self, "Confronto i testi...", lambda: diff_words(*self.words, **options))
+            text = ui.run_busy(self, "Confronto i testi...", lambda: diff_words(*self.words, **options))
+            self.changes = merge_changes(text, self.images)
         finally:
             QApplication.restoreOverrideCursor()
         counts = {k: sum(c.kind == k for c in self.changes) for k in KIND_NAMES}
@@ -593,12 +656,14 @@ class CompareTab(QWidget):
                                   else (self.old_view, self.docs[0], RED))
                 view.highlight([Word(pg, tuple(doc[pg].rect), "") for pg in c.whole], rgb, 0.08)
             item = QListWidgetItem(c.label())  # plain text: tooltips and screen readers
-            item.setData(Qt.UserRole + 1, change_html(c, KIND_COLORS[c.kind]))
+            item.setData(Qt.UserRole + 1, change_html(c, KIND_COLORS[c.kind], ui.color("text_red"),
+                                                      ui.color("text_green"), ui.color("muted")))
             self.list.addItem(item)
         if self.changes:
             parts = [f"{n} {word}" for n, word in ((counts["insert"], "aggiunte"), (counts["delete"], "rimozioni"),
                                                     (counts["replace"], "sostituzioni"), (counts["move"], "spostamenti"),
-                                                    (counts["format"], "di formattazione")) if n]
+                                                    (counts["format"], "di formattazione"),
+                                                    (counts["image"], "immagini")) if n]
             self.summary.setText(f"{len(self.changes)} modifiche: " + ", ".join(parts))
         else:
             self.summary.setText("Nessuna differenza nel testo")

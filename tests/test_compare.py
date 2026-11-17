@@ -175,3 +175,51 @@ def test_whole_page_found_when_pages_start_alike():
         return [Word(p, (0, 0, 1, 1), t) for p, text in enumerate(ps) for t in text.split()]
     [c] = diff_words(doc(pages), doc(pages[:3] + pages[4:]))
     assert c.kind == "delete" and c.whole == [3], " ".join(w.text for w in c.old)
+
+
+def _pic(page, rect, rgb):
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 16, 16), 0)
+    pix.set_rect(pix.irect, rgb)
+    page.insert_image(pymupdf.Rect(rect), pixmap=pix, keep_proportion=False)
+
+
+def test_images_added_removed_changed(tmp_path):
+    from pdflex.compare import diff_images, extract_images
+    def make(name, pics, scan=False):
+        d = pymupdf.open()
+        page = d.new_page()
+        page.insert_text((72, 60), "testo uguale")
+        for rect, rgb in pics:
+            _pic(page, rect, rgb)
+        if scan:  # a whole-page picture is a scan: not compared as a picture
+            _pic(page, page.rect, (250, 250, 250))
+        d.save(tmp_path / name)
+        return pymupdf.open(tmp_path / name)
+    red, blue, green = (220, 30, 30), (30, 30, 220), (30, 160, 30)
+    old = make("a.pdf", [((72, 100, 172, 200), red), ((72, 300, 172, 400), blue)], scan=True)
+    new = make("b.pdf", [((300, 100, 400, 200), red), ((72, 300, 172, 400), green), ((72, 500, 172, 600), blue)])
+    changes = diff_images(extract_images(old), extract_images(new))
+    # red only moved: no change. Blue is still there, further down: green is the one added
+    assert [c.image_text() for c in changes] == ["Immagine aggiunta"] and changes[0].new[0].rect[1] == 300
+    gone = diff_images(extract_images(new), extract_images(old))
+    assert [c.image_text() for c in gone] == ["Immagine rimossa"]
+
+
+def test_compare_tab_lists_image_changes(qapp, tmp_path):
+    from pdflex.compare import CompareTab
+    paths = []
+    for name, rgb in (("x.pdf", (220, 30, 30)), ("y.pdf", (30, 30, 220))):
+        d = pymupdf.open()
+        page = d.new_page()
+        page.insert_text((72, 60), "logo")
+        _pic(page, (72, 100, 172, 200), rgb)
+        d.save(tmp_path / name)
+        paths.append(str(tmp_path / name))
+    tab = CompareTab()
+    tab.load(*paths)
+    assert [c.kind for c in tab.changes] == ["image"]
+    assert "Immagine cambiata" in tab.list.item(0).data(256 + 1)
+    tab.kind_filter.setCurrentIndex(tab.kind_filter.findData("image"))
+    assert not tab.list.isRowHidden(0)
+    tab.export(str(tmp_path / "r.pdf"))
+    tab.export_xlsx(str(tmp_path / "r.xlsx"))
