@@ -149,3 +149,42 @@ def test_copy_paste_fields(tab):
     assert [f.page for f in made] == [1, 1] and made[0].rect[0] == pytest.approx(30)
     tab.undo()
     assert len(tab.fields) == 4
+
+
+def test_format_colour_alignment_from_the_panel(tab, tmp_path):
+    f = tab.add_field("text", 0, (10, 10, 200, 30))
+    tab._select(f)
+    tab.refresh()
+    pick = lambda combo, value: combo.setCurrentIndex(combo.findData(value))
+    pick(tab.p_fmt, "percent")
+    pick(tab.p_dec, 1)
+    tab.p_thousands.setChecked(False)
+    assert f.fmt == "percent|1|0" and tab.form.isRowVisible(tab.p_dec)
+    pick(tab.p_fmt, "date")  # a date makes it a "Data" field, with its layouts to choose from
+    assert f.kind == "date" and f.fmt == "date|dd/mm/yyyy" and tab.form.isRowVisible(tab.p_pattern)
+    assert tab.kind_label.text().startswith("Data")
+    pick(tab.p_pattern, "dd/mm/yy")
+    assert f.fmt == "date|dd/mm/yy"
+    pick(tab.p_fmt, "time")
+    assert f.fmt == "time|HH:MM"
+    pick(tab.p_fmt, "cf")
+    assert (f.kind, f.fmt) == ("text", "cf") and not tab.form.isRowVisible(tab.p_pattern)
+    tab._show_color("#336699")
+    tab._props_edited()
+    pick(tab.p_align, 1)
+    assert (f.color, f.align) == ("#336699", 1)
+    tab.undo()  # each step is one undo
+    assert tab.fields[0].align == 0 and tab.fields[0].color == "#336699"
+    out = tmp_path / "da_compilare.pdf"
+    tab.export(str(out))
+    got = load_fields(open_pdf(out))[0]
+    assert (got.fmt, got.color, got.default) == ("cf", "#336699", "")
+    assert tab.doc is not None and tab.path != str(out)  # the document being edited stays the same
+
+
+def test_export_refuses_the_file_being_edited(tab, monkeypatch):
+    from pdflex import editor
+    warned = []
+    monkeypatch.setattr(editor.QFileDialog, "getSaveFileName", lambda *a, **k: (tab.path, ""))
+    monkeypatch.setattr(editor, "warn", lambda parent, text: warned.append(text))
+    assert tab.ask_export() is False and "altro nome" in warned[0]

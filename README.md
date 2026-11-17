@@ -5,7 +5,8 @@ Programma Windows per creare moduli PDF compilabili, confrontare due versioni di
 ## Cosa fa
 
 - **Moduli**: disegna campi (testo, data, caselle, scelte, menu, firma) oppure premi *Rileva campi* per crearli da righe `____` e caselle vuote. Ci sono anche:
-  - formati (numero, importo in euro, email) e somme automatiche;
+  - formati (numero, importo, percentuale con decimali a scelta; data e ora; CAP, codice fiscale, telefono, email), somme automatiche, carattere, dimensione, colore e allineamento del testo;
+  - *Per compilazione*: salva una copia con i campi invisibili e vuoti, da far compilare a un altro programma;
   - allineamento di più campi (Ctrl+clic per selezionarli) e griglia magnetica;
   - ordine Tab trascinabile e annulla/ripeti (Ctrl+Z / Ctrl+Y);
   - anteprima con dati di esempio.

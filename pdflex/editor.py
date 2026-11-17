@@ -1,5 +1,6 @@
 import base64
 import copy
+import dataclasses
 import re
 import unicodedata
 from collections import Counter
@@ -11,7 +12,6 @@ import pymupdf
 from pdflex import open_pdf, write_atomic
 
 FIELD_KINDS = ("text", "multiline", "checkbox", "radio", "dropdown", "date", "signature")
-DATE_SCRIPT = 'AFDate_FormatEx("dd/mm/yyyy");'
 
 _TYPES = {
     "text": pymupdf.PDF_WIDGET_TYPE_TEXT,
@@ -35,11 +35,13 @@ class Field:
     font_size: float = 0
     options: list[str] = dc_field(default_factory=list)
     value: str = ""
-    fmt: str = ""  # "", "number", "amount", "email" (text fields)
+    fmt: str = ""  # see FORMATS; with options after "|": "number|2|1" (decimals, thousands), "date|dd/mm/yy"
     calc: list[str] = dc_field(default_factory=list)  # names of the fields this one sums
     comb: int = 0  # text split into this many boxes, one character each (codice fiscale); 0 = normal
     image: str = dc_field(default="", repr=False)  # kind "image": PNG as base64 (a hand-drawn signature)
     font: str = ""  # "" Helvetica, "TiRo" Times, "Cour" Courier (same width for every letter)
+    color: str = ""  # text colour "#rrggbb"; "" black
+    align: int = 0  # 0 left, 1 centre, 2 right
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
@@ -71,15 +73,99 @@ def _xref_ref(doc, xref, key):
     return int(v.split()[0]) if t == "xref" else 0
 
 
-FORMATS = {"": "Testo libero", "number": "Numero", "amount": "Importo in euro", "email": "Email"}
+FORMATS = {"": "Testo libero", "number": "Numero", "amount": "Importo in euro", "percent": "Percentuale",
+           "date": "Data", "time": "Ora", "cap": "CAP", "cf": "Codice fiscale", "phone": "Telefono", "email": "Email"}
+NUMERIC = ("number", "amount", "percent")
+DATE_PATTERNS = {"date": {"dd/mm/yyyy": "gg/mm/aaaa", "dd/mm/yy": "gg/mm/aa", "mm/yyyy": "mm/aaaa",
+                          "dd/mm/yyyy HH:MM": "gg/mm/aaaa hh:mm"},
+                 "time": {"HH:MM": "hh:mm", "HH:MM:ss": "hh:mm:ss"}}
 FONTS = {"": "Helvetica", "TiRo": "Times", "Cour": "Courier (larghezza fissa)"}
-_FMT_JS = {  # (format, keystroke, validate); 2 decimals, Italian separators (1.234,56)
-    "number": ('AFNumber_Format(2, 2, 0, 0, "", true);', 'AFNumber_Keystroke(2, 2, 0, 0, "", true);', None),
-    # € stays a JS escape: viewers misread a raw UTF-8 euro sign inside scripts
-    "amount": ('AFNumber_Format(2, 2, 0, 0, "\\u20AC ", true);', 'AFNumber_Keystroke(2, 2, 0, 0, "", true);', None),
-    "email": (None, None, 'if (event.value && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(event.value)) '
-                          '{ app.alert("Indirizzo email non valido"); event.rc = false; }'),
-}
+ALIGN = {0: "Sinistra", 1: "Centro", 2: "Destra"}
+# the scripts are the standard Acrobat ones (AFNumber_Format...), the ones every PDF form library recognises
+_EMAIL_V = ('if (event.value && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(event.value)) '
+            '{ app.alert("Indirizzo email non valido"); event.rc = false; }')
+_CF_V = ('if (event.value && !/^[A-Z]{6}[0-9LMNPQRSTUV]{2}[A-Z][0-9LMNPQRSTUV]{2}[A-Z][0-9LMNPQRSTUV]{3}[A-Z]$/i'
+         '.test(event.value)) { app.alert("Codice fiscale non valido"); event.rc = false; }')
+_UPPER_K = "event.change = event.change.toUpperCase();"
+_PHONE_K = "event.rc = /^[0-9 +.\\/-]*$/.test(event.change);"
+_CAP_K = 'AFSpecial_KeystrokeEx("99999");'
+
+
+def fmt_parts(fmt: str, kind: str = "text") -> tuple[str, list[str]]:
+    """("number", ["2", "1"]) from "number|2|1". A date field without a format is dd/mm/yyyy."""
+    base, *args = fmt.split("|")
+    if kind == "date" and base not in DATE_PATTERNS:
+        return "date", ["dd/mm/yyyy"]
+    if base in DATE_PATTERNS and not args:
+        args = [next(iter(DATE_PATTERNS[base]))]
+    if base in NUMERIC:
+        args = (args + ["2", "1"][len(args):])[:2]  # 2 decimals, thousands separator: "number" alone
+    return base, args
+
+
+def fmt_label(fmt: str, kind: str = "text") -> str:
+    base, args = fmt_parts(fmt, kind)
+    if base in NUMERIC:
+        return f"{FORMATS[base]}, {args[0]} decimali"
+    if base in DATE_PATTERNS:
+        return DATE_PATTERNS[base].get(args[0], args[0])
+    return FORMATS.get(base, "")
+
+
+def _fmt_js(fmt: str, kind: str = "text") -> tuple:
+    """(format, keystroke, validate) JavaScript for a field's format; Italian separators (1.234,56)."""
+    base, args = fmt_parts(fmt, kind)
+    if base in NUMERIC:
+        dec, sep = int(args[0]), 2 if args[1] != "0" else 3  # 2: 1.234,56  3: 1234,56
+        if base == "percent":
+            return f"AFPercent_Format({dec}, {sep});", f"AFPercent_Keystroke({dec}, {sep});", None
+        # € stays a JS escape: viewers misread a raw UTF-8 euro sign inside scripts
+        cur = '"\\u20AC "' if base == "amount" else '""'
+        return (f"AFNumber_Format({dec}, {sep}, 0, 0, {cur}, true);",
+                f'AFNumber_Keystroke({dec}, {sep}, 0, 0, "", true);', None)
+    if base in DATE_PATTERNS:
+        fn = "AFDate" if base == "date" else "AFTime"
+        return f'{fn}_FormatEx("{args[0]}");', f'{fn}_KeystrokeEx("{args[0]}");', None
+    return {"cap": (None, _CAP_K, None), "cf": (None, _UPPER_K, _CF_V), "phone": (None, _PHONE_K, None),
+            "email": (None, None, _EMAIL_V)}.get(base, (None, None, None))
+
+
+def _fmt_from_js(js: dict) -> str:
+    """The format back from the scripts, PDFlex's own or other programs' (Acrobat writes the same ones)."""
+    f, k, v = js.get("F", ""), js.get("K", ""), js.get("V", "")
+    m = re.search(r'AFNumber_Format\(\s*(\d+)\s*,\s*(\d+)\s*,[^,]*,[^,]*,\s*"([^"]*)"', f)
+    if m:
+        dec, sep, cur = m.groups()
+        return f"{'amount' if 'u20AC' in cur or '€' in cur else 'number'}|{dec}|{0 if sep in '13' else 1}"
+    m = re.search(r"AFPercent_Format\(\s*(\d+)\s*,\s*(\d+)", f)
+    if m:
+        return f"percent|{m.group(1)}|{0 if m.group(2) in '13' else 1}"
+    m = re.search(r'AF(Date|Time)_FormatEx\(\s*"([^"]*)"', f)
+    if m:
+        return f"{m.group(1).lower()}|{m.group(2)}"
+    if "AFDate_Format" in f:  # the older numbered form: keep it a date
+        return "date|dd/mm/yyyy"
+    if _CAP_K in k:
+        return "cap"
+    if "Codice fiscale" in v:
+        return "cf"
+    if _PHONE_K in k:
+        return "phone"
+    if "app.alert" in v and "@" in v:
+        return "email"
+    return ""
+
+
+def _hex(rgb) -> str:
+    """"#rrggbb" from PyMuPDF's 0..1 floats; "" for black (the default)."""
+    rgb = list(rgb or [])[:3]
+    if len(rgb) == 1:  # grey
+        rgb *= 3
+    return "" if len(rgb) != 3 or not any(rgb) else "#" + "".join(f"{round(c * 255):02x}" for c in rgb)
+
+
+def _rgb(color: str) -> tuple:
+    return tuple(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)) if color else (0, 0, 0)
 
 
 def _field_js(doc, w) -> dict[str, str]:
@@ -102,10 +188,6 @@ def _field_js(doc, w) -> dict[str, str]:
     return out
 
 
-def _is_date(doc, w) -> bool:
-    return "AFDate" in _field_js(doc, w).get("F", "")
-
-
 def load_fields(doc: pymupdf.Document) -> list[Field]:
     out = []
     for page in doc:
@@ -114,15 +196,19 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
             if kind is None:
                 continue  # list box / push button: not editable here, kept untouched on save
             js = _field_js(doc, w) if kind == "text" else {}
+            fmt = _fmt_from_js(js)
             if kind == "text":
-                if "AFDate" in js.get("F", ""):
+                if fmt.split("|")[0] in DATE_PATTERNS:
                     kind = "date"
                 elif w.field_flags & pymupdf.PDF_TX_FIELD_IS_MULTILINE:
                     kind = "multiline"
             f = Field(kind, page.number, tuple(w.rect), w.field_name or "",
                       required=bool(w.field_flags & pymupdf.PDF_FIELD_IS_REQUIRED),
                       font_size=w.text_fontsize or 0, font=w.text_font if w.text_font in FONTS else "",
+                      color=_hex(w.text_color), fmt=fmt,
                       xref=w.xref, parent=_xref_ref(doc, w.xref, "Parent"))
+            q = _inherited(doc, f, "Q")
+            f.align = int(q) if q in ("1", "2") else 0
             if kind in ("checkbox", "radio"):
                 on = w.on_state()
                 f.value = on if kind == "radio" else ""
@@ -134,10 +220,6 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
                 f.default = w.field_value or ""
             if kind == "text" and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB:
                 f.comb = w.text_maxlen or 0
-            if "AFNumber_Format" in js.get("F", ""):
-                f.fmt = "amount" if "u20AC" in js["F"] else "number"
-            elif "app.alert" in js.get("V", "") and "@" in js["V"]:
-                f.fmt = "email"
             m = re.search(r"AFSimple_Calculate\(\s*\"SUM\"\s*,\s*new Array\((.*?)\)", js.get("C", ""))
             if m:
                 f.calc = re.findall(r'"([^"]+)"', m.group(1))
@@ -188,19 +270,18 @@ def _new_widget(f: Field) -> pymupdf.Widget:
     w.rect = pymupdf.Rect(f.rect)
     w.text_fontsize = f.font_size
     w.text_font = f.font or "Helv"
+    w.text_color = _rgb(f.color)
     w.border_width = 1
     w.border_color = (0.6, 0.6, 0.6)  # visible box for whoever fills the form
     if f.required:
         w.field_flags |= pymupdf.PDF_FIELD_IS_REQUIRED
     if f.kind == "multiline":
         w.field_flags |= pymupdf.PDF_TX_FIELD_IS_MULTILINE
-    if f.kind == "date":
-        w.script_format = DATE_SCRIPT
     if f.kind == "text" and f.comb:
         w.text_maxlen = f.comb
         w.field_flags |= pymupdf.PDF_TX_FIELD_IS_COMB
     js = _scripts(f)
-    if f.kind in ("text", "multiline") and f.fmt:
+    if f.kind in ("text", "multiline", "date"):
         w.script_format, w.script_stroke, w.script_change = js["F"], js["K"], js["V"]
     if f.calc:
         w.script_calc = js["C"]
@@ -229,7 +310,7 @@ def _set_inherited(doc, f: Field, key: str, value: str) -> None:
 
 def _scripts(f: Field) -> dict[str, str | None]:
     """The field's JavaScript by action key (None: no script), as PDFlex writes it."""
-    fmt, stroke, validate = _FMT_JS.get(f.fmt, (None, None, None))
+    fmt, stroke, validate = _fmt_js(f.fmt, f.kind) if f.kind in ("text", "multiline", "date") else (None,) * 3
     calc = None
     if f.calc:
         calc = "AFSimple_Calculate(\"SUM\", new Array(" + ", ".join(f'"{n}"' for n in f.calc) + "));"
@@ -271,8 +352,12 @@ def _update_widget(doc, f: Field) -> None:
         _set_inherited(doc, f, "Ff", str(flags))
     if f.comb != o.comb:
         _set_inherited(doc, f, "MaxLen", str(f.comb) if f.comb else "null")
-    if f.font_size != o.font_size or f.font != o.font:
+    if f.font_size != o.font_size or f.font != o.font or f.color != o.color:
         da = _inherited(doc, f, "DA") or "0 0 0 rg /Helv 0 Tf"
+        if f.color != o.color:
+            ink = " ".join(f"{c:g}" for c in _rgb(f.color)) + " rg"
+            da, n = re.subn(r"(?:[\d.]+\s+){2}[\d.]+\s+rg|[\d.]+\s+g(?=\s)", ink, da, count=1)
+            da = da if n else f"{ink} {da}"
         if f.font_size != o.font_size:
             da = re.sub(r"[\d.]+ Tf", f"{f.font_size:g} Tf", da)
         if f.font != o.font:
@@ -280,6 +365,10 @@ def _update_widget(doc, f: Field) -> None:
         _set_inherited(doc, f, "DA", pymupdf.get_pdf_str(da))
     if f.options != o.options:
         _set_inherited(doc, f, "Opt", "[" + "".join(pymupdf.get_pdf_str(x) for x in f.options) + "]")
+    if f.align != o.align:
+        _set_inherited(doc, f, "Q", str(f.align))
+    if f.default != o.default and not f.default and f.kind not in ("checkbox", "radio"):
+        _set_inherited(doc, f, "V", "()")  # PyMuPDF skips an empty value: the old one would stay
     page = doc[f.page]  # keep the page alive: the widget only holds a weak reference to it
     w = page.load_widget(f.xref)
     if f.rect != o.rect:
@@ -287,25 +376,44 @@ def _update_widget(doc, f: Field) -> None:
     if f.default != o.default:
         if f.kind == "checkbox":
             w.field_value = f.default == "1"
-        elif f.kind != "radio":
+        elif f.kind != "radio" and f.default:
             w.field_value = f.default
-    # update() rewrites the widget's actions from what PyMuPDF read, and it reads none of them:
-    # put them back, or moving a field made in another program would wipe its format script
-    saved = {}
-    for key in ("AA", "A"):
-        t, v = doc.xref_get_key(f.xref, key)
-        saved[key] = (t, v, doc.xref_object(int(v.split()[0])) if t == "xref" else None)
-    w.update()
-    for key, (t, v, obj) in saved.items():
-        if t == "dict":
-            doc.xref_set_key(f.xref, key, v)
-        elif t == "xref":
-            doc.update_object(int(v.split()[0]), obj)
-            doc.xref_set_key(f.xref, key, v)
+    _safe_update(doc, w)
     changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt), "V": (f.fmt, o.fmt),
                                    "C": (f.calc, o.calc)}.items() if a != b]
     if changed:
         _set_scripts(doc, f, changed)
+
+
+def _safe_update(doc, w) -> None:
+    """w.update(), keeping the widget's own actions. update() rewrites them from what PyMuPDF read, and it
+    reads none of them: without this, moving a field made in another program would wipe its format script."""
+    saved = {}
+    for key in ("AA", "A"):
+        t, v = doc.xref_get_key(w.xref, key)
+        saved[key] = (t, v, doc.xref_object(int(v.split()[0])) if t == "xref" else None)
+    w.update()
+    for key, (t, v, obj) in saved.items():
+        if t == "dict":
+            doc.xref_set_key(w.xref, key, v)
+        elif t == "xref":
+            doc.update_object(int(v.split()[0]), obj)
+            doc.xref_set_key(w.xref, key, v)
+
+
+def _hide_fields(doc) -> None:
+    """No border, no background: on paper the form looks as if it had no fields. They are all still there,
+    names, formats, fonts included, for the program that fills them in."""
+    for page in doc:
+        for w in list(page.widgets()):
+            if w.field_type not in _TYPES.values():
+                continue
+            for key in ("MK/BC", "MK/BG"):
+                if doc.xref_get_key(w.xref, key)[0] != "null":
+                    doc.xref_set_key(w.xref, key, "null")
+            w = page.load_widget(w.xref)
+            w.border_width, w.border_color, w.fill_color = 0, None, None
+            _safe_update(doc, w)
 
 
 def _set_radio_state(doc, xref, old, new, checked, was_checked):
@@ -321,8 +429,11 @@ def _set_radio_state(doc, xref, old, new, checked, was_checked):
         doc.xref_set_key(parent, "V", "/Off")
 
 
-def build_pdf(src_path, fields: list[Field]) -> pymupdf.Document:
+def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Document:
+    """The form with these fields. blank: for a program that fills it in later, fields empty and invisible."""
     _check_names(fields)
+    if blank:
+        fields = [dataclasses.replace(f, default="") for f in fields]
     doc = open_pdf(src_path)
     keep = {f.xref for f in fields if f.xref}
     for page in doc:
@@ -346,13 +457,20 @@ def build_pdf(src_path, fields: list[Field]) -> pymupdf.Document:
         if f.kind == "image":  # not a field: the picture becomes part of the page
             doc[f.page].insert_image(pymupdf.Rect(f.rect), stream=base64.b64decode(f.image), keep_proportion=True)
             continue
-        annot = doc[f.page].add_widget(_new_widget(f))
+        page = doc[f.page]
+        annot = page.add_widget(_new_widget(f))
         placed[id(f)] = annot.xref
+        if f.align:  # PyMuPDF has no setting for it: written into the field, then the look redrawn
+            _set_inherited(doc, dataclasses.replace(f, xref=annot.xref, parent=_xref_ref(doc, annot.xref, "Parent")),
+                           "Q", str(f.align))
+            _safe_update(doc, page.load_widget(annot.xref))
         if f.kind == "radio":
             # ponytail: PyMuPDF 2.1 names every new radio "on" state /None, so all buttons in a group
             # act as one. Rename the state to the button's value; drop when PyMuPDF fixes it.
             _set_radio_state(doc, annot.xref, "None", clean_value(f.value), f.default == "1", False)
     _apply_tab_order(doc, [(f.page, placed[id(f)]) for f in order if id(f) in placed])
+    if blank:
+        _hide_fields(doc)
     return doc
 
 
@@ -433,12 +551,26 @@ def _sample_text(f_name: str, multiline: bool) -> str:
     return "Testo di esempio su\npiù righe" if multiline else "Testo di esempio"
 
 
+def sample_value(fmt: str, name: str, multiline: bool = False) -> str:
+    """An example already written as the format shows it (PyMuPDF does not run the format scripts)."""
+    from datetime import datetime
+    base, args = fmt_parts(fmt)
+    if base in NUMERIC:
+        n = 12.5 if base == "percent" else 1234.5
+        s = f"{n:,.{int(args[0])}f}".replace(",", " ").replace(".", ",").replace(" ", "." if args[1] != "0" else "")
+        return {"amount": "€ " + s, "percent": s + "%"}.get(base, s)
+    if base in DATE_PATTERNS:
+        py = {"dd": "%d", "mm": "%m", "yyyy": "%Y", "yy": "%y", "HH": "%H", "MM": "%M", "ss": "%S"}
+        return datetime.now().strftime(re.sub(r"yyyy|yy|dd|mm|HH|MM|ss", lambda m: py[m.group()], args[0]))
+    return {"cap": "00100", "cf": "RSSMRA80A01H501U", "phone": "333 123 4567",
+            "email": "mario.rossi@esempio.it"}.get(base) or _sample_text(name, multiline)
+
+
 def fill_sample(doc: pymupdf.Document) -> None:
     """Fill the empty text fields and menus with a plausible example, for the preview.
 
     Check boxes and choices stay as they start (their initial value): ticking them all
     made the preview contradict what was set in "Selezionata all'apertura"."""
-    from datetime import date
     for page in doc:
         for w in page.widgets():
             t = w.field_type
@@ -448,8 +580,7 @@ def fill_sample(doc: pymupdf.Document) -> None:
                     n = w.text_maxlen
                     w.field_value = "RSSMRA80A01H501U"[:n] if "fisc" in (w.field_name or "") else ("1234567890" * 10)[:n]
                 else:
-                    w.field_value = (f"{date.today():%d/%m/%Y}" if _is_date(doc, w)
-                                     else _sample_text(w.field_name or "", multiline))
+                    w.field_value = sample_value(_fmt_from_js(_field_js(doc, w)), w.field_name or "", multiline)
             elif t == pymupdf.PDF_WIDGET_TYPE_COMBOBOX and not w.field_value and w.choice_values:
                 c = w.choice_values[0]
                 w.field_value = c if isinstance(c, str) else c[0]
@@ -459,7 +590,7 @@ def fill_sample(doc: pymupdf.Document) -> None:
 
 
 _BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "comb", "image",
-               "font")
+               "font", "color", "align")
 
 
 def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
@@ -491,8 +622,8 @@ def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dic
     return out
 
 
-def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | Path) -> None:
-    doc = build_pdf(src_path, fields)
+def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | Path, blank: bool = False) -> None:
+    doc = build_pdf(src_path, fields, blank)
     data = doc.tobytes(garbage=3, deflate=True)
     doc.close()
     write_atomic(out_path, data)  # the original is untouched until the new file is complete
@@ -615,8 +746,10 @@ class FieldItem(QGraphicsRectItem):
             parts.append(f"«{f.default}»")
         if f.kind in ("checkbox", "radio") and f.default == "1":
             parts.append("selezionata")
-        if f.fmt:
-            parts.append(FORMATS[f.fmt])
+        if f.fmt or f.kind == "date":
+            parts.append(fmt_label(f.fmt, f.kind))
+        if f.align:
+            parts.append({1: "centrato", 2: "a destra"}[f.align])
         if f.calc:
             parts.append("somma di " + " + ".join(f.calc))
         if f.comb:
@@ -975,6 +1108,9 @@ class EditorTab(QWidget):
         bl.setContentsMargins(14, 10, 14, 10)
         self.b_open = button("Apri", "open", tip="Apri un PDF (Ctrl+O)")
         self.b_save = button("Salva con nome", "save", "Primary", "Salva il modulo con i campi (Ctrl+S)")
+        self.b_export = button("Per compilazione", "export", tip="Salva una copia con i campi invisibili e vuoti, "
+                               "da far compilare a un altro programma (Ctrl+Maiusc+S)")
+        self.b_export.clicked.connect(self.ask_export)
         self.b_list = button("Elenco campi", "list", tip="Mostra o nascondi l'elenco di tutti i campi")
         self.b_list.setCheckable(True)
         self.b_preview = button("Anteprima", "eye", tip="Vedi il modulo compilato con dati di esempio")
@@ -1003,7 +1139,7 @@ class EditorTab(QWidget):
         self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
         self.b_undo.clicked.connect(self.undo)
         self.b_redo.clicked.connect(self.redo)
-        for w in (self.b_open, self.b_save, self.b_undo, self.b_redo, self.b_close):
+        for w in (self.b_open, self.b_save, self.b_export, self.b_undo, self.b_redo, self.b_close):
             bl.addWidget(w)
         bl.addWidget(self.file_label, 1)
         for w in (self.b_list, self.b_preview):
@@ -1108,8 +1244,19 @@ class EditorTab(QWidget):
             self.p_fmt.addItem(label, key)
         for key, label in FONTS.items():
             self.p_font.addItem(label, key)
+        self.p_dec = QComboBox()
+        for n in range(5):
+            self.p_dec.addItem(str(n), n)
+        self.p_thousands = Toggle("Separatore delle migliaia (1.234)")
+        self.p_pattern = QComboBox()  # date or time layout, filled for the format in use
+        self.p_align = QComboBox()
+        for key, label in ALIGN.items():
+            self.p_align.addItem(label, key)
+        self.p_color = button("Nero", None, tip="Colore del testo")
+        self.p_color.setProperty("value", "")
+        self.p_color.clicked.connect(self._pick_color)
         self.p_font.setToolTip("Courier dà a ogni lettera la stessa larghezza: utile per codici e caselle")
-        for c in (self.p_fmt, self.p_font):  # the panel can be narrowed: combos follow, never cut it
+        for c in (self.p_fmt, self.p_font, self.p_pattern, self.p_align):  # narrow panel: combos follow
             c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             c.setMinimumContentsLength(6)
         self.p_calc.setPlaceholderText("es. importo_1, importo_2")
@@ -1127,16 +1274,22 @@ class EditorTab(QWidget):
         form.addRow("Opzioni, una per riga", self.p_options)
         form.addRow("Valore di questa scelta", self.p_value)
         form.addRow("Formato", self.p_fmt)
+        form.addRow("Decimali", self.p_dec)
+        form.addRow(self.p_thousands)
+        form.addRow("Come si scrive", self.p_pattern)
         form.addRow("Somma dei campi (facoltativo)", self.p_calc)
         form.addRow("Carattere", self.p_font)
         form.addRow("Dimensione testo (pt)", self.p_size)
+        form.addRow("Colore del testo", self.p_color)
+        form.addRow("Allineamento", self.p_align)
         form.addRow("Caselle, una lettera ciascuna", self.p_comb)
         form.addRow(self.p_checked)
         form.addRow(self.p_required)
         for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc, self.p_comb):
             w.editingFinished.connect(self._props_edited)
-        self.p_fmt.currentIndexChanged.connect(self._props_edited)
-        self.p_font.currentIndexChanged.connect(self._props_edited)
+        for c in (self.p_fmt, self.p_font, self.p_dec, self.p_pattern, self.p_align):
+            c.currentIndexChanged.connect(self._props_edited)
+        self.p_thousands.toggled.connect(self._props_edited)
         self.p_required.toggled.connect(self._props_edited)
         self.p_checked.toggled.connect(self._props_edited)
         self.p_options.textChanged.connect(self._props_edited)
@@ -1202,6 +1355,7 @@ class EditorTab(QWidget):
         QShortcut(QKeySequence.Paste, self, self.paste)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self, self.ask_export)
         QShortcut(QKeySequence("Ctrl+W"), self, self.close_doc)
         QShortcut(QKeySequence.Undo, self, self.undo)
         QShortcut(QKeySequence.Redo, self, self.redo)  # Ctrl+Y and Ctrl+Shift+Z (a second Ctrl+Y made both dead)
@@ -1309,6 +1463,32 @@ class EditorTab(QWidget):
             warn(self, f"Salvataggio non riuscito: {e}")
             return False
         return True
+
+    def ask_export(self) -> bool:
+        """A copy for another program to fill in: fields invisible and empty; this document stays as it is."""
+        if not self.doc:
+            return False
+        self._props_edited()
+        p = Path(self.path)
+        default = str(p.with_name(p.stem.removesuffix("_modulo") + "_da_compilare.pdf"))
+        path, _ = QFileDialog.getSaveFileName(self, "Salva per compilazione esterna", default, "PDF (*.pdf)")
+        if not path:
+            return False
+        if Path(path).resolve() == p.resolve():
+            warn(self, "Scegli un altro nome: questo è il file che stai modificando, "
+                       "e perderebbe bordi e valori iniziali.")
+            return False
+        try:
+            self.export(path)
+        except (ValueError, OSError) as e:
+            warn(self, f"Salvataggio non riuscito: {e}")
+            return False
+        info(self, f"Salvato in {path}.\nI campi sono invisibili e vuoti, con nomi, formati e caratteri: "
+                   "pronti per essere compilati da un altro programma.")
+        return True
+
+    def export(self, path: str) -> None:
+        save_with_fields(self.path, self.fields, path, blank=True)
 
     def save(self, path: str) -> None:
         self.doc.close()  # Windows will not replace a file that is still open
@@ -1693,7 +1873,8 @@ class EditorTab(QWidget):
         self.scene.clear()
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
-        for w in (self.b_save, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list, self.b_preview,
+        for w in (self.b_save, self.b_export, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list,
+                  self.b_preview,
                   self.b_detect, self.b_sign):
             w.setEnabled(has)
         for w in (self.b_close, self.zoom_label):
@@ -1814,9 +1995,7 @@ class EditorTab(QWidget):
             self.kind_label.setText("Seleziona un campo sulla pagina per modificarlo.")
             self.kind_label.setStyleSheet("")
             return
-        self.kind_label.setText(f"{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
-        self.kind_label.setStyleSheet(f"color: white; background: {KIND_COLORS[f.kind]}; border-radius: 6px;"
-                                      "padding: 4px 8px; font-weight: 600;")
+        self._kind_label(f)
         self._loading = True
         self.p_name.setText(f.name)
         self.p_required.setChecked(f.required)
@@ -1825,18 +2004,65 @@ class EditorTab(QWidget):
         self.p_size.setText(str(int(f.font_size)) if f.font_size else "")
         self.p_options.setPlainText("\n".join(f.options))
         self.p_value.setText(f.value)
-        self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(f.fmt), 0))
+        base, args = fmt_parts(f.fmt, f.kind)
+        self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(base), 0))
+        if base in NUMERIC:
+            self.p_dec.setCurrentIndex(int(args[0]))
+            self.p_thousands.setChecked(args[1] != "0")
         self.p_font.setCurrentIndex(max(self.p_font.findData(f.font), 0))
+        self.p_align.setCurrentIndex(max(self.p_align.findData(f.align), 0))
+        self._show_color(f.color)
         self.p_calc.setText(", ".join(f.calc))
         self.p_comb.setText(str(f.comb) if f.comb else "")
         self._update_rows(f)
         self._loading = False
 
+    def _kind_label(self, f: Field):
+        self.kind_label.setText(f"{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
+        self.kind_label.setStyleSheet(f"color: white; background: {KIND_COLORS[f.kind]}; border-radius: 6px;"
+                                      "padding: 4px 8px; font-weight: 600;")
+
+    def _show_color(self, color: str):
+        self.p_color.setProperty("value", color)
+        self.p_color.setText(color.upper() if color else "Nero")
+        self.p_color.setIcon(dot(color or "#000000"))
+
+    def _pick_color(self):
+        from PySide6.QtWidgets import QColorDialog
+        chosen = QColorDialog.getColor(QColor(self.p_color.property("value") or "#000000"), self, "Colore del testo")
+        if chosen.isValid():
+            self._show_color("" if chosen.name() == "#000000" else chosen.name())
+            self._props_edited()
+
     def _update_rows(self, f: Field):
         k = f.kind
+        text_like = k in ("text", "multiline", "date", "dropdown")
+        for w in (self.p_color, self.p_align):
+            self.form.setRowVisible(w, text_like)
+        base, args = fmt_parts(f.fmt, k)
+        # the formats this kind of field can take: a long text is no date
+        allowed = [b for b in FORMATS if k != "multiline" or b in ("", "email")]
+        if [self.p_fmt.itemData(i) for i in range(self.p_fmt.count())] != allowed:
+            self.p_fmt.blockSignals(True)
+            self.p_fmt.clear()
+            for b in allowed:
+                self.p_fmt.addItem(FORMATS[b], b)
+            self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(base), 0))
+            self.p_fmt.blockSignals(False)
+        self.form.setRowVisible(self.p_dec, k != "multiline" and base in NUMERIC)
+        self.form.setRowVisible(self.p_thousands, k != "multiline" and base in NUMERIC)
+        self.form.setRowVisible(self.p_pattern, base in DATE_PATTERNS)
+        if base in DATE_PATTERNS:
+            self.p_pattern.blockSignals(True)
+            self.p_pattern.clear()
+            for pattern, label in DATE_PATTERNS[base].items():
+                self.p_pattern.addItem(label, pattern)
+            self.p_pattern.setCurrentIndex(max(self.p_pattern.findData(args[0]), 0))
+            self.p_pattern.blockSignals(False)
         if k == "image":
             for w in (self.p_default, self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required,
-                      self.p_fmt, self.p_calc, self.p_comb, self.p_font):
+                      self.p_fmt, self.p_calc, self.p_comb, self.p_font, self.p_dec, self.p_thousands,
+                      self.p_pattern):
                 self.form.setRowVisible(w, False)
             self.form.labelForField(self.p_name).setText("Nome")
             return
@@ -1847,11 +2073,12 @@ class EditorTab(QWidget):
         self.form.setRowVisible(self.p_options, k == "dropdown")
         self.form.setRowVisible(self.p_value, k == "radio")
         self.form.setRowVisible(self.p_required, k != "signature")
-        self.form.setRowVisible(self.p_fmt, k in ("text", "multiline"))
-        self.form.setRowVisible(self.p_calc, k == "text" and f.fmt in ("number", "amount"))
+        self.form.setRowVisible(self.p_fmt, k in ("text", "multiline", "date"))
+        self.form.setRowVisible(self.p_calc, k == "text" and base in ("number", "amount"))
         self.form.setRowVisible(self.p_comb, k == "text")
         self.form.labelForField(self.p_name).setText("Nome del gruppo" if k == "radio" else "Nome del campo")
-        self.p_default.setPlaceholderText("gg/mm/aaaa" if k == "date" else "Una delle opzioni" if k == "dropdown"
+        self.p_default.setPlaceholderText(sample_value(f.fmt if k != "date" else f"{base}|{args[0]}", "")
+                                          if base and base != "email" else "Una delle opzioni" if k == "dropdown"
                                           else "Vuoto")
 
     def _props_edited(self, *_):
@@ -1859,8 +2086,7 @@ class EditorTab(QWidget):
         if not f or self._loading:
             return
         snapshot = copy.deepcopy(self.fields)
-        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default, f.fmt, list(f.calc), f.comb,
-                  f.font)
+        before = copy.deepcopy(f)
         new_name = self.p_name.text().strip()
         if f.kind == "radio" and new_name != f.name:  # renaming the group renames all its buttons
             for o in self.fields:
@@ -1870,12 +2096,23 @@ class EditorTab(QWidget):
         f.required = self.p_required.isChecked()
         f.font_size = float(self.p_size.text() or 0)
         f.options = [o.strip() for o in self.p_options.toPlainText().splitlines() if o.strip()]
-        if f.kind in ("text", "multiline"):
-            f.fmt = self.p_fmt.currentData() or ""
+        if f.kind in ("text", "multiline", "date"):
+            base = self.p_fmt.currentData() or ""
+            if base in NUMERIC:
+                f.fmt = f"{base}|{self.p_dec.currentData()}|{1 if self.p_thousands.isChecked() else 0}"
+            elif base in DATE_PATTERNS:
+                pattern = self.p_pattern.currentData()  # the list may still hold the other kind's layouts
+                f.fmt = f"{base}|{pattern if pattern in DATE_PATTERNS[base] else next(iter(DATE_PATTERNS[base]))}"
+            else:
+                f.fmt = base
+            if f.kind != "multiline":  # a date or time is a "Data" field, the rest a "Testo" field
+                f.kind = "date" if base in DATE_PATTERNS else "text"
         if f.kind in ("text", "multiline", "date", "dropdown"):
             f.font = self.p_font.currentData() or ""
+            f.color = self.p_color.property("value") or ""
+            f.align = self.p_align.currentData() or 0
         f.calc = ([n.strip() for n in self.p_calc.text().split(",") if n.strip()]
-                  if f.kind == "text" and f.fmt in ("number", "amount") else [])
+                  if f.kind == "text" and fmt_parts(f.fmt)[0] in ("number", "amount") else [])
         f.comb = int(self.p_comb.text() or 0) if f.kind == "text" else 0
         if f.kind == "radio":
             f.value = clean_value(self.p_value.text())
@@ -1893,7 +2130,9 @@ class EditorTab(QWidget):
                 f.default = next((o for o in f.options if o.casefold() == f.default.strip().casefold()), f.default)
                 if self.p_default.text() != f.default:
                     self.p_default.setText(f.default)
-        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default, f.fmt, f.calc, f.comb, f.font):
+        if before != f:
+            if before.kind != f.kind:
+                self._kind_label(f)
             self._push(snapshot)
             self.b_undo.setEnabled(True)
             self._update_rows(f)

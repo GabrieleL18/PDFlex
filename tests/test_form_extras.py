@@ -32,7 +32,7 @@ def test_formats_and_sum_roundtrip(make_pdf, tmp_path):
     assert "AFNumber_Format" in js and "AFSimple_Calculate" in js and "app.alert" in js
     assert "/CO" in doc.xref_get_key(doc.pdf_catalog(), "AcroForm")[1]
     got = {f.name: f for f in load_fields(doc)}
-    assert got["a"].fmt == "amount" and got["b"].fmt == "number" and got["mail"].fmt == "email"
+    assert got["a"].fmt == "amount|2|1" and got["b"].fmt == "number|2|1" and got["mail"].fmt == "email"
     assert got["tot"].calc == ["a", "b"] and got["a"].calc == []
 
 
@@ -49,7 +49,7 @@ def test_change_format_of_loaded_field(make_pdf, tmp_path):
     fields[0].fmt = "amount"
     out = tmp_path / "o.pdf"
     save_with_fields(src, fields, out)
-    assert load_fields(open_pdf(out))[0].fmt == "amount"
+    assert load_fields(open_pdf(out))[0].fmt == "amount|2|1"
 
 
 # tab order = order of the field list
@@ -100,7 +100,7 @@ def test_changing_format_sum_boxes_keeps_other_properties(make_pdf, tmp_path):
     out = tmp_path / "out.pdf"
     save_with_fields(src, list(fields.values()), out)
     got = {f.name: f for f in load_fields(open_pdf(out))}
-    assert got["a"].fmt == "amount" and got["tot"].fmt == "number" and got["tot"].calc == ["a", "b"]
+    assert got["a"].fmt == "amount|2|1" and got["tot"].fmt == "number|2|1" and got["tot"].calc == ["a", "b"]
     assert got["b"].comb == 8
     widgets = {w.field_name: w for w in open_pdf(out)[0].widgets()}
     for name in ("a", "b", "tot"):
@@ -135,7 +135,7 @@ def test_field_written_by_other_programs_keeps_its_format(make_pdf, tmp_path):
     d.xref_set_key(x, "AA", f"<</F<</S/JavaScript/JS {js}>>>>")
     d.save(src)
     f = load_fields(open_pdf(src))[0]
-    assert f.fmt == "number"
+    assert f.fmt == "number|2|1"
     f.rect = (20, 20, 100, 40)
     save_with_fields(src, [f], tmp_path / "out.pdf")
-    assert load_fields(open_pdf(tmp_path / "out.pdf"))[0].fmt == "number"
+    assert load_fields(open_pdf(tmp_path / "out.pdf"))[0].fmt == "number|2|1"
