@@ -37,6 +37,7 @@ class Field:
     value: str = ""
     fmt: str = ""  # "", "number", "amount", "email" (text fields)
     calc: list[str] = dc_field(default_factory=list)  # names of the fields this one sums
+    comb: int = 0  # text split into this many boxes, one character each (codice fiscale); 0 = normal
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
@@ -128,6 +129,8 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
                 f.default = w.field_value or ""
             elif kind != "signature":
                 f.default = w.field_value or ""
+            if kind == "text" and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB:
+                f.comb = w.text_maxlen or 0
             if "AFNumber_Format" in js.get("F", ""):
                 f.fmt = "amount" if "u20AC" in js["F"] else "number"
             elif "app.alert" in js.get("V", "") and "@" in js["V"]:
@@ -185,6 +188,9 @@ def _new_widget(f: Field) -> pymupdf.Widget:
         w.field_flags |= pymupdf.PDF_TX_FIELD_IS_MULTILINE
     if f.kind == "date":
         w.script_format = DATE_SCRIPT
+    if f.kind == "text" and f.comb:
+        w.text_maxlen = f.comb
+        w.field_flags |= pymupdf.PDF_TX_FIELD_IS_COMB
     fmt, stroke, validate = _FMT_JS.get(f.fmt, (None, None, None))
     if f.kind in ("text", "multiline") and f.fmt:
         w.script_format, w.script_stroke, w.script_change = fmt, stroke, validate
@@ -266,7 +272,7 @@ def build_pdf(src_path, fields: list[Field]) -> pymupdf.Document:
     placed = {}  # id(field) -> widget xref, for the tab order
     order = []
     for f in fields:
-        if f.xref and (f.fmt != f.orig.fmt or f.calc != f.orig.calc):
+        if f.xref and (f.fmt != f.orig.fmt or f.calc != f.orig.calc or f.comb != f.orig.comb):
             # ponytail: format/sum scripts can't be edited in place reliably; the widget is rebuilt,
             # which drops properties PDFlex doesn't show (max length, tooltip) for this one field
             page = doc[f.page]
@@ -381,8 +387,12 @@ def fill_sample(doc: pymupdf.Document) -> None:
             t = w.field_type
             if t == pymupdf.PDF_WIDGET_TYPE_TEXT and not w.field_value:
                 multiline = bool(w.field_flags & pymupdf.PDF_TX_FIELD_IS_MULTILINE)
-                w.field_value = (f"{date.today():%d/%m/%Y}" if _is_date(doc, w)
-                                 else _sample_text(w.field_name or "", multiline))
+                if w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB and w.text_maxlen:
+                    n = w.text_maxlen
+                    w.field_value = "RSSMRA80A01H501U"[:n] if "fisc" in (w.field_name or "") else ("1234567890" * 10)[:n]
+                else:
+                    w.field_value = (f"{date.today():%d/%m/%Y}" if _is_date(doc, w)
+                                     else _sample_text(w.field_name or "", multiline))
             elif t == pymupdf.PDF_WIDGET_TYPE_CHECKBOX and w.field_value in (False, "Off", "", None):
                 w.field_value = True
             elif t == pymupdf.PDF_WIDGET_TYPE_COMBOBOX and not w.field_value and w.choice_values:
@@ -737,6 +747,10 @@ class EditorTab(QWidget):
         self.p_default.setPlaceholderText("Vuoto")
         self.p_size.setPlaceholderText("Automatica")
         self.p_size.setValidator(QIntValidator(0, 72, self.p_size))
+        self.p_comb = QLineEdit()
+        self.p_comb.setPlaceholderText("No")
+        self.p_comb.setValidator(QIntValidator(0, 99, self.p_comb))
+        self.p_comb.setToolTip("Divide il campo in caselle, una lettera ciascuna (es. 16 per il codice fiscale)")
         form.addRow("Nome del campo", self.p_name)
         form.addRow("Valore iniziale", self.p_default)
         form.addRow("Opzioni, una per riga", self.p_options)
@@ -744,9 +758,10 @@ class EditorTab(QWidget):
         form.addRow("Formato", self.p_fmt)
         form.addRow("Somma dei campi (facoltativo)", self.p_calc)
         form.addRow("Dimensione testo (pt)", self.p_size)
+        form.addRow("Caselle, una lettera ciascuna", self.p_comb)
         form.addRow(self.p_checked)
         form.addRow(self.p_required)
-        for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc):
+        for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc, self.p_comb):
             w.editingFinished.connect(self._props_edited)
         self.p_fmt.currentIndexChanged.connect(self._props_edited)
         self.p_required.toggled.connect(self._props_edited)
@@ -1199,6 +1214,7 @@ class EditorTab(QWidget):
         self.p_value.setText(f.value)
         self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(f.fmt), 0))
         self.p_calc.setText(", ".join(f.calc))
+        self.p_comb.setText(str(f.comb) if f.comb else "")
         self._update_rows(f)
         self._loading = False
 
@@ -1212,6 +1228,7 @@ class EditorTab(QWidget):
         self.form.setRowVisible(self.p_required, k != "signature")
         self.form.setRowVisible(self.p_fmt, k in ("text", "multiline"))
         self.form.setRowVisible(self.p_calc, k == "text" and f.fmt in ("number", "amount"))
+        self.form.setRowVisible(self.p_comb, k == "text")
         self.form.labelForField(self.p_name).setText("Nome del gruppo" if k == "radio" else "Nome del campo")
         self.p_default.setPlaceholderText("gg/mm/aaaa" if k == "date" else "Vuoto")
 
@@ -1220,7 +1237,7 @@ class EditorTab(QWidget):
         if not f or self._loading:
             return
         snapshot = copy.deepcopy(self.fields)
-        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default, f.fmt, list(f.calc))
+        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default, f.fmt, list(f.calc), f.comb)
         new_name = self.p_name.text().strip()
         if f.kind == "radio" and new_name != f.name:  # renaming the group renames all its buttons
             for o in self.fields:
@@ -1234,6 +1251,7 @@ class EditorTab(QWidget):
             f.fmt = self.p_fmt.currentData() or ""
         f.calc = ([n.strip() for n in self.p_calc.text().split(",") if n.strip()]
                   if f.kind == "text" and f.fmt in ("number", "amount") else [])
+        f.comb = int(self.p_comb.text() or 0) if f.kind == "text" else 0
         if f.kind == "radio":
             f.value = clean_value(self.p_value.text())
             if self.p_value.text() != f.value:
@@ -1246,7 +1264,7 @@ class EditorTab(QWidget):
                         o.default = ""
         else:
             f.default = self.p_default.text()
-        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default, f.fmt, f.calc):
+        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default, f.fmt, f.calc, f.comb):
             self._push(snapshot)
             self.b_undo.setEnabled(True)
             self._update_rows(f)
