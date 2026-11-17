@@ -185,3 +185,48 @@ def test_compare_long_docs_render_lazily_and_scroll_sideways_together(qapp, make
     a, b = tab.old_view.horizontalScrollBar(), tab.new_view.horizontalScrollBar()
     a.setValue(a.maximum())
     assert b.value() == b.maximum() > 0
+
+
+def test_blocks_saved_and_reused_in_another_form(qapp, make_pdf, tmp_path):
+    tab = EditorTab()
+    tab.open(str(make_pdf(tmp_path, ["primo"])))
+    a = tab.add_field("text", 0, (100, 100, 250, 120))
+    a.name, a.fmt = "importo", "amount"
+    b = tab.add_field("text", 0, (100, 130, 250, 150))
+    b.name, b.fmt, b.calc = "totale", "amount", ["importo"]
+    tab.select_many([a, b])
+    tab.save_block("Pagamento")
+    tab.dirty = False
+    tab.open(str(make_pdf(tmp_path, ["secondo"])))
+    assert tab.block_combo.currentText() == "Pagamento"
+    first = tab.insert_block("Pagamento")
+    second = tab.insert_block("Pagamento")  # twice: names must not clash, sums follow
+    assert [f.name for f in first] == ["importo", "totale"]
+    assert [f.name for f in second] == ["importo_2", "totale_2"] and second[1].calc == ["importo_2"]
+    assert round(first[1].rect[1] - first[0].rect[1]) == 30  # same layout
+    tab.undo()
+    assert len(tab.fields) == 2
+
+
+def test_hand_signature_drawn_and_placed(qapp, make_pdf, tmp_path):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPainterPath
+    from pdflex.editor import SignatureDialog
+    tab = EditorTab()
+    src = make_pdf(tmp_path, ["contratto"])
+    tab.open(str(src))
+    d = SignatureDialog(tab)
+    path = QPainterPath(QPointF(20, 80))
+    for x in range(20, 300, 10):
+        path.lineTo(QPointF(x, 80 + (x % 40)))
+    d.canvas.paths = [path]
+    d._accept()
+    assert d.png and d.png.startswith(b"\x89PNG")
+    f = tab.add_signature(d.png)
+    assert f.kind == "image" and tab.fields == [f]
+    out = tmp_path / "firmato.pdf"
+    tab.save(str(out))
+    page = open_pdf(out)[0]
+    assert len(page.get_images()) == 1 and page.first_widget is None  # a picture, not a field
+    d2 = SignatureDialog(tab)
+    assert d2.b_saved.isVisibleTo(d2)  # remembered for next time

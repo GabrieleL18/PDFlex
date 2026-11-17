@@ -1,3 +1,4 @@
+import base64
 import copy
 import os
 import re
@@ -38,6 +39,7 @@ class Field:
     fmt: str = ""  # "", "number", "amount", "email" (text fields)
     calc: list[str] = dc_field(default_factory=list)  # names of the fields this one sums
     comb: int = 0  # text split into this many boxes, one character each (codice fiscale); 0 = normal
+    image: str = dc_field(default="", repr=False)  # kind "image": PNG as base64 (a hand-drawn signature)
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
@@ -291,6 +293,9 @@ def build_pdf(src_path, fields: list[Field]) -> pymupdf.Document:
                 _set_radio_state(doc, f.xref, f.orig.value, clean_value(f.value), f.default == "1",
                                  f.orig.default == "1")
             continue
+        if f.kind == "image":  # not a field: the picture becomes part of the page
+            doc[f.page].insert_image(pymupdf.Rect(f.rect), stream=base64.b64decode(f.image), keep_proportion=True)
+            continue
         annot = doc[f.page].add_widget(_new_widget(f))
         placed[id(f)] = annot.xref
         if f.kind == "radio":
@@ -406,6 +411,38 @@ def fill_sample(doc: pymupdf.Document) -> None:
             w.update()
 
 
+_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "comb", "image")
+
+
+def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
+    """Fields (with their on-screen rects) -> a reusable block, positions relative to its top-left corner."""
+    x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
+    return [{**{k: copy.deepcopy(getattr(f, k)) for k in _BLOCK_KEYS},
+             "rect": [r[0] - x0, r[1] - y0, r[2] - x0, r[3] - y0]} for f, r in zip(fields, rects)]
+
+
+def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dict, tuple]]:
+    """(field data, on-screen rect) for a block dropped at `at`; names already in `taken` get _2, _3...
+
+    A sum keeps pointing at the renamed fields of the same block."""
+    renamed = {}
+    for d in block:
+        if d["name"] in renamed:  # radio buttons of one group share the name
+            continue
+        name, n = d["name"], 2
+        while name in taken:
+            name, n = f"{d['name']}_{n}", n + 1
+        taken.add(name)
+        renamed[d["name"]] = name
+    out = []
+    for d in block:
+        d = {**copy.deepcopy(d), "name": renamed[d["name"]]}
+        d["calc"] = [renamed.get(c, c) for c in d.get("calc", [])]
+        x0, y0, x1, y1 = d.pop("rect")
+        out.append((d, (at[0] + x0, at[1] + y0, at[0] + x1, at[1] + y1)))
+    return out
+
+
 def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | Path) -> None:
     doc = build_pdf(src_path, fields)
     data = doc.tobytes(garbage=3, deflate=True)
@@ -418,8 +455,10 @@ def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | 
 
 # ---------------------------------------------------------------- UI
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal  # noqa: E402
-from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QKeySequence, QPainter, QPen, QShortcut  # noqa: E402
+from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, QSize, Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QBrush, QColor, QFont, QImage, QIntValidator, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
@@ -429,14 +468,15 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex.ui import (  # noqa: E402
-    Toggle, add_recent, info, message, recent_files, warn,
+    Toggle, add_recent, ask_text, info, load_bytes, load_json, message, recent_files, save_bytes, save_json, warn,
     ACCENT, DocView, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
 
 KIND_LABELS = {"text": "Testo", "multiline": "Testo lungo", "checkbox": "Casella di spunta",
-               "radio": "Scelta singola", "dropdown": "Menu a tendina", "date": "Data", "signature": "Firma"}
+               "radio": "Scelta singola", "dropdown": "Menu a tendina", "date": "Data", "signature": "Firma",
+               "image": "Firma a mano"}
 KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B", "radio": "#7A4FD1",
-               "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A"}
+               "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633"}
 HANDLE = 10  # px, resize grip in the bottom-right corner
 PAGE_MARGIN = 24
 TAG_H = 20  # name tag above the selected field
@@ -465,11 +505,18 @@ class FieldItem(QGraphicsRectItem):
         fill.setAlpha(80 if sel else 16 if other_selected else 38)
         line = QColor(color)
         line.setAlpha(110 if other_selected else 255)
-        painter.setPen(QPen(line, 2.5 if sel else 1.3))
+        if self.field.kind == "image":
+            if not hasattr(self, "_pic"):
+                self._pic = QPixmap()
+                self._pic.loadFromData(base64.b64decode(self.field.image))
+            pic = self._pic.scaled(r.size().toSize(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            painter.drawPixmap(QPointF(r.left(), r.top() + (r.height() - pic.height()) / 2), pic)
+            fill.setAlpha(25 if sel else 0)
+        painter.setPen(QPen(line, 2.5 if sel else 1.3) if self.field.kind != "image" or sel else Qt.NoPen)
         painter.setBrush(fill)
         painter.drawRoundedRect(r, 3, 3)
         label = self.field.name + (f" = {self.field.value}" if self.field.kind == "radio" else "")
-        if r.width() > 40 and not sel:
+        if r.width() > 40 and not sel and self.field.kind != "image":
             painter.setPen(line.darker(130))
             painter.drawText(r.adjusted(5, 0, -4, 0), Qt.AlignLeft | Qt.AlignVCenter, label)
         if sel:
@@ -574,6 +621,141 @@ class PreviewDialog(QDialog):
         view.show_doc(doc)
 
 
+class SignatureCanvas(QWidget):
+    """Draw with the mouse; strokes kept as paths so the result is crisp at any size."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumSize(520, 200)
+        self.setCursor(Qt.CrossCursor)
+        self.paths: list[QPainterPath] = []
+        self.picture: QPixmap | None = None  # a loaded image instead of strokes
+
+    def clear(self):
+        self.paths, self.picture = [], None
+        self.update()
+
+    def mousePressEvent(self, e):
+        self.picture = None
+        p = QPainterPath(e.position())
+        self.paths.append(p)
+
+    def mouseMoveEvent(self, e):
+        if self.paths and e.buttons() & Qt.LeftButton:
+            self.paths[-1].lineTo(e.position())
+            self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), Qt.white)
+        p.setPen(QPen(QColor("#C3C9D4"), 1, Qt.DashLine))
+        p.drawLine(30, self.height() - 50, self.width() - 30, self.height() - 50)
+        if self.picture:
+            pic = self.picture.scaled(self.size() * 0.9, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            p.drawPixmap((self.width() - pic.width()) // 2, (self.height() - pic.height()) // 2, pic)
+        p.setPen(QPen(QColor("#0B2A6F"), 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        for path in self.paths:
+            p.drawPath(path)
+        if not self.paths and not self.picture:
+            p.setPen(QColor("#A9B0BB"))
+            p.drawText(self.rect(), Qt.AlignCenter, "Firma qui col mouse")
+
+    def png(self) -> bytes | None:
+        """The signature cropped to its ink, transparent background, drawn at 3x for sharp printing."""
+        if self.picture:
+            return _png(self.picture)
+        if not self.paths:
+            return None
+        box = QRectF()
+        for path in self.paths:
+            box = box.united(path.boundingRect())
+        box = box.adjusted(-4, -4, 4, 4)
+        img = QImage((box.size() * 3).toSize(), QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.scale(3, 3)
+        p.translate(-box.topLeft())
+        p.setPen(QPen(QColor("#0B2A6F"), 2.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        for path in self.paths:
+            p.drawPath(path)
+        p.end()
+        return _png(img)
+
+
+def _png(img) -> bytes:
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(buf.data())
+
+
+class SignatureDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Firma a mano")
+        self.setStyleSheet("QDialog { background: #FFFFFF; }")
+        self.png: bytes | None = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
+        lay.addWidget(QLabel("Firma col mouse (o con la penna) nel riquadro, oppure carica un'immagine della firma.",
+                             objectName="Muted"))
+        self.canvas = SignatureCanvas()
+        frame = QFrame()
+        frame.setStyleSheet(f"QFrame {{ border: 1px solid #D9DEE7; border-radius: 8px; }}")
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(1, 1, 1, 1)
+        fl.addWidget(self.canvas)
+        lay.addWidget(frame, 1)
+        saved = load_bytes("firma.png")
+        self.b_saved = button("Usa la firma salvata", "signature")
+        self.b_saved.setVisible(saved is not None)
+        self.b_saved.clicked.connect(lambda: self._load(saved))
+        self.c_keep = Toggle("Ricorda questa firma per la prossima volta")
+        self.c_keep.setChecked(True)
+        b_clear = button("Cancella", "trash", "Ghost")
+        b_file = button("Carica immagine...", "open")
+        b_ok = button("Inserisci firma", "signature", "Primary")
+        b_cancel = button("Annulla")
+        b_clear.clicked.connect(self.canvas.clear)
+        b_file.clicked.connect(self._pick)
+        b_ok.clicked.connect(self._accept)
+        b_cancel.clicked.connect(self.reject)
+        row = QHBoxLayout()
+        for w in (b_clear, b_file, self.b_saved):
+            row.addWidget(w)
+        row.addStretch()
+        lay.addLayout(row)
+        lay.addWidget(self.c_keep)
+        row2 = QHBoxLayout()
+        row2.addStretch()
+        row2.addWidget(b_cancel)
+        row2.addWidget(b_ok)
+        lay.addLayout(row2)
+
+    def _load(self, data: bytes | None):
+        pic = QPixmap()
+        if data and pic.loadFromData(data):
+            self.canvas.paths, self.canvas.picture = [], pic
+            self.canvas.update()
+
+    def _pick(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Immagine della firma", "", "Immagini (*.png *.jpg *.jpeg)")
+        if path:
+            self._load(Path(path).read_bytes())
+
+    def _accept(self):
+        self.png = self.canvas.png()
+        if not self.png:
+            warn(self, "Il riquadro è vuoto: firma col mouse o carica un'immagine.")
+            return
+        if self.c_keep.isChecked():
+            save_bytes("firma.png", self.png)
+        self.accept()
+
+
 class EditorTab(QWidget):
     title_changed = Signal(str)
 
@@ -606,7 +788,7 @@ class EditorTab(QWidget):
         tl.setSpacing(2)
         self.mode_group = QButtonGroup(self)
         self.mode_buttons = {}
-        for mode, label in [("select", "Seleziona e sposta"), *KIND_LABELS.items()]:
+        for mode, label in [("select", "Seleziona e sposta"), *((k, v) for k, v in KIND_LABELS.items() if k != "image")]:
             b = QToolButton()
             b.setText(label)
             b.setIcon(icon(mode, KIND_COLORS.get(mode, "#1D2633")))
@@ -629,10 +811,21 @@ class EditorTab(QWidget):
         self.b_detect = button("Rileva campi", "wand", tip="Cerca righe ____, caselle e spazi vuoti e crea i campi")
         self.b_detect.clicked.connect(self._detect_clicked)
         pl.addWidget(self.b_detect)
+        self.b_sign = button("Firma a mano", "signature", tip="Disegna la firma col mouse o caricane l'immagine")
+        self.b_sign.clicked.connect(self.ask_signature)
+        pl.addWidget(self.b_sign)
         self.c_grid = Toggle("Griglia magnetica")
         self.c_grid.setToolTip("Allinea posizione e misure dei campi a passi di 5 punti")
         self.c_grid.toggled.connect(lambda on: setattr(self, "grid", on))
         pl.addWidget(self.c_grid)
+        pl.addSpacing(12)
+        pl.addWidget(QLabel("Blocchi salvati", objectName="H2"))
+        self.block_combo = QComboBox()
+        self.block_combo.setToolTip("Gruppi di campi salvati con \"Salva come blocco\", da riusare in altri moduli")
+        self.b_block = button("Inserisci blocco", "copy")
+        self.b_block.clicked.connect(lambda: self.insert_block(self.block_combo.currentText()))
+        pl.addWidget(self.block_combo)
+        pl.addWidget(self.b_block)
         pl.addStretch()
         pl.addWidget(QLabel("Ctrl+clic seleziona più campi\nCanc elimina, Ctrl+D duplica\n"
                             "Ctrl+Z annulla, Ctrl+Y ripete", objectName="Muted"))
@@ -804,9 +997,12 @@ class EditorTab(QWidget):
             b = button(label)
             b.clicked.connect(lambda _=False, h=how: self.align(h))
             grid.addWidget(b, *((i // 2, i % 2) if i < 6 else (i - 3, 0, 1, 2)))  # long labels: full row
+        b_block_many = button("Salva come blocco", "copy", tip="Riusa questi campi in altri moduli")
+        b_block_many.clicked.connect(self.ask_save_block)
+        grid.addWidget(b_block_many, len(aligns) - 3, 0, 1, 2)
         b_del_all = button("Elimina selezionati", "trash", "Danger")
         b_del_all.clicked.connect(self.delete_selected)
-        grid.addWidget(b_del_all, len(aligns) - 3, 0, 1, 2)
+        grid.addWidget(b_del_all, len(aligns) - 2, 0, 1, 2)
         pr.addWidget(self.multi_box)
         pr.addStretch()
 
@@ -1096,6 +1292,71 @@ class EditorTab(QWidget):
             self.refresh()
         return len(found)
 
+    # ---- hand-drawn signature: a picture placed on the page
+    def add_signature(self, png: bytes) -> Field:
+        pic = QPixmap()
+        pic.loadFromData(png)
+        page = self.doc[self.page_no]
+        corner = self.view.mapToScene(0, 0)
+        x0, y0 = max(corner.x() / self.zoom, 0) + 40, max(corner.y() / self.zoom, 0) + 40
+        w = 160
+        h = w * pic.height() / max(pic.width(), 1)
+        self._push()
+        f = Field("image", self.page_no, from_view(page, self._clamp((x0, y0, x0 + w, y0 + h))),
+                  self._free_name("firma_mano"), image=base64.b64encode(png).decode())
+        self.fields.append(f)
+        self.dirty = True
+        self._select(f)
+        self.refresh()
+        return f
+
+    def ask_signature(self):
+        if not self.doc:
+            return
+        d = SignatureDialog(self)
+        if d.exec() and d.png:
+            self.add_signature(d.png)
+
+    # ---- blocks: groups of fields to reuse in other forms
+    def save_block(self, name: str) -> None:
+        chosen = [f for f in self.selection if f.page == self.page_no] or self.selection
+        if not chosen:
+            return
+        blocks = load_json("blocchi.json", {})
+        blocks[name] = make_block(chosen, [to_view(self.doc[f.page], f.rect) for f in chosen])
+        save_json("blocchi.json", blocks)
+        self._fill_blocks()
+
+    def ask_save_block(self):
+        name = ask_text(self, "Salva come blocco", "Nome del blocco (es. Dati anagrafici):")
+        if name:
+            self.save_block(name)
+            info(self, f'Blocco "{name}" salvato: lo trovi a sinistra, sotto "Blocchi salvati".')
+
+    def insert_block(self, name: str) -> list[Field]:
+        block = load_json("blocchi.json", {}).get(name)
+        if not self.doc or not block:
+            return []
+        page = self.doc[self.page_no]
+        corner = self.view.mapToScene(0, 0)  # top-left of what is on screen
+        at = (max(corner.x() / self.zoom, 0) + 20, max(corner.y() / self.zoom, 0) + 20)
+        self._push()
+        made = []
+        for data, r in place_block(block, at, {f.name for f in self.fields}):
+            f = Field(page=self.page_no, rect=from_view(page, self._clamp(r)), **data)
+            self.fields.append(f)
+            made.append(f)
+        self.dirty = True
+        self.select_many(made)
+        return made
+
+    def _fill_blocks(self):
+        names = sorted(load_json("blocchi.json", {}))
+        self.block_combo.clear()
+        self.block_combo.addItems(names)
+        self.block_combo.setEnabled(bool(names))
+        self.b_block.setEnabled(bool(names) and self.doc is not None)
+
     def _detect_clicked(self):
         if not self.doc:
             return
@@ -1154,7 +1415,7 @@ class EditorTab(QWidget):
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
         for w in (self.b_save, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list, self.b_preview,
-                  self.b_detect):
+                  self.b_detect, self.b_sign):
             w.setEnabled(has)
         for w in (self.b_close, self.zoom_label):
             w.setVisible(has)
@@ -1162,6 +1423,7 @@ class EditorTab(QWidget):
             self.file_label.setText("")
             self.page_label.setText("")
             self._fill_recent()
+        self._fill_blocks()
         self.b_undo.setEnabled(bool(self._undo))
         self.b_redo.setEnabled(bool(self._redo))
         if has:
@@ -1269,6 +1531,12 @@ class EditorTab(QWidget):
 
     def _update_rows(self, f: Field):
         k = f.kind
+        if k == "image":
+            for w in (self.p_default, self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required,
+                      self.p_fmt, self.p_calc, self.p_comb):
+                self.form.setRowVisible(w, False)
+            self.form.labelForField(self.p_name).setText("Nome")
+            return
         self.form.setRowVisible(self.p_default, k in ("text", "multiline", "date", "dropdown"))
         self.form.setRowVisible(self.p_checked, k in ("checkbox", "radio"))
         self.form.setRowVisible(self.p_size, k in ("text", "multiline", "date", "dropdown"))

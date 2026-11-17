@@ -166,6 +166,21 @@ def save_json(name: str, data) -> None:
         pass  # a missing list of recent files is not worth an error
 
 
+def load_bytes(name: str) -> bytes | None:
+    try:
+        return (DATA_DIR / name).read_bytes()
+    except OSError:
+        return None
+
+
+def save_bytes(name: str, data: bytes) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / name).write_bytes(data)
+    except OSError:
+        pass
+
+
 def recent_files() -> list[str]:
     return [p for p in load_json("recenti.json", []) if Path(p).exists()]
 
@@ -356,6 +371,18 @@ def message(parent, text: str, kind: str = "info", buttons=("OK",), note: str = 
     return made.index(box.clickedButton()) if box.clickedButton() in made else len(made) - 1
 
 
+def ask_text(parent, title: str, label: str, text: str = "") -> str | None:
+    """One line of text from the user, with Italian buttons; None if cancelled."""
+    from PySide6.QtWidgets import QInputDialog
+    d = QInputDialog(parent)
+    d.setWindowTitle(title)
+    d.setLabelText(label)
+    d.setTextValue(text)
+    d.setOkButtonText("OK")
+    d.setCancelButtonText("Annulla")
+    return d.textValue().strip() if d.exec() else None
+
+
 def info(parent, text: str) -> None:
     message(parent, text, "info")
 
@@ -455,7 +482,7 @@ class DocView(QGraphicsView):
 
     def _render_visible(self):
         """Draw the pages on screen (and one screen above/below); long documents stay quick."""
-        if not self.doc or not self.offsets:
+        if not self.doc or not self.offsets or self.scene() is None:  # None while the view is being destroyed
             return
         top = self.verticalScrollBar().value()
         span = self.viewport().height()
