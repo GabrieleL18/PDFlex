@@ -170,7 +170,7 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
 
 from PySide6.QtCore import QSize, Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -180,6 +180,8 @@ from pdflex.ui import DocView, button, dot  # noqa: E402
 KIND_NAMES = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato"}
 KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER}
 HINT = "Trascina qui il PDF o clicca per sceglierlo"
+NO_OCR = ("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
+          "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex.")
 
 
 class CompareTab(QWidget):
@@ -197,22 +199,24 @@ class CompareTab(QWidget):
         self.b_new = button("Nuovo confronto", "refresh")
         self.b_new.clicked.connect(self.reset)
         self.summary = QLabel("Scegli i due PDF da confrontare", objectName="Muted")
-        self.sync = QCheckBox("Scorri insieme")
+        self.sync = ui.Toggle("Scorri insieme")
         self.sync.setChecked(True)
         self.sync.setToolTip("Scorrendo un documento, l'altro segue alla stessa pagina")
         self.b_prev = button("Precedente", "prev")
         self.b_next = button("Successiva", "next")
         self.b_export = button("Esporta PDF", "export", "Primary")
-        self.b_prev.clicked.connect(lambda: self.go_to(self.current - 1))
-        self.b_next.clicked.connect(lambda: self.go_to(self.current + 1))
+        self.b_xlsx = button("Esporta Excel", "table", tip="Elenco delle modifiche in un foglio Excel")
+        self.b_prev.clicked.connect(lambda: self.step(-1))
+        self.b_next.clicked.connect(lambda: self.step(1))
         self.b_export.clicked.connect(self.ask_export)
+        self.b_xlsx.clicked.connect(self.ask_export_xlsx)
         bl.addWidget(self.b_new)
         bl.addSpacing(10)
         bl.addWidget(self.summary)
         bl.addStretch()
         bl.addWidget(self.sync)
         bl.addSpacing(10)
-        for w in (self.b_prev, self.b_next, self.b_export):
+        for w in (self.b_prev, self.b_next, self.b_xlsx, self.b_export):
             bl.addWidget(w)
 
         # empty state: two drop zones
@@ -221,7 +225,7 @@ class CompareTab(QWidget):
         self.drop_old.picked.connect(lambda p: self._pick("old", p))
         self.drop_new.picked.connect(lambda p: self._pick("new", p))
         empty = QWidget()
-        empty.setStyleSheet(f"background: {ui.DESK};")
+        empty.setObjectName("Desk")
         el = QVBoxLayout(empty)
         el.setContentsMargins(60, 40, 60, 40)
         head = QLabel("Confronta due versioni di un documento", objectName="H1", alignment=Qt.AlignCenter)
@@ -266,6 +270,20 @@ class CompareTab(QWidget):
         title = QLabel("Modifiche", objectName="H2")
         title.setContentsMargins(14, 0, 14, 4)
         sl.addWidget(title)
+        opts = QVBoxLayout()
+        opts.setContentsMargins(14, 0, 14, 8)
+        self.kind_filter = QComboBox()
+        for label, kind in (("Tutte le modifiche", ""), ("Solo aggiunte", "insert"), ("Solo rimozioni", "delete"),
+                            ("Solo sostituzioni", "replace")):
+            self.kind_filter.addItem(label, kind)
+        self.kind_filter.currentIndexChanged.connect(self._apply_filter)
+        self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
+        self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
+        for c in (self.ignore_case, self.ignore_punct):
+            c.toggled.connect(self._rediff)
+            opts.addWidget(c)
+        opts.addWidget(self.kind_filter)
+        sl.addLayout(opts)
         sl.addWidget(self.list)
         split = QSplitter()
         split.addWidget(column(self.old_label, self.old_view, ui.RED))
@@ -302,9 +320,8 @@ class CompareTab(QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "PDFlex", f"{name}: {e}")
             return False
-        if not any(page.get_text("words") for page in doc):
-            QMessageBox.information(self, "PDFlex", f"{name} non contiene testo (forse è una scansione): "
-                                                    "OCR non supportato. Scegli un altro file.")
+        if not any(page.get_text("words") for page in doc) and not ocr_available():
+            QMessageBox.information(self, "PDFlex", NO_OCR.format(name))
             return False
         return True
 
@@ -335,8 +352,9 @@ class CompareTab(QWidget):
         self.b_new.setVisible(loaded)
         self.sync.setVisible(loaded)
         self.b_export.setEnabled(loaded)
-        self.b_prev.setEnabled(self.current > 0)
-        self.b_next.setEnabled(0 <= self.current < len(self.changes) - 1)
+        self.b_xlsx.setEnabled(bool(self.changes))
+        self.b_prev.setEnabled(self._next_visible(-1) is not None)
+        self.b_next.setEnabled(self._next_visible(1) is not None)
 
     # ---- compare
     def load(self, old_path: str, new_path: str) -> None:
@@ -345,25 +363,36 @@ class CompareTab(QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "PDFlex", str(e))
             return
-        old_words, new_words = extract_words(old), extract_words(new)
+        QApplication.setOverrideCursor(Qt.WaitCursor)  # OCR of a scan can take a while
+        try:
+            old_words, new_words = extract_words(old, ocr=True), extract_words(new, ocr=True)
+        finally:
+            QApplication.restoreOverrideCursor()
         empty = [Path(p).name for p, w in ((old_path, old_words), (new_path, new_words)) if not w]
         if empty:
-            QMessageBox.information(self, "PDFlex", f"{', '.join(empty)} non contiene testo (forse è una "
-                                                    "scansione): OCR non supportato.")
+            QMessageBox.information(self, "PDFlex", NO_OCR.format(", ".join(empty)))
             return
         self.old_path, self.new_path = old_path, new_path
+        self.docs, self.words = (old, new), (old_words, new_words)
+        self.old_label.setText(f"Originale  {Path(old_path).name}")
+        self.new_label.setText(f"Nuova versione  {Path(new_path).name}")
+        self.stack.setCurrentIndex(1)
+        self._rediff()
+
+    def _rediff(self):
+        """Diff again with the current options and redraw the highlights."""
+        if self.stack.currentIndex() != 1:
+            return
         self.changes, self.current = [], -1
         self.list.clear()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            self.stack.setCurrentIndex(1)
-            self.old_view.show_doc(old)
-            self.new_view.show_doc(new)
-            self.changes = diff_words(old_words, new_words)
+            self.old_view.show_doc(self.docs[0])
+            self.new_view.show_doc(self.docs[1])
+            self.changes = diff_words(*self.words, ignore_case=self.ignore_case.isChecked(),
+                                      ignore_punct=self.ignore_punct.isChecked())
         finally:
             QApplication.restoreOverrideCursor()
-        self.old_label.setText(f"Originale  {Path(old_path).name}")
-        self.new_label.setText(f"Nuova versione  {Path(new_path).name}")
         counts = {k: sum(c.kind == k for c in self.changes) for k in KIND_NAMES}
         for c in self.changes:
             self.old_view.highlight(c.old, RED, OPACITY)
@@ -376,10 +405,34 @@ class CompareTab(QWidget):
             parts = [f"{n} {word}" for n, word in ((counts["insert"], "aggiunte"), (counts["delete"], "rimozioni"),
                                                     (counts["replace"], "sostituzioni")) if n]
             self.summary.setText(f"{len(self.changes)} modifiche: " + ", ".join(parts))
-            self.go_to(0)
         else:
             self.summary.setText("Nessuna differenza nel testo")
+        self._apply_filter()
+
+    def _hidden(self, i) -> bool:
+        kind = self.kind_filter.currentData()
+        return bool(kind) and self.changes[i].kind != kind
+
+    def _apply_filter(self):
+        for i in range(len(self.changes)):
+            self.list.setRowHidden(i, self._hidden(i))
+        if self.current < 0 or self._hidden(self.current):
+            self.current = -1
+            self.step(1)
         self._buttons()
+
+    def _next_visible(self, d):
+        i = self.current + d
+        while 0 <= i < len(self.changes):
+            if not self._hidden(i):
+                return i
+            i += d
+        return None
+
+    def step(self, d):
+        i = self._next_visible(d)
+        if i is not None:
+            self.go_to(i)
 
     def _follow(self, src: DocView, dst: DocView):
         if self._syncing or not self.sync.isChecked() or not src.offsets or not dst.offsets:
@@ -417,6 +470,20 @@ class CompareTab(QWidget):
                 QMessageBox.warning(self, "PDFlex", f"Esportazione non riuscita: {e}")
                 return
             QMessageBox.information(self, "PDFlex", f"Confronto esportato in {path}")
+
+    def ask_export_xlsx(self):
+        default = str(Path(self.new_path).with_name(Path(self.new_path).stem + "_modifiche.xlsx"))
+        path, _ = QFileDialog.getSaveFileName(self, "Esporta elenco modifiche", default, "Excel (*.xlsx)")
+        if path:
+            try:
+                self.export_xlsx(path)
+            except OSError as e:
+                QMessageBox.warning(self, "PDFlex", f"Esportazione non riuscita (il file è aperto in Excel?): {e}")
+                return
+            QMessageBox.information(self, "PDFlex", f"Elenco esportato in {path}")
+
+    def export_xlsx(self, path: str) -> None:
+        export_changes_xlsx(self.changes, path, Path(self.old_path).name, Path(self.new_path).name)
 
     def export(self, path: str) -> None:
         export_report(self.old_path, self.new_path, self.changes, path)

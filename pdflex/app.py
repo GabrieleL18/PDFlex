@@ -8,21 +8,23 @@ from PySide6.QtWidgets import (
 )
 
 from pdflex import ui
+from pdflex.batch import BatchTab
 from pdflex.compare import CompareTab
 from pdflex.editor import EditorTab
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, path: str | None = None):
         super().__init__()
         self.setWindowTitle("PDFlex")
         self.setWindowIcon(ui.app_icon())
         self.resize(1400, 880)
         self.editor = EditorTab()
         self.compare = CompareTab()
+        self.batch = BatchTab()
         self.tabs = QStackedWidget()
-        self.tabs.addWidget(self.editor)
-        self.tabs.addWidget(self.compare)
+        for w in (self.editor, self.compare, self.batch):
+            self.tabs.addWidget(w)
 
         rail = QFrame(objectName="Rail")
         rail.setFixedWidth(92)
@@ -34,7 +36,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(logo)
         rl.addSpacing(14)
         group = QButtonGroup(self)
-        for i, (glyph, label) in enumerate([("form", "Moduli"), ("compare", "Confronta")]):
+        for i, (glyph, label) in enumerate([("form", "Moduli"), ("compare", "Confronta"), ("batch", "In serie")]):
             b = QToolButton()
             b.setText(label)
             b.setIcon(ui.icon(glyph, ui.ACCENT))
@@ -57,6 +59,8 @@ class MainWindow(QMainWindow):
         h.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
         self.editor.title_changed.connect(lambda name: self.setWindowTitle(f"{name} - PDFlex"))
+        if path:  # "Apri con PDFlex" or double click on a PDF
+            self.editor.open(path)
 
     def closeEvent(self, e):
         if self.editor.confirm_discard():
@@ -67,7 +71,7 @@ class MainWindow(QMainWindow):
 
 def setup(app: QApplication) -> None:
     app.setStyle("Fusion")
-    app.setStyleSheet(ui.QSS)
+    app.setStyleSheet(ui.stylesheet())
     app.setWindowIcon(ui.app_icon())
 
 
@@ -76,6 +80,6 @@ def main() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PDFlex")
     app = QApplication.instance() or QApplication(sys.argv)
     setup(app)
-    w = MainWindow()
+    w = MainWindow(next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), None))
     w.show()
     sys.exit(app.exec())

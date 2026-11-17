@@ -108,3 +108,149 @@ def batch_fill(template: str | Path, rows: list[dict], mapping: dict[str, str], 
         if progress and not progress(i, len(rows)):
             break
     return made
+
+
+# ---------------------------------------------------------------- UI
+
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QProgressDialog,
+    QVBoxLayout, QWidget,
+)
+
+from pdflex import ui  # noqa: E402
+from pdflex.ui import button  # noqa: E402
+
+
+class BatchTab(QWidget):
+    """One form + one table = one filled PDF per row."""
+
+    def __init__(self):
+        super().__init__()
+        self.template = None
+        self.field_names: list[str] = []
+        self.headers: list[str] = []
+        self.rows: list[dict] = []
+        self.mapping: dict[str, str] = {}
+
+        bar = QFrame(objectName="Bar")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(14, 10, 14, 10)
+        bl.addWidget(QLabel("Compila in serie", objectName="H2"))
+        bl.addSpacing(10)
+        bl.addWidget(QLabel("Un PDF compilato per ogni riga del foglio Excel o CSV", objectName="Muted"))
+        bl.addStretch()
+
+        self.drop_pdf = ui.DropZone("Modulo PDF", "Trascina qui il modulo con i campi o clicca per sceglierlo", "form")
+        self.drop_table = ui.DropZone("Dati", "Trascina qui il file Excel o CSV o clicca per sceglierlo", "table",
+                                      exts=(".xlsx", ".xlsm", ".csv"), file_filter="Excel o CSV (*.xlsx *.xlsm *.csv)")
+        self.drop_pdf.picked.connect(self._guard(self.set_template))
+        self.drop_table.picked.connect(self._guard(self.set_table))
+        zones = QHBoxLayout()
+        zones.setSpacing(24)
+        zones.addWidget(self.drop_pdf)
+        zones.addWidget(self.drop_table)
+
+        self.match = QLabel("Le colonne vengono abbinate ai campi con lo stesso nome (maiuscole e spazi non contano).",
+                            objectName="Muted")
+        self.match.setWordWrap(True)
+        self.name_col = QComboBox()
+        self.flatten = ui.Toggle("Rendi i PDF non modificabili (i campi diventano testo)")
+        self.b_run = button("Crea i PDF", "batch", "Primary")
+        self.b_run.clicked.connect(self.ask_run)
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Nome dei file dalla colonna"))
+        name_row.addWidget(self.name_col, 1)
+
+        panel = QFrame(objectName="Panel")
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(20, 16, 20, 16)
+        pl.setSpacing(10)
+        pl.addWidget(self.match)
+        pl.addLayout(name_row)
+        pl.addWidget(self.flatten)
+        pl.addWidget(self.b_run, alignment=Qt.AlignRight)
+
+        body = QWidget()
+        body.setObjectName("Desk")
+        v = QVBoxLayout(body)
+        v.setContentsMargins(60, 30, 60, 30)
+        v.setSpacing(20)
+        v.addLayout(zones)
+        v.addWidget(panel)
+        v.addStretch()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(bar)
+        layout.addWidget(body, 1)
+        self._update()
+
+    def _guard(self, fn):
+        def run(path):
+            try:
+                fn(path)
+            except (ValueError, OSError) as e:
+                QMessageBox.warning(self, "PDFlex", f"{Path(path).name}: {e}")
+        return run
+
+    def set_template(self, path: str):
+        doc = open_pdf(path)
+        names = list(dict.fromkeys(w.field_name for page in doc for w in page.widgets()
+                                   if w.field_type != pymupdf.PDF_WIDGET_TYPE_SIGNATURE))
+        if not names:
+            raise ValueError("questo PDF non ha campi da compilare. Aggiungili prima nella sezione Moduli.")
+        self.template, self.field_names = path, names
+        self.drop_pdf.set_file(path)
+        self._update()
+
+    def set_table(self, path: str):
+        self.headers, self.rows = read_table(path)
+        self.drop_table.set_file(path)
+        self.name_col.clear()
+        self.name_col.addItem("(numerati: modulo_001, modulo_002...)", None)
+        for h in self.headers:
+            self.name_col.addItem(h, h)
+        self._update()
+
+    def _update(self):
+        self.mapping = match_columns(self.field_names, self.headers) if self.template and self.headers else {}
+        ready = bool(self.mapping and self.rows)
+        if self.template and self.headers:
+            missing = [n for n in self.field_names if n not in self.mapping]
+            text = f"{len(self.mapping)} campi su {len(self.field_names)} trovati tra le colonne, {len(self.rows)} righe."
+            if missing:
+                text += " Restano vuoti: " + ", ".join(missing[:12]) + ("..." if len(missing) > 12 else "")
+            if not self.mapping:
+                text = ("Nessuna colonna ha il nome di un campo. Rinomina le colonne come i campi: "
+                        + ", ".join(self.field_names[:12]))
+            self.match.setText(text)
+        self.b_run.setText(f"Crea {len(self.rows)} PDF" if ready else "Crea i PDF")
+        self.b_run.setEnabled(ready)
+        self.name_col.setEnabled(bool(self.headers))
+
+    def ask_run(self):
+        out = QFileDialog.getExistingDirectory(self, "Cartella dove salvare i PDF", str(Path(self.template).parent))
+        if not out:
+            return
+        try:
+            made = self.run(out)
+        except (ValueError, OSError, RuntimeError) as e:
+            QMessageBox.warning(self, "PDFlex", f"Creazione non riuscita: {e}")
+            return
+        QMessageBox.information(self, "PDFlex", f"Creati {len(made)} PDF in {out}")
+
+    def run(self, out_dir: str) -> list[Path]:
+        dlg = QProgressDialog("Creo i PDF...", "Ferma", 0, len(self.rows), self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(400)
+
+        def progress(i, n):
+            dlg.setValue(i)
+            QApplication.processEvents()
+            return not dlg.wasCanceled()
+        try:
+            return batch_fill(self.template, self.rows, self.mapping, out_dir, self.name_col.currentData(),
+                              self.flatten.isChecked(), progress)
+        finally:
+            dlg.close()

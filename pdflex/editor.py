@@ -411,7 +411,7 @@ def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QKeySequence, QPainter, QPen, QShortcut  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
+    QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPlainTextEdit, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout,
@@ -419,6 +419,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex.ui import (  # noqa: E402
+    Toggle,
     ACCENT, DocView, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
 
@@ -612,7 +613,7 @@ class EditorTab(QWidget):
         self.b_detect = button("Rileva campi", "wand", tip="Cerca righe ____, caselle e spazi vuoti e crea i campi")
         self.b_detect.clicked.connect(self._detect_clicked)
         pl.addWidget(self.b_detect)
-        self.c_grid = QCheckBox("Griglia magnetica")
+        self.c_grid = Toggle("Griglia magnetica")
         self.c_grid.setToolTip("Allinea posizione e misure dei campi a passi di 5 punti")
         self.c_grid.toggled.connect(lambda on: setattr(self, "grid", on))
         pl.addWidget(self.c_grid)
@@ -724,8 +725,8 @@ class EditorTab(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         form.setVerticalSpacing(6)
-        self.p_name, self.p_required, self.p_default = QLineEdit(), QCheckBox("Obbligatorio"), QLineEdit()
-        self.p_checked, self.p_size = QCheckBox("Selezionata all'apertura"), QLineEdit()
+        self.p_name, self.p_required, self.p_default = QLineEdit(), Toggle("Obbligatorio"), QLineEdit()
+        self.p_checked, self.p_size = Toggle("Selezionata all'apertura"), QLineEdit()
         self.p_options, self.p_value = QPlainTextEdit(), QLineEdit()
         self.p_fmt, self.p_calc = QComboBox(), QLineEdit()
         for key, label in FORMATS.items():
@@ -774,10 +775,10 @@ class EditorTab(QWidget):
         for i, (label, how) in enumerate(aligns):
             b = button(label)
             b.clicked.connect(lambda _=False, h=how: self.align(h))
-            grid.addWidget(b, i // 2, i % 2)
+            grid.addWidget(b, *((i // 2, i % 2) if i < 6 else (i - 3, 0, 1, 2)))  # long labels: full row
         b_del_all = button("Elimina selezionati", "trash", "Danger")
         b_del_all.clicked.connect(self.delete_selected)
-        grid.addWidget(b_del_all, len(aligns) // 2, 0, 1, 2)
+        grid.addWidget(b_del_all, len(aligns) - 3, 0, 1, 2)
         pr.addWidget(self.multi_box)
         pr.addStretch()
 

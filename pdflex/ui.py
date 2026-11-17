@@ -1,13 +1,14 @@
 """Look & feel and shared widgets: palette, stylesheet, icons, sharp page rendering, page stack view."""
 import struct
+import tempfile
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel, QPushButton,
+    QCheckBox, QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel, QPushButton,
     QVBoxLayout,
 )
 
@@ -47,7 +48,14 @@ QPushButton#Danger {{ color: {RED}; }}
 QGraphicsView {{ background: {DESK}; border: none; }}
 QLineEdit, QPlainTextEdit {{ border: 1px solid #D9DEE7; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; selection-background-color: {ACCENT}; }}
 QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
-QCheckBox::indicator {{ width: 16px; height: 16px; }}
+QComboBox {{ border: 1px solid #D9DEE7; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }}
+QComboBox:hover {{ border-color: #C3C9D4; }}
+QComboBox:focus, QComboBox:on {{ border-color: {ACCENT}; }}
+QComboBox:disabled {{ color: #A9B0BB; background: #F6F7FA; }}
+QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox QAbstractItemView {{ border: 1px solid {LINE}; background: #FFFFFF; outline: none; padding: 4px;
+    selection-background-color: {ACCENT_SOFT}; selection-color: {INK}; }}
+#Desk {{ background: {DESK}; }}
 QLabel#H1 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 14pt; font-weight: 600; }}
 QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11pt; font-weight: 600; }}
 QLabel#Muted {{ color: {MUTED}; }}
@@ -75,6 +83,7 @@ _ICONS = {
     "zoom-out": '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2M8.5 11h5"/>',
     "prev": '<path d="m14.5 6-6 6 6 6"/>',
     "next": '<path d="m9.5 6 6 6-6 6"/>',
+    "down": '<path d="m6 9.5 6 6 6-6"/>',
     "select": '<path d="M6 4l12 7.5-5.2 1.3L10.5 18z"/>',
     "text": '<path d="M6 6h12M12 6v12M9.5 18h5"/>',
     "multiline": '<path d="M4 6h16M4 10h16M4 14h16M4 18h9"/>',
@@ -127,6 +136,13 @@ def icon(name: str, color: str = INK) -> QIcon:
     return QIcon(QPixmap.fromImage(_render(svg, 48)))
 
 
+def stylesheet() -> str:
+    """QSS plus the combo arrow, which QSS can only take from a file (needs a running QApplication)."""
+    arrow = Path(tempfile.gettempdir()) / "pdflex-down.png"
+    icon("down", MUTED).pixmap(24, 24).save(str(arrow))
+    return QSS + f'QComboBox::down-arrow {{ image: url("{arrow.as_posix()}"); width: 12px; height: 12px; }}'
+
+
 def app_icon() -> QIcon:
     ic = QIcon()
     for s in (16, 24, 32, 48, 64, 128, 256):
@@ -154,8 +170,10 @@ class DropZone(QFrame):
     """Big dashed target: click to choose a PDF, or drop one on it."""
     picked = Signal(str)
 
-    def __init__(self, title: str, hint: str = "Trascina qui il PDF o clicca per sceglierlo", glyph: str = "open"):
+    def __init__(self, title: str, hint: str = "Trascina qui il PDF o clicca per sceglierlo", glyph: str = "open",
+                 exts=(".pdf",), file_filter="PDF (*.pdf)"):
         super().__init__()
+        self.exts, self.file_filter = exts, file_filter
         self.setObjectName("DropZone")
         self.setAcceptDrops(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -181,12 +199,12 @@ class DropZone(QFrame):
         self.style().polish(self)
 
     def mousePressEvent(self, e):
-        path, _ = QFileDialog.getOpenFileName(self, "Scegli un PDF", "", "PDF (*.pdf)")
+        path, _ = QFileDialog.getOpenFileName(self, "Scegli un file", "", self.file_filter)
         if path:
             self.picked.emit(path)
 
     def dragEnterEvent(self, e):
-        if pdf_from_drop(e):
+        if pdf_from_drop(e, self.exts):
             e.acceptProposedAction()
             self._hot(True)
 
@@ -195,14 +213,14 @@ class DropZone(QFrame):
 
     def dropEvent(self, e):
         self._hot(False)
-        path = pdf_from_drop(e)
+        path = pdf_from_drop(e, self.exts)
         if path:
             self.picked.emit(path)
 
 
-def pdf_from_drop(e) -> str | None:
+def pdf_from_drop(e, exts=(".pdf",)) -> str | None:
     urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
-    paths = [u.toLocalFile() for u in urls if u.toLocalFile().lower().endswith(".pdf")]
+    paths = [u.toLocalFile() for u in urls if u.toLocalFile().lower().endswith(exts)]
     return paths[0] if paths else None
 
 
@@ -216,6 +234,60 @@ def button(text, glyph=None, name=None, tip=None) -> QPushButton:
         b.setToolTip(tip)
     b.setCursor(Qt.PointingHandCursor)
     return b
+
+
+class Toggle(QCheckBox):
+    """On/off switch: same API as QCheckBox, drawn as a sliding pill."""
+    W, H = 36, 20
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.setCursor(Qt.PointingHandCursor)
+        self._pos = 0.0
+        self._anim = QVariantAnimation(self, duration=120, valueChanged=self._moved)
+        self.toggled.connect(lambda on: (self._anim.stop(), self._anim.setStartValue(self._pos),
+                                         self._anim.setEndValue(1.0 if on else 0.0), self._anim.start()))
+
+    def setChecked(self, on):  # programmatic changes jump, no animation
+        super().setChecked(on)
+        self._anim.stop()
+        self._moved(1.0 if on else 0.0)
+
+    def _moved(self, v):
+        self._pos = float(v)
+        self.update()
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        return QSize(self.W + 10 + fm.horizontalAdvance(self.text()) + 2, max(self.H, fm.height()) + 6)
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.45)
+        y = (self.height() - self.H) / 2
+        on = QColor(ACCENT)
+        off = QColor("#C5CCD6")
+        track = QColor.fromRgbF(*(a + (b - a) * self._pos for a, b in zip(off.getRgbF()[:3], on.getRgbF()[:3])))
+        if self.hasFocus():
+            p.setPen(QPen(QColor(ACCENT_SOFT if self.isChecked() else "#DCE0F7"), 4))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(1, y - 1, self.W, self.H + 2), self.H / 2 + 1, self.H / 2 + 1)
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(1, y, self.W, self.H), self.H / 2, self.H / 2)
+        d = self.H - 6
+        x = 4 + self._pos * (self.W - d - 6)
+        p.setBrush(QColor(0, 0, 0, 40))
+        p.drawEllipse(QRectF(x, y + 3.6, d, d))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QRectF(x, y + 3, d, d))
+        p.setPen(QColor(INK))
+        p.drawText(self.rect().adjusted(self.W + 10, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, self.text())
 
 
 def dot(color: str, size=10) -> QIcon:
