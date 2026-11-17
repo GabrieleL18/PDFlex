@@ -79,3 +79,31 @@ def test_long_document_is_fast():
     t = time.perf_counter()
     assert len(diff_words(old, new)) == 1
     assert time.perf_counter() - t < 5
+
+
+def test_ignore_case_and_punctuation():
+    old, new = W("Il", "Prezzo", "è", "100,", "euro"), W("il", "prezzo", "è", "100", "euro.")
+    assert len(diff_words(old, new)) == 2
+    assert len(diff_words(old, new, ignore_case=True)) == 1  # "100, euro" vs "100 euro." is one change
+    assert diff_words(old, new, ignore_case=True, ignore_punct=True) == []
+    assert diff_words(W("a", "-", "b"), W("a", "b"), ignore_punct=True) == []
+
+
+def test_export_changes_excel(tmp_path):
+    import openpyxl
+    from pdflex.compare import export_changes_xlsx
+    ch = diff_words(W("a", "b", "c"), W("a", "x", "c", "d"))
+    out = tmp_path / "m.xlsx"
+    export_changes_xlsx(ch, out, "vecchio.pdf", "nuovo.pdf")
+    rows = list(openpyxl.load_workbook(out).active.values)
+    assert rows[0][:3] == ("N.", "Tipo", "Pagina originale")
+    assert rows[1][1] == "Modificato" and rows[1][4] == "b" and rows[1][5] == "x"
+    assert rows[2][1] == "Aggiunto" and rows[2][5] == "d"
+
+
+def test_ocr_unavailable_is_graceful(make_pdf, tmp_path):
+    from pdflex.compare import ocr_available
+    doc = open_pdf(make_pdf(tmp_path, [""]))
+    assert isinstance(ocr_available(), bool)
+    if not ocr_available():
+        assert extract_words(doc, ocr=True) == []

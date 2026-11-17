@@ -1,4 +1,5 @@
 import os
+import re
 import textwrap
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,15 +42,36 @@ class Change:
         return f"Modificato (p. {self.old[0].page + 1}): {short(self.old)} → {short(self.new)}"
 
 
-def extract_words(doc: pymupdf.Document) -> list[Word]:
-    # get_text gives unrotated coordinates; turn them into what the reader sees
-    return [Word(page.number, tuple(pymupdf.Rect(w[:4]) * page.rotation_matrix), w[4])
-            for page in doc for w in page.get_text("words")]
+def ocr_available() -> bool:
+    """OCR needs Tesseract installed on the PC (with Italian language data)."""
+    try:
+        return bool(pymupdf.get_tessdata())
+    except Exception:
+        return False
 
 
-def diff_words(old: list[Word], new: list[Word]) -> list[Change]:
-    a = [w.text for w in old]
-    b = [w.text for w in new]
+def extract_words(doc: pymupdf.Document, ocr: bool = False) -> list[Word]:
+    out = []
+    for page in doc:
+        words = page.get_text("words")
+        if not words and ocr and ocr_available():  # a scanned page: read the image
+            tp = page.get_textpage_ocr(language="ita+eng", dpi=300, full=True)
+            words = page.get_text("words", textpage=tp)
+        # get_text gives unrotated coordinates; turn them into what the reader sees
+        out += [Word(page.number, tuple(pymupdf.Rect(w[:4]) * page.rotation_matrix), w[4]) for w in words]
+    return out
+
+
+def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
+               ignore_punct: bool = False) -> list[Change]:
+    def key(w):
+        t = w.text.lower() if ignore_case else w.text
+        return re.sub(r"[^\w]", "", t) if ignore_punct else t
+    if ignore_punct:  # a lone "-" or "," is not a word worth reporting
+        old = [w for w in old if key(w)]
+        new = [w for w in new if key(w)]
+    a = [key(w) for w in old]
+    b = [key(w) for w in new]
     # Trim the common head/tail first: typical revisions touch a few spots, and
     # SequenceMatcher is roughly quadratic on what remains.
     # ponytail: a 100+ page contract rewritten everywhere can still take seconds; move the diff to a thread if that bites.
@@ -119,6 +141,29 @@ def export_report(old_path, new_path, changes: list[Change], out_path) -> None:
                     page.draw_rect(pymupdf.Rect(w.rect) + (r_old.width, 0, r_old.width, 0),
                                    color=None, fill=GREEN, fill_opacity=OPACITY)
     out.save(out_path, garbage=3, deflate=True)
+
+
+def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: str) -> None:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Modifiche"
+    ws.append(["N.", "Tipo", "Pagina originale", "Pagina nuova", f"Testo in {old_name}", f"Testo in {new_name}"])
+    names = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato"}
+    fills = {"delete": "FBE3E3", "insert": "E2F4E8", "replace": "FFF3D6"}
+    for i, c in enumerate(changes, 1):
+        ws.append([i, names[c.kind],
+                   c.old[0].page + 1 if c.old else (c.old_at.page + 1 if c.old_at else None),
+                   c.new[0].page + 1 if c.new else (c.new_at.page + 1 if c.new_at else None),
+                   " ".join(w.text for w in c.old), " ".join(w.text for w in c.new)])
+        ws.cell(ws.max_row, 2).fill = PatternFill("solid", fgColor=fills[c.kind])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for col, width in zip("ABCDEF", (6, 12, 16, 14, 60, 60)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+    wb.save(path)
 
 
 # ---------------------------------------------------------------- UI
@@ -375,3 +420,4 @@ class CompareTab(QWidget):
 
     def export(self, path: str) -> None:
         export_report(self.old_path, self.new_path, self.changes, path)
+
