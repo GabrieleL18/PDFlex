@@ -151,3 +151,37 @@ def test_errors_are_logged(tmp_path):
     except RuntimeError as e:
         text = log_error(type(e), e, e.__traceback__, tmp_path / "errori.log")
     assert "boom" in text and "boom" in (tmp_path / "errori.log").read_text(encoding="utf-8")
+
+
+def test_close_recent_and_zoom_reset(qapp, make_pdf, tmp_path, monkeypatch):
+    from pdflex import ui
+    tab = EditorTab()
+    src = make_pdf(tmp_path, ["uno"])
+    tab.open(str(src))
+    assert ui.recent_files() == [str(src.resolve())]
+    tab.set_zoom(2.3)
+    tab.zoom_label.click()
+    assert tab.zoom == 1.0
+    tab.add_field("text", 0, (10, 10, 100, 30))
+    monkeypatch.setattr("pdflex.editor.message", lambda *a, **k: 1)  # "Non salvare"
+    assert tab.close_doc() and tab.doc is None and tab.fields == []
+    assert tab.recent_lay.count() >= 2  # title + the file
+
+
+def test_compare_long_docs_render_lazily_and_scroll_sideways_together(qapp, make_pdf, tmp_path):
+    from PySide6.QtTest import QTest
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1200, 700)
+    tab.show()
+    pages = [f"pagina {i}" for i in range(40)]
+    tab.load(str(make_pdf(tmp_path, pages)), str(make_pdf(tmp_path, pages[:-1] + ["fine"])))
+    QTest.qWait(300)
+    assert 0 < len(tab.old_view._rendered) < 10  # only what is on screen
+    tab.go_to(0)  # the change is on the last page: it gets drawn when reached
+    assert 39 in tab.old_view._rendered
+    tab.zoom_by(3)
+    QTest.qWait(50)
+    a, b = tab.old_view.horizontalScrollBar(), tab.new_view.horizontalScrollBar()
+    a.setValue(a.maximum())
+    assert b.value() == b.maximum() > 0

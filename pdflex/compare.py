@@ -257,6 +257,8 @@ class CompareTab(QWidget):
         self.old_view, self.new_view = DocView(), DocView()
         self.old_view.verticalScrollBar().valueChanged.connect(lambda: self._follow(self.old_view, self.new_view))
         self.new_view.verticalScrollBar().valueChanged.connect(lambda: self._follow(self.new_view, self.old_view))
+        self.old_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.old_view, self.new_view))
+        self.new_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.new_view, self.old_view))
         self.old_view.scaled.connect(self._zoom_to)
         self.new_view.scaled.connect(self._zoom_to)
         self.old_label, self.new_label = QLabel(), QLabel()
@@ -469,6 +471,17 @@ class CompareTab(QWidget):
 
     def zoom_fit(self):
         self._zoom_to(1.0)
+
+    def _follow_x(self, src: DocView, dst: DocView):
+        """Zoomed in, moving sideways on one document moves the other the same way."""
+        if self._syncing or not self.sync.isChecked():
+            return
+        a, b = src.horizontalScrollBar(), dst.horizontalScrollBar()
+        self._syncing = True
+        try:
+            b.setValue(round(a.value() / a.maximum() * b.maximum()) if a.maximum() else 0)
+        finally:
+            self._syncing = False
 
     def _follow(self, src: DocView, dst: DocView):
         if self._syncing or not self.sync.isChecked() or not src.offsets or not dst.offsets:

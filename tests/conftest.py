@@ -30,3 +30,10 @@ def make_pdf():
 def qapp():
     from PySide6.QtWidgets import QApplication
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def private_data(tmp_path, monkeypatch):
+    """Recent files, blocks and signature go to a temp folder, never to the real user profile."""
+    from pdflex import ui
+    monkeypatch.setattr(ui, "DATA_DIR", tmp_path / "pdflex-data")

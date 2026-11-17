@@ -429,7 +429,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex.ui import (  # noqa: E402
-    Toggle, info, message, warn,
+    Toggle, add_recent, info, message, recent_files, warn,
     ACCENT, DocView, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
 
@@ -541,6 +541,12 @@ class PageView(QGraphicsView):
         else:
             super().mouseMoveEvent(e)
 
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier and self.tab.doc:
+            self.tab.set_zoom(self.tab.zoom * (1.15 if e.angleDelta().y() > 0 else 1 / 1.15))
+        else:
+            super().wheelEvent(e)
+
     def mouseReleaseEvent(self, e):
         if not self.band:
             return super().mouseReleaseEvent(e)
@@ -650,9 +656,11 @@ class EditorTab(QWidget):
         self.page_label = QLabel("")
         self.b_zout = button("", "zoom-out", "Ghost", "Riduci")
         self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci")
-        self.zoom_label = QLabel("")
-        self.zoom_label.setMinimumWidth(42)
-        self.zoom_label.setAlignment(Qt.AlignCenter)
+        self.zoom_label = button("", None, "Ghost", "Torna al 100%  (Ctrl+rotellina per ingrandire)")
+        self.zoom_label.setMinimumWidth(52)
+        self.zoom_label.clicked.connect(lambda: self.set_zoom(1.0))
+        self.b_close = button("Chiudi", "close", "Ghost", "Chiudi il documento (Ctrl+W)")
+        self.b_close.clicked.connect(self.close_doc)
         self.b_prev.clicked.connect(lambda: self.go_page(self.page_no - 1))
         self.b_next.clicked.connect(lambda: self.go_page(self.page_no + 1))
         self.b_zout.clicked.connect(lambda: self.set_zoom(self.zoom / 1.2))
@@ -661,7 +669,7 @@ class EditorTab(QWidget):
         self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
         self.b_undo.clicked.connect(self.undo)
         self.b_redo.clicked.connect(self.redo)
-        for w in (self.b_open, self.b_save, self.b_undo, self.b_redo, self.file_label):
+        for w in (self.b_open, self.b_save, self.b_undo, self.b_redo, self.file_label, self.b_close):
             bl.addWidget(w)
         bl.addStretch()
         for w in (self.b_list, self.b_preview):
@@ -679,8 +687,13 @@ class EditorTab(QWidget):
         empty = QWidget()
         el = QVBoxLayout(empty)
         el.setContentsMargins(80, 60, 80, 60)
-        el.addWidget(self.drop)
-        empty.setStyleSheet("background: #E9EDF2;")
+        el.addWidget(self.drop, 3)
+        self.recent_box = QWidget()
+        self.recent_lay = QVBoxLayout(self.recent_box)
+        self.recent_lay.setContentsMargins(0, 18, 0, 0)
+        self.recent_lay.setSpacing(2)
+        el.addWidget(self.recent_box, 2)
+        empty.setObjectName("Desk")
         self.stack = QStackedWidget()
         self.stack.addWidget(empty)
         self.stack.addWidget(self.view)
@@ -809,6 +822,7 @@ class EditorTab(QWidget):
         QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
+        QShortcut(QKeySequence("Ctrl+W"), self, self.close_doc)
         QShortcut(QKeySequence.Undo, self, self.undo)
         QShortcut(QKeySequence.Redo, self, self.redo)
         QShortcut(QKeySequence("Ctrl+Y"), self, self.redo)
@@ -840,6 +854,34 @@ class EditorTab(QWidget):
         if path:
             self.open(path)
 
+    def close_doc(self) -> bool:
+        """Back to the start screen; asks to save first when something changed."""
+        if not self.doc or not self.confirm_discard():
+            return False
+        self.doc.close()
+        self.doc, self.path, self.fields, self.dirty = None, None, [], False
+        self._select(None)
+        self._undo.clear()
+        self._redo.clear()
+        self.title_changed.emit("")
+        self.refresh()
+        return True
+
+    def _fill_recent(self):
+        while self.recent_lay.count():
+            w = self.recent_lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        files = recent_files()
+        if not files:
+            return
+        self.recent_lay.addWidget(QLabel("Aperti di recente", objectName="H2"))
+        for p in files[:6]:
+            b = button(f"{Path(p).name}   {Path(p).parent}", "clock", "Recent", tip=p)
+            b.clicked.connect(lambda _=False, p=p: self.open(p))
+            self.recent_lay.addWidget(b)
+        self.recent_lay.addStretch()
+
     def open(self, path: str) -> None:
         if not self.confirm_discard():
             return
@@ -856,6 +898,7 @@ class EditorTab(QWidget):
         self._undo.clear()
         self._redo.clear()
         self.title_changed.emit(Path(path).name)
+        add_recent(path)
         self.fit_width()
 
     def ask_save(self) -> bool:
@@ -1113,6 +1156,12 @@ class EditorTab(QWidget):
         for w in (self.b_save, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list, self.b_preview,
                   self.b_detect):
             w.setEnabled(has)
+        for w in (self.b_close, self.zoom_label):
+            w.setVisible(has)
+        if not has:
+            self.file_label.setText("")
+            self.page_label.setText("")
+            self._fill_recent()
         self.b_undo.setEnabled(bool(self._undo))
         self.b_redo.setEnabled(bool(self._redo))
         if has:

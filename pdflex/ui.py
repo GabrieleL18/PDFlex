@@ -1,4 +1,6 @@
 """Look & feel and shared widgets: palette, stylesheet, icons, sharp page rendering, page stack view."""
+import json
+import os
 import struct
 import tempfile
 from pathlib import Path
@@ -56,6 +58,8 @@ QComboBox::drop-down {{ border: none; width: 24px; }}
 QComboBox QAbstractItemView {{ border: 1px solid {LINE}; background: #FFFFFF; outline: none; padding: 4px;
     selection-background-color: {ACCENT_SOFT}; selection-color: {INK}; }}
 #Desk {{ background: {DESK}; }}
+QPushButton#Recent {{ border: none; background: transparent; text-align: left; padding: 7px 10px; color: {INK}; }}
+QPushButton#Recent:hover {{ background: #FFFFFF; }}
 QLabel#H1 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 14pt; font-weight: 600; }}
 QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11pt; font-weight: 600; }}
 QLabel#Muted {{ color: {MUTED}; }}
@@ -100,6 +104,8 @@ _ICONS = {
     "signature": '<path d="M3 16.5c2.5-5 4.5-8 6.5-8 2.2 0-.8 7.5 1.5 7.5 1.8 0 2.7-3.5 4.6-3.5 1.6 0 1.9 2.5 5.4 2.5M3 20.5h18"/>',
     "form": '<path d="M6.5 3h8L19 7.5V19a2 2 0 0 1-2 2H6.5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 3v5h5M8 13h8M8 17h5"/>',
     "compare": '<rect x="3" y="4" width="8" height="16" rx="1.8"/><rect x="13" y="4" width="8" height="16" rx="1.8"/><path d="M5.5 9h3M15.5 12.5h3"/>',
+    "close": '<path d="M6 6l12 12M18 6 6 18"/>',
+    "clock": '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
     "trash": '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/>',
     "copy": '<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.2"/><path d="M15.5 8.5V6A2 2 0 0 0 13.5 4H6A2 2 0 0 0 4 6v7.5a2 2 0 0 0 2 2h2.5"/>',
     "list": '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor"/>',
@@ -140,6 +146,33 @@ def icon(name: str, color: str = INK) -> QIcon:
            f'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" color="{color}">'
            f'{_ICONS[name].replace("currentColor", color)}</svg>')
     return QIcon(QPixmap.fromImage(_render(svg, 48)))
+
+
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "PDFlex"  # recent files, blocks, signature
+
+
+def load_json(name: str, default):
+    try:
+        return json.loads((DATA_DIR / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(name: str, data) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / name).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass  # a missing list of recent files is not worth an error
+
+
+def recent_files() -> list[str]:
+    return [p for p in load_json("recenti.json", []) if Path(p).exists()]
+
+
+def add_recent(path: str) -> None:
+    path = str(Path(path).resolve())
+    save_json("recenti.json", ([path] + [p for p in recent_files() if p != path])[:8])
 
 
 def stylesheet() -> str:
@@ -382,6 +415,8 @@ class DocView(QGraphicsView):
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._timer = QTimer(self, singleShot=True, interval=120, timeout=self.render)
+        self._rendered, self._dpr = set(), 1.0
+        self.verticalScrollBar().valueChanged.connect(self._render_visible)
 
     def show_doc(self, doc):
         self.doc = doc
@@ -402,19 +437,34 @@ class DocView(QGraphicsView):
         self.k = max(avail - 2 * self.GAP, 200) / widest * self.scale
         dpr = self.devicePixelRatioF()
         self.offsets, self.heights, y = [], [], self.GAP
-        # ponytail: renders every page on each resize; very long documents are slow/heavy, render lazily if it bites
-        for page in self.doc:
-            item = s.addPixmap(render_page(page, self.k, self.annots, dpr))
-            item.setOffset(self.GAP, y)
-            page_shadow(item)
+        self._rendered, self._dpr = set(), dpr
+        for page in self.doc:  # white sheets now, the picture only when the page comes into view
+            w, h = page.rect.width * self.k, page.rect.height * self.k
+            sheet = s.addRect(self.GAP, y, w, h, QPen(Qt.NoPen), QBrush(Qt.white))
+            sheet.setZValue(-2)
+            page_shadow(sheet)
             self.offsets.append(y)
-            self.heights.append(page.rect.height * self.k)
-            y += page.rect.height * self.k + self.GAP
+            self.heights.append(h)
+            y += h + self.GAP
         s.setSceneRect(0, 0, widest * self.k + 2 * self.GAP, y)
         for words, rgb, opacity in self.highlights:
             self._paint(words, rgb, opacity)
         self._paint_current()
         bar.setValue(round(frac * bar.maximum()))
+        self._render_visible()
+
+    def _render_visible(self):
+        """Draw the pages on screen (and one screen above/below); long documents stay quick."""
+        if not self.doc or not self.offsets:
+            return
+        top = self.verticalScrollBar().value()
+        span = self.viewport().height()
+        for i, (off, h) in enumerate(zip(self.offsets, self.heights)):
+            if i not in self._rendered and off + h >= top - span and off <= top + 2 * span:
+                item = self.scene().addPixmap(render_page(self.doc[i], self.k, self.annots, self._dpr))
+                item.setOffset(self.GAP, off)
+                item.setZValue(-1)  # under the highlights
+                self._rendered.add(i)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

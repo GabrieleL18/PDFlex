@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
         h.addWidget(rail)
         h.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
-        self.editor.title_changed.connect(lambda name: self.setWindowTitle(f"{name} - PDFlex"))
+        self.editor.title_changed.connect(lambda name: self.setWindowTitle(f"{name} - PDFlex" if name else "PDFlex"))
         if path:  # "Apri con PDFlex" or double click on a PDF
             self.editor.open(path)
 
