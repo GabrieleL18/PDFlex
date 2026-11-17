@@ -1,10 +1,12 @@
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt
 from PySide6.QtGui import QDropEvent
+from PySide6.QtTest import QTest
 
 
 def _drop(grid, pos):
     grid.dragging = True  # as during a drag started on the grid
-    ev = QDropEvent(QPointF(pos), Qt.MoveAction | Qt.CopyAction, QMimeData(), Qt.LeftButton, Qt.NoModifier)
+    mime = QMimeData()  # kept in a variable: Qt does not own it, Python would free it at once
+    ev = QDropEvent(QPointF(pos), Qt.MoveAction | Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
     grid.dropEvent(ev)
     grid.dragging = False
     return ev
@@ -37,6 +39,59 @@ def test_drop_from_outside_is_left_to_the_tab(qapp, make_pdf, tmp_path):
     from pdflex.pages import PagesTab
     tab = PagesTab()
     tab.add_files([str(make_pdf(tmp_path, ["a", "b"]))])
-    ev = QDropEvent(QPointF(5, 5), Qt.CopyAction, QMimeData(), Qt.LeftButton, Qt.NoModifier)
+    mime = QMimeData()
+    ev = QDropEvent(QPointF(5, 5), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
     tab.grid.dropEvent(ev)
     assert not ev.isAccepted() and tab.grid.count() == 2
+
+
+def test_undo_redo_pages(qapp, make_pdf, tmp_path):
+    from pdflex.pages import PagesTab
+    tab = PagesTab()
+    tab.add_files([str(make_pdf(tmp_path, ["a", "b", "c"]))])
+    order = lambda: [(r.index, r.rotation) for r in tab.refs()]
+    tab.grid.item(0).setSelected(True)
+    tab.rotate(90)
+    tab.delete_selected()
+    assert order() == [(1, 0), (2, 0)]
+    tab.undo()
+    assert order() == [(0, 90), (1, 0), (2, 0)]
+    tab.undo()
+    assert order() == [(0, 0), (1, 0), (2, 0)]  # the rotation, undone on its own
+    tab.undo()
+    assert order() == []  # adding the file
+    tab.redo()
+    tab.redo()
+    assert order() == [(0, 90), (1, 0), (2, 0)] and tab.b_redo.isEnabled()
+
+
+def test_pdf_dropped_between_thumbnails(qapp, make_pdf, tmp_path):
+    from PySide6.QtCore import QUrl
+    from pdflex.pages import PagesTab
+    tab = PagesTab()
+    tab.resize(1000, 600)
+    tab.show()
+    first, other = make_pdf(tmp_path, ["a", "b"]), make_pdf(tmp_path, ["X"])
+    tab.add_files([str(first)])
+    g = tab.grid
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(other))])
+    r = g.visualItemRect(g.item(0))
+    ev = QDropEvent(QPointF(r.right() - 3, r.center().y()), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    g.dropEvent(ev)  # right half of the first page: goes after it
+    from pathlib import Path
+    assert [(Path(r.path) == other, r.index) for r in tab.refs()] == [(False, 0), (True, 0), (False, 1)]
+
+
+def test_ctrl_z_belongs_to_the_tab_on_screen(qapp, make_pdf, tmp_path):
+    from pdflex.app import MainWindow
+    w = MainWindow()
+    w.show()
+    w.editor.open(str(make_pdf(tmp_path, ["x"])))
+    w.editor.add_field("text", 0, (10, 10, 100, 30))
+    w.tabs.setCurrentIndex(3)
+    w.pages.add_files([str(make_pdf(tmp_path, ["a"]))])
+    w.activateWindow()
+    QTest.qWaitForWindowActive(w)
+    QTest.keyClick(w.pages.grid, Qt.Key_Z, Qt.ControlModifier)
+    assert w.pages.grid.count() == 0 and len(w.editor.fields) == 1

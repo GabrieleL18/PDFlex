@@ -4,14 +4,15 @@ import os
 from contextlib import contextmanager
 import struct
 import tempfile
+import threading
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap, QTextDocument
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
     QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
     QVBoxLayout,
 )
@@ -463,8 +464,8 @@ def warn(parent, text: str) -> None:
 def progress(parent, text: str, total: int):
     """Bar for slow work on long documents, shown only if it lasts more than half a second.
 
-    Yields set_value(done); on a modal dialog that also keeps the window painted."""
-    d = QProgressDialog(text, "", 0, max(total, 1), parent)
+    Yields set_value(done); on a modal dialog that also keeps the window painted. total=0: a moving bar."""
+    d = QProgressDialog(text, "", 0, total, parent)
     d.setCancelButton(None)
     d.setWindowTitle("PDFlex")
     d.setWindowModality(Qt.WindowModal)
@@ -475,6 +476,28 @@ def progress(parent, text: str, total: int):
     finally:
         d.reset()  # also stops the timer that would pop it up later
         d.deleteLater()
+
+
+def run_busy(parent, text: str, fn):
+    """fn() in a thread, so a long job doesn't freeze the window ("Non risponde"); returns its result.
+
+    Meanwhile the window keeps painting but ignores clicks and keys: no second job can start."""
+    out = {}
+
+    def work():
+        try:
+            out["value"] = fn()
+        except BaseException as e:  # handed back to the caller below
+            out["error"] = e
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    with progress(parent, text, 0):
+        while t.is_alive():
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+            t.join(0.03)
+    if "error" in out:
+        raise out["error"]
+    return out["value"]
 
 
 def toggle_full_screen(widget) -> None:

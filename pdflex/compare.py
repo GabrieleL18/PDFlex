@@ -38,11 +38,20 @@ class Change:
     new: list[Word]
     old_at: Word | None
     new_at: Word | None
+    whole: list[int] = field(default_factory=list)  # pages added / removed entirely (insert / delete)
+
+    def pages_text(self) -> str:
+        """ "Pagina 5 aggiunta", "Pagine 5, 6 rimosse": a whole page in or out, said as such."""
+        n = [str(p + 1) for p in self.whole]
+        verb = "aggiunt" if self.kind == "insert" else "rimoss"
+        return f"Pagina {n[0]} {verb}a" if len(n) == 1 else f"Pagine {', '.join(n)} {verb}e"
 
     def label(self) -> str:
         def short(words):
             s = " ".join(w.text for w in words)
             return s if len(s) <= 60 else s[:59] + "…"
+        if self.whole:
+            return f"{self.pages_text()} per intero: {short(self.old or self.new)}"
         if self.kind == "delete":
             return f"Rimosso (p. {self.old[0].page + 1}): {short(self.old)}"
         if self.kind == "insert":
@@ -127,7 +136,7 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
     b = [key(w) for w in new]
     # Trim the common head/tail first: typical revisions touch a few spots, and
     # SequenceMatcher is roughly quadratic on what remains.
-    # ponytail: a 100+ page contract rewritten everywhere can still take seconds; move the diff to a thread if that bites.
+    # A 100+ page contract rewritten everywhere can still take seconds: the tab runs this in a thread (ui.run_busy).
     lo = 0
     while lo < min(len(a), len(b)) and a[lo] == b[lo]:
         lo += 1
@@ -159,7 +168,28 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
                 keyed.append((run[0][0], Change("format", [old[i] for i, _ in run], [new[j] for _, j in run],
                                                 old[run[0][0]], new[run[0][1]])))
             run = [(i, j)] if differs else []
-    return [c for _, c in sorted(keyed, key=lambda kc: kc[0])]
+    changes = [c for _, c in sorted(keyed, key=lambda kc: kc[0])]
+    pages = ({}, {})  # side -> page -> its words' keys
+    for side, words in enumerate((old, new)):
+        for w in words:
+            pages[side].setdefault(w.page, []).append(key(w))
+    for c in changes:
+        if c.kind in ("insert", "delete"):
+            words, side = (c.new, 1) if c.kind == "insert" else (c.old, 0)
+            run = [key(w) for w in words]
+            c.whole = [pg for pg in sorted({w.page for w in words}) if _covers(run, pages[side][pg])]
+    return changes
+
+
+def _covers(run: list[str], page: list[str]) -> bool:
+    """Every word of the page is in the run. The diff may have slid the run a few words over a repeated
+    one: a page starting with "Articolo" removed shows up as "3. ... mesi. Articolo" (the next page's)."""
+    text = " " + " ".join(run) + " "
+    for k in range(min(len(page), 20)):
+        for seq in (page[k:] + page[:k], page[len(page) - k:] + page[:len(page) - k]):
+            if " " + " ".join(seq) + " " in text:
+                return True
+    return False
 
 
 def _find_moves(keyed, key):
@@ -210,6 +240,9 @@ def change_html(c: Change, color: str) -> str:
                 f' <span style="{muted}">da pagina {c.old[0].page + 1}</span>')
     else:
         body = words(c.new, "font-weight:600;") + f' <span style="{muted}">→ {html.escape(_style_change(c))}</span>'
+    if c.whole:  # a page in or out as a whole: say it first, the words are just a reminder of which
+        return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{c.pages_text()} per intero</span><br>'
+                f'<span style="{muted}">{html.escape(" ".join(w.text for w in (c.new or c.old))[:90])}…</span>')
     return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{KIND_TITLES[c.kind]}</span>'
             f'<span style="{muted}"> &nbsp;pagina {page}</span><br>{body}')
 
@@ -545,9 +578,9 @@ class CompareTab(QWidget):
         try:
             self.old_view.show_doc(self.docs[0])
             self.new_view.show_doc(self.docs[1])
-            self.changes = diff_words(*self.words, ignore_case=self.ignore_case.isChecked(),
-                                      ignore_punct=self.ignore_punct.isChecked(),
-                                      formatting=self.formatting.isChecked())
+            options = dict(ignore_case=self.ignore_case.isChecked(), ignore_punct=self.ignore_punct.isChecked(),
+                           formatting=self.formatting.isChecked())
+            self.changes = ui.run_busy(self, "Confronto i testi...", lambda: diff_words(*self.words, **options))
         finally:
             QApplication.restoreOverrideCursor()
         counts = {k: sum(c.kind == k for c in self.changes) for k in KIND_NAMES}
@@ -555,6 +588,10 @@ class CompareTab(QWidget):
             left, right = SIDE_COLORS[c.kind]
             self.old_view.highlight(c.old, left or RED, OPACITY)
             self.new_view.highlight(c.new, right or GREEN, OPACITY)
+            if c.whole:  # the whole sheet tinted, not only its words
+                view, doc, rgb = ((self.new_view, self.docs[1], GREEN) if c.kind == "insert"
+                                  else (self.old_view, self.docs[0], RED))
+                view.highlight([Word(pg, tuple(doc[pg].rect), "") for pg in c.whole], rgb, 0.08)
             item = QListWidgetItem(c.label())  # plain text: tooltips and screen readers
             item.setData(Qt.UserRole + 1, change_html(c, KIND_COLORS[c.kind]))
             self.list.addItem(item)

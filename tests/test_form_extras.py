@@ -80,3 +80,62 @@ def test_align_rects():
 
 def test_snap():
     assert snap((11, 12.6, 49, 31)) == (10, 15, 50, 30)
+
+
+def test_changing_format_sum_boxes_keeps_other_properties(make_pdf, tmp_path):
+    """Format, sum and boxes are edited in place: tooltip and colours set in another program survive."""
+    import pymupdf
+    src = tmp_path / "altro.pdf"
+    doc = open_pdf(make_pdf(tmp_path, ["x"]))
+    for name, y in (("a", 10), ("b", 40), ("tot", 70)):
+        w = pymupdf.Widget()
+        w.field_type, w.field_name, w.rect = pymupdf.PDF_WIDGET_TYPE_TEXT, name, pymupdf.Rect(10, y, 150, y + 20)
+        w.field_label, w.fill_color = f"Suggerimento {name}", (1, 1, 0.8)
+        doc[0].add_widget(w)
+    doc.save(src)
+    fields = {f.name: f for f in load_fields(open_pdf(src))}
+    fields["a"].fmt = "amount"
+    fields["tot"].fmt, fields["tot"].calc = "number", ["a", "b"]
+    fields["b"].comb = 8
+    out = tmp_path / "out.pdf"
+    save_with_fields(src, list(fields.values()), out)
+    got = {f.name: f for f in load_fields(open_pdf(out))}
+    assert got["a"].fmt == "amount" and got["tot"].fmt == "number" and got["tot"].calc == ["a", "b"]
+    assert got["b"].comb == 8
+    widgets = {w.field_name: w for w in open_pdf(out)[0].widgets()}
+    for name in ("a", "b", "tot"):
+        assert widgets[name].field_label == f"Suggerimento {name}"
+        assert widgets[name].fill_color == pytest.approx([1, 1, 0.8])
+    assert widgets["tot"].field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY  # a total is computed, not typed
+    # and back: no format, no sum
+    fields = {f.name: f for f in load_fields(open_pdf(out))}
+    fields["tot"].fmt, fields["tot"].calc, fields["b"].comb = "", [], 0
+    save_with_fields(out, list(fields.values()), tmp_path / "back.pdf")
+    got = {f.name: f for f in load_fields(open_pdf(tmp_path / "back.pdf"))}
+    assert (got["tot"].fmt, got["tot"].calc, got["b"].comb) == ("", [], 0)
+    w = {w.field_name: w for w in open_pdf(tmp_path / "back.pdf")[0].widgets()}["tot"]
+    assert not w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY and w.field_label == "Suggerimento tot"
+
+
+def test_field_written_by_other_programs_keeps_its_format(make_pdf, tmp_path):
+    """Acrobat-style form: field and widget are one object, the format action written inside it.
+    PDFlex reads that format, and moving the field does not wipe it."""
+    src = tmp_path / "acrobat.pdf"
+    d = open_pdf(make_pdf(tmp_path, ["x"]))
+    w = pymupdf.Widget()
+    w.field_type, w.field_name, w.rect = pymupdf.PDF_WIDGET_TYPE_TEXT, "n", pymupdf.Rect(10, 10, 90, 30)
+    x = d[0].add_widget(w).xref
+    parent = int(d.xref_get_key(x, "Parent")[1].split()[0])
+    d.xref_set_key(x, "T", "(n)")
+    d.xref_set_key(x, "FT", "/Tx")
+    d.xref_set_key(x, "DA", pymupdf.get_pdf_str(d.xref_get_key(parent, "DA")[1]))
+    d.xref_set_key(x, "Parent", "null")
+    d.xref_set_key(d.pdf_catalog(), "AcroForm/Fields", f"[{x} 0 R]")
+    js = pymupdf.get_pdf_str('AFNumber_Format(2, 2, 0, 0, "", true);')
+    d.xref_set_key(x, "AA", f"<</F<</S/JavaScript/JS {js}>>>>")
+    d.save(src)
+    f = load_fields(open_pdf(src))[0]
+    assert f.fmt == "number"
+    f.rect = (20, 20, 100, 40)
+    save_with_fields(src, [f], tmp_path / "out.pdf")
+    assert load_fields(open_pdf(tmp_path / "out.pdf"))[0].fmt == "number"

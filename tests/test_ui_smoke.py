@@ -252,3 +252,21 @@ def test_compare_marks_rows_and_page_view(qapp, make_pdf, tmp_path):
     tab.zoom_page()
     view = tab.old_view
     assert view.heights[0] <= view.viewport().height()  # a whole page fits on screen
+
+
+def test_run_busy_returns_result_and_errors(qapp):
+    from pdflex import ui
+    assert ui.run_busy(None, "x", lambda: sum(range(10))) == 45
+    with pytest.raises(ZeroDivisionError):
+        ui.run_busy(None, "x", lambda: 1 / 0)
+
+
+def test_window_remembers_its_place_and_stays_on_screen(qapp):
+    from pdflex import ui
+    from pdflex.app import MainWindow
+    w = MainWindow()
+    w.show()
+    w.close()
+    assert ui.load_json("finestra.json", {}).get("geometria")
+    w2 = MainWindow()  # saved larger than this test screen, as from a big monitor to a laptop
+    assert qapp.primaryScreen().availableGeometry().contains(w2.frameGeometry())

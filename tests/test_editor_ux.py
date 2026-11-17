@@ -131,3 +131,21 @@ def test_preview_leaves_nothing_behind(tab):
     QTest.qWait(50)
     assert shown and shown[0] is not None
     assert not tab.findChildren(QDialog)  # the window is gone with its document (memory and file lock)
+
+
+def test_copy_paste_fields(tab):
+    a = tab.add_field("text", 0, (20, 20, 120, 40))
+    a.fmt = "amount"
+    b = tab.add_field("checkbox", 0, (20, 50, 34, 64))
+    tab.select_many([a, b])
+    tab.view.setFocus()
+    QTest.keyClick(tab.view, Qt.Key_C, Qt.ControlModifier)
+    QTest.keyClick(tab.view, Qt.Key_V, Qt.ControlModifier)  # same page: a little lower-right
+    new = tab.fields[2:]
+    assert [f.name for f in new] == ["text_1_2", "checkbox_1_2"] and new[0].fmt == "amount"
+    assert new[0].rect[0] == pytest.approx(30) and [f.name for f in tab.selection] == ["text_1_2", "checkbox_1_2"]
+    tab.go_page(1)
+    made = tab.paste()  # another page: the same place
+    assert [f.page for f in made] == [1, 1] and made[0].rect[0] == pytest.approx(30)
+    tab.undo()
+    assert len(tab.fields) == 4

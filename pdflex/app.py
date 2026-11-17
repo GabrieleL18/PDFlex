@@ -1,3 +1,4 @@
+import base64
 import ctypes
 import os
 import sys
@@ -5,7 +6,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QByteArray, QSize, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QStackedWidget, QToolButton,
@@ -25,6 +26,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PDFlex")
         self.setWindowIcon(ui.app_icon())
         self.resize(1400, 880)
+        saved = ui.load_json("finestra.json", {}).get("geometria")
+        if saved:  # size, place and maximized as when it was last closed
+            self.restoreGeometry(QByteArray(base64.b64decode(saved)))
         self.editor = EditorTab()
         self.compare = CompareTab()
         self.batch = BatchTab()
@@ -79,6 +83,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if self.editor.confirm_discard():
+            ui.save_json("finestra.json", {"geometria": base64.b64encode(bytes(self.saveGeometry())).decode()})
             e.accept()
         else:
             e.ignore()

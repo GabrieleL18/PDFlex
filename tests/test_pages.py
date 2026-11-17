@@ -33,3 +33,10 @@ def test_pages_tab(qapp, make_pdf, tmp_path):
     out = tmp_path / "out.pdf"
     tab.save(str(out))
     assert [p.get_text().strip() for p in open_pdf(out)] == ["A1", "B1"]
+
+
+def test_save_over_a_source_file(make_pdf, tmp_path):
+    a = make_pdf(tmp_path, ["uno", "due", "tre"])
+    assemble([PageRef(str(a), 2), PageRef(str(a), 0)], a)
+    assert [p.get_text().strip() for p in open_pdf(a)] == ["tre", "uno"]
+    assert not list(tmp_path.glob("*.pdflex-tmp"))

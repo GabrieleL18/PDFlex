@@ -152,3 +152,26 @@ def test_extract_words_reads_bold(tmp_path):
     p.insert_text((72, 100), "grassetto", fontname="hebo")
     words = {w.text: w for w in extract_words(doc)}
     assert words["grassetto"].style[0] is True and words["normale"].style[0] is False
+
+
+def test_whole_page_added_or_removed_is_said_so():
+    def doc(pages):
+        return [Word(p, (0, 0, 1, 1), t) for p, text in enumerate(pages) for t in text.split()]
+    a = ["uno due tre", "quattro cinque sei", "sette otto"]
+    b = ["uno due tre", "pagina nuova tutta inserita", "quattro cinque sei", "sette otto"]
+    [c] = diff_words(doc(a), doc(b))
+    assert c.kind == "insert" and c.whole == [1]
+    assert c.label().startswith("Pagina 2 aggiunta per intero")
+    [c] = diff_words(doc(b), doc(a))
+    assert c.kind == "delete" and c.whole == [1] and c.pages_text() == "Pagina 2 rimossa"
+    [c] = diff_words(doc(["uno due tre"]), doc(["uno due tre quattro"]))  # a word, not a page
+    assert c.whole == []
+
+
+def test_whole_page_found_when_pages_start_alike():
+    """Every page starts with "Articolo": the diff slides the removed run by one word, still a whole page."""
+    pages = [f"Articolo {i} il prezzo resta uguale per tutti" for i in range(6)]
+    def doc(ps):
+        return [Word(p, (0, 0, 1, 1), t) for p, text in enumerate(ps) for t in text.split()]
+    [c] = diff_words(doc(pages), doc(pages[:3] + pages[4:]))
+    assert c.kind == "delete" and c.whole == [3], " ".join(w.text for w in c.old)

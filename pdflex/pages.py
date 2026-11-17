@@ -1,10 +1,11 @@
 """Merge PDFs, reorder / rotate / delete pages, split into single pages."""
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
 
-from pdflex import open_pdf
+from pdflex import open_pdf, write_atomic
 
 
 @dataclass
@@ -32,7 +33,8 @@ def _build(refs) -> pymupdf.Document:
 
 
 def assemble(refs: list[PageRef], out_path) -> None:
-    _build(refs).save(out_path, garbage=3, deflate=True)
+    # bytes first, file last: saving over one of the source PDFs can't leave it half written
+    write_atomic(out_path, _build(refs).tobytes(garbage=3, deflate=True))
 
 
 def split(refs: list[PageRef], out_dir, stem: str) -> list[Path]:
@@ -48,7 +50,7 @@ def split(refs: list[PageRef], out_dir, stem: str) -> list[Path]:
 
 # ---------------------------------------------------------------- UI
 
-from PySide6.QtCore import QSize, Qt  # noqa: E402
+from PySide6.QtCore import QSize, Qt, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QFileDialog, QFrame, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QSizePolicy,
@@ -66,7 +68,10 @@ class PageGrid(QListWidget):
     """Thumbnails reordered by dragging.
 
     Qt's icon mode only shifts the pictures on screen when you drop, the order stays the same:
-    the drop is handled here, with a marker line showing where the pages will land."""
+    the drop is handled here, with a marker line showing where the pages will land.
+    PDF files dragged in from Explorer land where they are dropped too."""
+    about_to_move = Signal()  # before a drag reorders the pages (for undo)
+    files_dropped = Signal(list, int)  # PDF paths, row they go before
 
     def __init__(self):
         super().__init__(objectName="Changes")
@@ -112,14 +117,19 @@ class PageGrid(QListWidget):
             self.dragging = False
             self.marker = None
 
+    @staticmethod
+    def _pdfs(e) -> list[str]:
+        urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
+        return [u.toLocalFile() for u in urls if u.toLocalFile().lower().endswith(".pdf")]
+
     def dragEnterEvent(self, e):
-        if self.dragging:
+        if self.dragging or self._pdfs(e):
             e.acceptProposedAction()
         else:
-            e.ignore()  # PDF files from Explorer: the tab adds them
+            e.ignore()
 
     def dragMoveEvent(self, e):
-        if not self.dragging:
+        if not self.dragging and not self._pdfs(e):
             return e.ignore()
         e.acceptProposedAction()
         self.marker = self.target(e.position().toPoint())
@@ -130,10 +140,18 @@ class PageGrid(QListWidget):
         self.viewport().update()
 
     def dropEvent(self, e):
-        if not self.dragging:
-            return e.ignore()
-        self.move_selected(self.target(e.position().toPoint())[0])
+        row = self.target(e.position().toPoint())[0]
         self.marker = None
+        self.viewport().update()
+        if not self.dragging:
+            paths = self._pdfs(e)
+            if not paths:
+                return e.ignore()
+            e.acceptProposedAction()
+            self.files_dropped.emit(paths, row)
+            return
+        self.about_to_move.emit()
+        self.move_selected(row)
         e.setDropAction(Qt.CopyAction)  # already moved: a "move" result would make Qt delete the originals
         e.accept()
 
@@ -175,9 +193,17 @@ class PagesTab(QWidget):
         self.b_extract.clicked.connect(lambda: self.ask_save(selected=True))
         self.b_save.clicked.connect(lambda: self.ask_save())
         self.size.valueChanged.connect(lambda v: self.grid.set_thumb(v))
-        hint = QLabel("Trascina per riordinare, doppio clic per vedere una pagina in grande", objectName="Muted")
+        hint = QLabel("Trascina per riordinare", objectName="Muted")
+        hint.setToolTip("Trascina le miniature per riordinarle, o un PDF da Esplora risorse per inserirlo "
+                        "in quel punto. Doppio clic per vedere una pagina in grande.")
         hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # the buttons keep their words first
+        self.b_undo = button("", "undo", "Ghost", "Annulla (Ctrl+Z)")
+        self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
+        self.b_undo.clicked.connect(self.undo)
+        self.b_redo.clicked.connect(self.redo)
         bl.addWidget(self.b_add)
+        bl.addWidget(self.b_undo)
+        bl.addWidget(self.b_redo)
         bl.addSpacing(8)
         bl.addWidget(hint, 1)
         bl.addWidget(QLabel("Miniature", objectName="Muted"))
@@ -187,7 +213,10 @@ class PagesTab(QWidget):
             bl.addWidget(w)
 
         self.grid = PageGrid()
+        self._undo, self._redo = [], []
         self.grid.itemSelectionChanged.connect(self._buttons)
+        self.grid.about_to_move.connect(self._push)
+        self.grid.files_dropped.connect(self.add_files)
         self.grid.itemDoubleClicked.connect(self.show_page)
         drop = ui.DropZone("Unisci, riordina o dividi PDF", "Trascina qui uno o più PDF o clicca per sceglierli", "batch")
         drop.picked.connect(lambda p: self.add_files([p]))
@@ -204,6 +233,8 @@ class PagesTab(QWidget):
         lay.addWidget(bar)
         lay.addWidget(self.stack, 1)
         QShortcut(QKeySequence.Delete, self.grid, self.delete_selected)
+        QShortcut(QKeySequence.Undo, self, self.undo)
+        QShortcut(QKeySequence.Redo, self, self.redo)
         self._buttons()
 
     def dragEnterEvent(self, e):
@@ -228,13 +259,46 @@ class PagesTab(QWidget):
         p.end()
         return pix
 
-    def add_files(self, paths):
+    # ---- undo / redo: the whole list of pages (pictures included, nothing to re-render)
+    def _snapshot(self):
+        items = [self.grid.item(i) for i in range(self.grid.count())]
+        return [(copy.copy(it.data(Qt.UserRole)), it.icon(), it.text(), it.toolTip()) for it in items]
+
+    def _push(self):
+        self._undo.append(self._snapshot())
+        del self._undo[:-30]
+        self._redo.clear()
+
+    def _restore(self, src, dst):
+        if not src:
+            return
+        dst.append(self._snapshot())
+        self.grid.clear()
+        for ref, pic, text, tip in src.pop():
+            item = QListWidgetItem(pic, text)
+            item.setData(Qt.UserRole, ref)
+            item.setToolTip(tip)
+            self.grid.addItem(item)
+        self._buttons()
+
+    def undo(self):
+        self._restore(self._undo, self._redo)
+
+    def redo(self):
+        self._restore(self._redo, self._undo)
+
+    def add_files(self, paths, at: int | None = None):
+        """Pages of these PDFs at the end, or before row `at` (dropped between two thumbnails)."""
         docs = []
         for p in paths:
             try:
                 docs.append((p, open_pdf(p)))
             except ValueError as e:
                 warn(self, f"{Path(p).name}: {e}")
+        if not docs:
+            return
+        self._push()
+        row = self.grid.count() if at is None else at
         total, done = sum(d.page_count for _, d in docs), 0
         with ui.progress(self, "Preparo le miniature...", total) as step:
             for p, doc in docs:
@@ -243,7 +307,7 @@ class PagesTab(QWidget):
                     item = QListWidgetItem(self._icon(page, 0), f"{Path(p).stem[:18]}  p. {page.number + 1}")
                     item.setData(Qt.UserRole, ref)
                     item.setToolTip(f"{Path(p).name}, pagina {page.number + 1}")
-                    self.grid.addItem(item)
+                    self.grid.insertItem(row + done, item)
                     done += 1
                     step(done)
                 doc.close()
@@ -254,13 +318,18 @@ class PagesTab(QWidget):
         self.add_files(paths)
 
     def rotate(self, degrees: int):
+        if self.grid.selectedItems():
+            self._push()
         for item in self.grid.selectedItems():
             ref = item.data(Qt.UserRole)
             ref.rotation = (ref.rotation + degrees) % 360
             item.setData(Qt.UserRole, ref)
             item.setIcon(self._icon(open_pdf(ref.path)[ref.index], ref.rotation))
+        self._buttons()
 
     def delete_selected(self):
+        if self.grid.selectedItems():
+            self._push()
         for item in self.grid.selectedItems():
             self.grid.takeItem(self.grid.row(item))
         self._buttons()
@@ -281,6 +350,8 @@ class PagesTab(QWidget):
             w.setEnabled(has)
         for w in (self.b_left, self.b_right, self.b_del, self.b_extract):
             w.setEnabled(sel)
+        self.b_undo.setEnabled(bool(self._undo))
+        self.b_redo.setEnabled(bool(self._redo))
 
     def save(self, path: str, selected: bool = False) -> None:
         refs = [i.data(Qt.UserRole) for i in self.grid.selectedItems()] if selected else self.refs()

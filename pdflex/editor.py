@@ -1,6 +1,5 @@
 import base64
 import copy
-import os
 import re
 import unicodedata
 from collections import Counter
@@ -9,7 +8,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdflex import open_pdf
+from pdflex import open_pdf, write_atomic
 
 FIELD_KINDS = ("text", "multiline", "checkbox", "radio", "dropdown", "date", "signature")
 DATE_SCRIPT = 'AFDate_FormatEx("dd/mm/yyyy");'
@@ -86,16 +85,16 @@ _FMT_JS = {  # (format, keystroke, validate); 2 decimals, Italian separators (1.
 def _field_js(doc, w) -> dict[str, str]:
     """JavaScript of the field's actions (F format, K keystroke, V validate, C calculate).
 
-    PyMuPDF writes them but does not read them back, so read the objects directly."""
+    PyMuPDF writes them but does not read them back, so read the objects directly. The action may be
+    its own object or written inside the field (Acrobat and others): the key path follows both."""
     out = {}
     for holder in (w.xref, _xref_ref(doc, w.xref, "Parent")):
         if not holder:
             continue
         for key in ("F", "K", "V", "C"):
-            js = _xref_ref(doc, holder, f"AA/{key}")
-            if not js or key in out:
+            if key in out:
                 continue
-            t, v = doc.xref_get_key(js, "JS")
+            t, v = doc.xref_get_key(holder, f"AA/{key}/JS")
             if t == "xref":
                 out[key] = (doc.xref_stream(int(v.split()[0])) or b"").decode("latin-1")
             elif t == "string":
@@ -200,12 +199,11 @@ def _new_widget(f: Field) -> pymupdf.Widget:
     if f.kind == "text" and f.comb:
         w.text_maxlen = f.comb
         w.field_flags |= pymupdf.PDF_TX_FIELD_IS_COMB
-    fmt, stroke, validate = _FMT_JS.get(f.fmt, (None, None, None))
+    js = _scripts(f)
     if f.kind in ("text", "multiline") and f.fmt:
-        w.script_format, w.script_stroke, w.script_change = fmt, stroke, validate
+        w.script_format, w.script_stroke, w.script_change = js["F"], js["K"], js["V"]
     if f.calc:
-        names = ", ".join(f'"{n}"' for n in f.calc)
-        w.script_calc = f"AFSimple_Calculate(\"SUM\", new Array({names}));"
+        w.script_calc = js["C"]
         w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY  # a total is computed, not typed
     if f.kind == "dropdown":
         w.choice_values = list(f.options)
@@ -229,6 +227,33 @@ def _set_inherited(doc, f: Field, key: str, value: str) -> None:
         doc.xref_set_key(x, key, value)
 
 
+def _scripts(f: Field) -> dict[str, str | None]:
+    """The field's JavaScript by action key (None: no script), as PDFlex writes it."""
+    fmt, stroke, validate = _FMT_JS.get(f.fmt, (None, None, None))
+    calc = None
+    if f.calc:
+        calc = "AFSimple_Calculate(\"SUM\", new Array(" + ", ".join(f'"{n}"' for n in f.calc) + "));"
+    return {"F": fmt, "K": stroke, "V": validate, "C": calc}
+
+
+def _set_scripts(doc, f: Field, keys) -> None:
+    """Write format / sum scripts into the field itself: every other property stays as it was."""
+    holder = f.parent or f.xref
+    scripts = _scripts(f)
+    for key in keys:
+        for x in {f.xref, f.parent} - {0}:  # the old one, wherever it was
+            if doc.xref_get_key(x, f"AA/{key}")[0] != "null":
+                doc.xref_set_key(x, f"AA/{key}", "null")
+        if scripts[key]:
+            doc.xref_set_key(holder, f"AA/{key}", f"<</S/JavaScript/JS {pymupdf.get_pdf_str(scripts[key])}>>")
+    if "C" in keys:  # viewers recompute only the fields listed in the form's calculation order
+        cat = doc.pdf_catalog()
+        t, v = doc.xref_get_key(cat, "AcroForm/CO")
+        order = [int(n) for n in re.findall(r"(\d+) 0 R", v)] if t == "array" else []
+        order = [n for n in order if n != holder] + ([holder] if f.calc else [])
+        doc.xref_set_key(cat, "AcroForm/CO", "[" + " ".join(f"{n} 0 R" for n in order) + "]")
+
+
 def _update_widget(doc, f: Field) -> None:
     """Change only what the user edited, so properties PDFlex does not show survive."""
     o = f.orig
@@ -236,9 +261,16 @@ def _update_widget(doc, f: Field) -> None:
     # Written first: update() below redraws the field's look from them (font, size, options)
     if f.name != o.name:
         doc.xref_set_key(f.parent or f.xref, "T", pymupdf.get_pdf_str(f.name))
-    if f.required != o.required:
+    if f.required != o.required or f.comb != o.comb or bool(f.calc) != bool(o.calc):
         flags = int(_inherited(doc, f, "Ff") or 0)
-        _set_inherited(doc, f, "Ff", str(flags ^ pymupdf.PDF_FIELD_IS_REQUIRED))
+        for bit, on, was in ((pymupdf.PDF_FIELD_IS_REQUIRED, f.required, o.required),
+                             (pymupdf.PDF_TX_FIELD_IS_COMB, f.comb, o.comb),
+                             (pymupdf.PDF_FIELD_IS_READ_ONLY, f.calc, o.calc)):  # a total is computed, not typed
+            if bool(on) != bool(was):
+                flags = flags | bit if on else flags & ~bit
+        _set_inherited(doc, f, "Ff", str(flags))
+    if f.comb != o.comb:
+        _set_inherited(doc, f, "MaxLen", str(f.comb) if f.comb else "null")
     if f.font_size != o.font_size or f.font != o.font:
         da = _inherited(doc, f, "DA") or "0 0 0 rg /Helv 0 Tf"
         if f.font_size != o.font_size:
@@ -257,7 +289,23 @@ def _update_widget(doc, f: Field) -> None:
             w.field_value = f.default == "1"
         elif f.kind != "radio":
             w.field_value = f.default
+    # update() rewrites the widget's actions from what PyMuPDF read, and it reads none of them:
+    # put them back, or moving a field made in another program would wipe its format script
+    saved = {}
+    for key in ("AA", "A"):
+        t, v = doc.xref_get_key(f.xref, key)
+        saved[key] = (t, v, doc.xref_object(int(v.split()[0])) if t == "xref" else None)
     w.update()
+    for key, (t, v, obj) in saved.items():
+        if t == "dict":
+            doc.xref_set_key(f.xref, key, v)
+        elif t == "xref":
+            doc.update_object(int(v.split()[0]), obj)
+            doc.xref_set_key(f.xref, key, v)
+    changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt), "V": (f.fmt, o.fmt),
+                                   "C": (f.calc, o.calc)}.items() if a != b]
+    if changed:
+        _set_scripts(doc, f, changed)
 
 
 def _set_radio_state(doc, xref, old, new, checked, was_checked):
@@ -285,16 +333,7 @@ def build_pdf(src_path, fields: list[Field]) -> pymupdf.Document:
     placed = {}  # id(field) -> widget xref, for the tab order
     order = []
     for f in fields:
-        if f.xref and (f.fmt != f.orig.fmt or f.calc != f.orig.calc or f.comb != f.orig.comb):
-            # ponytail: format/sum scripts can't be edited in place reliably; the widget is rebuilt,
-            # which drops properties PDFlex doesn't show (max length, tooltip) for this one field
-            page = doc[f.page]
-            page.delete_widget(page.load_widget(f.xref))
-            f = copy.copy(f)
-            f.xref, f.orig, f.parent = 0, None, 0
-            order.append(f)
-        else:
-            order.append(f)
+        order.append(f)
         if f.xref:
             placed[id(f)] = f.xref
             if f == f.orig:
@@ -456,10 +495,7 @@ def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | 
     doc = build_pdf(src_path, fields)
     data = doc.tobytes(garbage=3, deflate=True)
     doc.close()
-    out = Path(out_path)
-    tmp = out.with_name(out.name + ".pdflex-tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, out)  # the original is untouched until the new file is complete
+    write_atomic(out_path, data)  # the original is untouched until the new file is complete
 
 
 # ---------------------------------------------------------------- UI
@@ -490,7 +526,8 @@ KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B",
                "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633"}
 HANDLE = 10  # px, resize grip in the bottom-right corner
 PAGE_MARGIN = 24
-TAG_H = 20  # name tag above the selected field
+TAG_H = 20  # name tag of the selected field
+TAG_MAX = 420  # px, longer names are cut
 
 
 class FieldItem(QGraphicsRectItem):
@@ -503,8 +540,8 @@ class FieldItem(QGraphicsRectItem):
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
         self.setAcceptHoverEvents(True)
 
-    def boundingRect(self):  # room for the name tag and the outer selection ring
-        return self.rect().adjusted(-6, -TAG_H - 8, 6, 6)
+    def boundingRect(self):  # room for the name tag (below or above, as wide as it gets) and the selection ring
+        return self.rect().adjusted(-6, -TAG_H - 8, max(6, TAG_MAX - self.rect().width()), TAG_H + 8)
 
     def paint(self, painter, option, widget=None):
         r = self.rect()
@@ -538,9 +575,10 @@ class FieldItem(QGraphicsRectItem):
             f = QFont()
             f.setBold(True)
             painter.setFont(f)
-            text = f"{KIND_LABELS[self.field.kind]}: {label}"
+            text = painter.fontMetrics().elidedText(f"{KIND_LABELS[self.field.kind]}: {label}", Qt.ElideRight,
+                                                    TAG_MAX - 24)
             tw = painter.fontMetrics().horizontalAdvance(text) + 16
-            tag = QRectF(r.left() - 4, r.top() - TAG_H - 6, tw, TAG_H)
+            tag = self._tag_rect(r, tw)
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(tag, 5, 5)
@@ -552,6 +590,22 @@ class FieldItem(QGraphicsRectItem):
             painter.drawEllipse(QRectF(r.right() - HANDLE / 2, r.bottom() - HANDLE / 2, HANDLE, HANDLE))
         details = self.details()
         self.setToolTip(f"{KIND_LABELS[self.field.kind]}: {label}" + (f"\n{details}" if details else ""))
+
+    def _tag_rect(self, r, tw) -> QRectF:
+        """Under or over the field: wherever it covers fewer words of the page and fewer other fields."""
+        page_bottom = self.scene().sceneRect().bottom() - PAGE_MARGIN - TAG_H if self.scene() else 1e9
+        best = None
+        for y in (r.bottom() + 6, r.top() - TAG_H - 6):
+            tag = QRectF(r.left() - 4, y, tw, TAG_H)
+            on_scene = tag.translated(self.pos())
+            covered = sum(on_scene.intersects(w) for w in self.tab.page_words)
+            covered += sum(on_scene.intersects(i.sceneBoundingRect().adjusted(6, TAG_H + 8, -6, -TAG_H - 8))
+                           for i in self.collidingItems() if isinstance(i, FieldItem))
+            if on_scene.bottom() > page_bottom or on_scene.top() < -TAG_H:
+                covered += 1000  # off the page
+            if best is None or covered < best[0]:
+                best = (covered, tag)
+        return best[1]
 
     def details(self) -> str:
         """What was set in the properties, in a few words."""
@@ -845,6 +899,7 @@ class EditorTab(QWidget):
         self.selection: list[Field] = []  # every selected field (Ctrl+click for more)
         self.dirty = False
         self.grid = False
+        self.page_words: list[QRectF] = []  # scene rects of the current page's words
         self._undo: list[list[Field]] = []
         self._redo: list[list[Field]] = []
         self._loading = False
@@ -907,6 +962,7 @@ class EditorTab(QWidget):
         pl.addStretch()
         keys = QLabel("Trascina sul vuoto o Ctrl+clic: più campi\n"
                       "Frecce: sposta di poco\nMaiusc+frecce: allinea al campo vicino\nCtrl+frecce: scorri la pagina\n"
+                      "Ctrl+C / Ctrl+V copia e incolla, anche su un'altra pagina\n"
                       "Canc elimina, Ctrl+D duplica\nCtrl+Z annulla, Ctrl+Y ripete", objectName="Muted")
         keys.setWordWrap(True)
         pl.addWidget(keys)
@@ -1140,6 +1196,8 @@ class EditorTab(QWidget):
 
         QShortcut(QKeySequence.Delete, self.view, self.delete_selected)
         QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
+        QShortcut(QKeySequence.Copy, self, self.copy_selected)  # in a text box Ctrl+C/V stay the box's own
+        QShortcut(QKeySequence.Paste, self, self.paste)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
         QShortcut(QKeySequence("Ctrl+W"), self, self.close_doc)
@@ -1534,9 +1592,30 @@ class EditorTab(QWidget):
         block = load_json("blocchi.json", {}).get(name)
         if not self.doc or not block:
             return []
-        page = self.doc[self.page_no]
         corner = self.view.mapToScene(0, 0)  # top-left of what is on screen
-        at = (max(corner.x() / self.zoom, 0) + 20, max(corner.y() / self.zoom, 0) + 20)
+        return self._place(block, (max(corner.x() / self.zoom, 0) + 20, max(corner.y() / self.zoom, 0) + 20))
+
+    def copy_selected(self):
+        """Ctrl+C: the selected fields, kept to be pasted on this page or another one."""
+        if not self.selection:
+            return
+        rects = [to_view(self.doc[f.page], f.rect) for f in self.selection]
+        self._clip = (make_block(self.selection, rects), (min(r[0] for r in rects), min(r[1] for r in rects)),
+                      self.page_no)
+
+    def paste(self) -> list[Field]:
+        """Ctrl+V: same place on another page, a little lower-right on the same page (again and again)."""
+        clip = getattr(self, "_clip", None)
+        if not self.doc or not clip:
+            return []
+        block, (x, y), page = clip
+        if page == self.page_no:
+            x, y = x + 10, y + 10
+        self._clip = (block, (x, y), self.page_no)
+        return self._place(block, (x, y))
+
+    def _place(self, block, at) -> list[Field]:
+        page = self.doc[self.page_no]
         self._push()
         made = []
         for data, r in place_block(block, at, {f.name for f in self.fields}):
@@ -1636,9 +1715,14 @@ class EditorTab(QWidget):
             page_shadow(pix)
             self.scene.addItem(pix)
             self._draw_other_annots(page)
+            z = self.zoom  # where the page's words are, so the name tag can avoid them
+            self.page_words = []
+            for w in page.get_text("words"):
+                x0, y0, x1, y1 = pymupdf.Rect(w[:4]) * page.rotation_matrix
+                self.page_words.append(QRectF(x0 * z, y0 * z, (x1 - x0) * z, (y1 - y0) * z))
             w, h = page.rect.width * self.zoom, page.rect.height * self.zoom
             self.scene.setSceneRect(-PAGE_MARGIN, -PAGE_MARGIN - TAG_H, w + 2 * PAGE_MARGIN,
-                                    h + 2 * PAGE_MARGIN + TAG_H)
+                                    h + 2 * PAGE_MARGIN + 2 * TAG_H)
             self.view.setSceneRect(self.scene.sceneRect())  # re-anchor even while the view was hidden
             for f in self.fields:
                 if f.page == self.page_no:
