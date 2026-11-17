@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+*.spec
+pdflex.ico
+__pycache__/
+.superpowers/
+.pytest_cache/
+*.pdflex-tmp

@@ -1,0 +1,5 @@
+pymupdf
+pyside6
+openpyxl
+pytest
+pyinstaller
