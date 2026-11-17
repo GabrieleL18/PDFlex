@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import textwrap
@@ -94,9 +95,11 @@ def ocr_available() -> bool:
         return False
 
 
-def extract_words(doc: pymupdf.Document, ocr: bool = False) -> list[Word]:
+def extract_words(doc: pymupdf.Document, ocr: bool = False, on_page=None) -> list[Word]:
     out = []
     for page in doc:
+        if on_page:
+            on_page(page.number)
         words = page.get_text("words")
         styles = None
         if not words and ocr and ocr_available():  # a scanned page: read the image (no formatting to read)
@@ -182,6 +185,35 @@ def _find_moves(keyed, key):
     return out
 
 
+TEXT_RED, TEXT_GREEN = "#B42318", "#1E7B45"
+
+
+def change_html(c: Change, color: str) -> str:
+    """One row of the list: what kind of change and where, then the words themselves, coloured."""
+    def words(ws, style):
+        t = " ".join(w.text for w in ws)
+        t = t if len(t) <= 160 else t[:159] + "…"
+        return f'<span style="{style}">{html.escape(t)}</span>'
+    old = words(c.old, f"color:{TEXT_RED}; text-decoration:line-through;")
+    new = words(c.new, f"color:{TEXT_GREEN}; font-weight:600;")
+    muted = "color:#5B6675;"
+    page = (c.old or c.new)[0].page + 1
+    if c.kind == "replace":
+        body = f"{old} &nbsp;→&nbsp; {new}"
+    elif c.kind == "delete":
+        body = old
+    elif c.kind == "insert":
+        body = new
+    elif c.kind == "move":
+        page = c.new[0].page + 1
+        body = (words(c.new, f"color:{color}; font-weight:600;") +
+                f' <span style="{muted}">da pagina {c.old[0].page + 1}</span>')
+    else:
+        body = words(c.new, "font-weight:600;") + f' <span style="{muted}">→ {html.escape(_style_change(c))}</span>'
+    return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{KIND_TITLES[c.kind]}</span>'
+            f'<span style="{muted}"> &nbsp;pagina {page}</span><br>{body}')
+
+
 def _summary_pages(out, old_path, new_path, changes):
     font = {"fontname": "arial", "fontfile": FONT} if os.path.exists(FONT) else {"fontname": "helv"}
     lines = [
@@ -261,12 +293,12 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
 
 from PySide6.QtCore import QSize, Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
-    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
+    QMessageBox, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from pdflex import ui  # noqa: E402
-from pdflex.ui import DocView, button, dot, info, warn  # noqa: E402
+from pdflex.ui import DocView, button, info, warn  # noqa: E402
 
 KIND_NAMES = KIND_TITLES
 KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1"}
@@ -284,23 +316,28 @@ class CompareTab(QWidget):
         self._syncing = False
         self.setAcceptDrops(True)
 
-        bar = QFrame(objectName="Bar")
+        bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
         self.b_new = button("Nuovo confronto", "refresh")
         self.b_new.clicked.connect(self.reset)
         self.summary = QLabel("Scegli i due PDF da confrontare", objectName="Muted")
+        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # long counts must not widen the window
         self.sync = ui.Toggle("Scorri insieme")
         self.sync.setChecked(True)
         self.sync.setToolTip("Scorrendo un documento, l'altro segue alla stessa pagina")
         self.b_zout = button("", "zoom-out", "Ghost", "Rimpicciolisci (Ctrl+rotellina)")
         self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci (Ctrl+rotellina)")
         self.zoom_label = button("100%", None, "Ghost", "Adatta alla larghezza")
+        self.b_page = button("", "page", "Ghost", "Pagina intera: una pagina alla volta sullo schermo")
+        self.b_full = button("", "expand", "Ghost", "Schermo intero (F11, Esc per uscire)")
         self.b_zout.clicked.connect(lambda: self.zoom_by(1 / 1.25))
         self.b_zin.clicked.connect(lambda: self.zoom_by(1.25))
         self.zoom_label.clicked.connect(self.zoom_fit)
-        self.b_prev = button("Precedente", "prev")
-        self.b_next = button("Successiva", "next")
+        self.b_page.clicked.connect(self.zoom_page)
+        self.b_full.clicked.connect(lambda: ui.toggle_full_screen(self))
+        self.b_prev = button("Precedente", "prev", tip="Modifica precedente")
+        self.b_next = button("Successiva", "next", tip="Modifica successiva")
         self.b_export = button("Esporta PDF", "export", "Primary")
         self.b_xlsx = button("Esporta Excel", "table", tip="Elenco delle modifiche in un foglio Excel")
         self.b_prev.clicked.connect(lambda: self.step(-1))
@@ -309,9 +346,8 @@ class CompareTab(QWidget):
         self.b_xlsx.clicked.connect(self.ask_export_xlsx)
         bl.addWidget(self.b_new)
         bl.addSpacing(10)
-        bl.addWidget(self.summary)
-        bl.addStretch()
-        for w in (self.b_zout, self.zoom_label, self.b_zin):
+        bl.addWidget(self.summary, 1)
+        for w in (self.b_zout, self.zoom_label, self.b_zin, self.b_page, self.b_full):
             bl.addWidget(w)
         bl.addSpacing(10)
         bl.addWidget(self.sync)
@@ -353,8 +389,9 @@ class CompareTab(QWidget):
         self.new_view.scaled.connect(self._zoom_to)
         self.old_label, self.new_label = QLabel(), QLabel()
         self.list = QListWidget(objectName="Changes")
-        self.list.setIconSize(QSize(10, 10))
-        self.list.setWordWrap(True)
+        self.list.setItemDelegate(ui.HtmlDelegate(self.list))
+        self.list.setResizeMode(QListView.Adjust)  # rows re-wrap when the panel is resized
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self._row_changed)
 
         def column(label, view, color):
@@ -384,8 +421,9 @@ class CompareTab(QWidget):
         self.kind_filter.currentIndexChanged.connect(self._apply_filter)
         self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
         self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
+        self.ignore_case.setChecked(True)
+        self.ignore_punct.setChecked(True)
         self.formatting = ui.Toggle("Segnala grassetto, corsivo e dimensione")
-        self.formatting.setChecked(True)
         self.formatting.toggled.connect(self._rediff)
         self.include_list = ui.Toggle("Elenco modifiche nel PDF esportato")
         self.include_list.setChecked(True)
@@ -447,6 +485,9 @@ class CompareTab(QWidget):
         else:
             self.new_path = path
             self.drop_new.set_file(path)
+        missing = "la nuova versione" if not self.new_path else "l'originale" if not self.old_path else ""
+        if missing:
+            self.summary.setText(f"{Path(path).name} caricato. Ora scegli {missing}.")
         if self.old_path and self.new_path:
             self.load(self.old_path, self.new_path)
 
@@ -454,15 +495,15 @@ class CompareTab(QWidget):
         self.old_path = self.new_path = None
         self.changes, self.current = [], -1
         self.list.clear()
-        self.drop_old.hint.setText(HINT)
-        self.drop_new.hint.setText(HINT)
+        self.drop_old.set_file(None)
+        self.drop_new.set_file(None)
         self.summary.setText("Scegli i due PDF da confrontare")
         self.stack.setCurrentIndex(0)
         self._buttons()
 
     def _buttons(self):
         loaded = self.stack.currentIndex() == 1
-        for w in (self.b_new, self.sync, self.b_zout, self.b_zin, self.zoom_label):
+        for w in (self.b_new, self.sync, self.b_zout, self.b_zin, self.zoom_label, self.b_page, self.b_full):
             w.setVisible(loaded)
         self.b_export.setEnabled(loaded)
         self.b_xlsx.setEnabled(bool(self.changes))
@@ -478,7 +519,9 @@ class CompareTab(QWidget):
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)  # OCR of a scan can take a while
         try:
-            old_words, new_words = extract_words(old, ocr=True), extract_words(new, ocr=True)
+            with ui.progress(self, "Leggo il testo delle pagine...", old.page_count + new.page_count) as step:
+                old_words = extract_words(old, ocr=True, on_page=step)
+                new_words = extract_words(new, ocr=True, on_page=lambda n: step(old.page_count + n))
         finally:
             QApplication.restoreOverrideCursor()
         empty = [Path(p).name for p, w in ((old_path, old_words), (new_path, new_words)) if not w]
@@ -512,10 +555,9 @@ class CompareTab(QWidget):
             left, right = SIDE_COLORS[c.kind]
             self.old_view.highlight(c.old, left or RED, OPACITY)
             self.new_view.highlight(c.new, right or GREEN, OPACITY)
-            body = c.label().split(": ", 1)[1]
-            page = (c.old or c.new)[0].page + 1
-            self.list.addItem(QListWidgetItem(dot(KIND_COLORS[c.kind]),
-                                              f"{body}\n{KIND_NAMES[c.kind]}, pagina {page}"))
+            item = QListWidgetItem(c.label())  # plain text: tooltips and screen readers
+            item.setData(Qt.UserRole + 1, change_html(c, KIND_COLORS[c.kind]))
+            self.list.addItem(item)
         if self.changes:
             parts = [f"{n} {word}" for n, word in ((counts["insert"], "aggiunte"), (counts["delete"], "rimozioni"),
                                                     (counts["replace"], "sostituzioni"), (counts["move"], "spostamenti"),
@@ -530,8 +572,12 @@ class CompareTab(QWidget):
         return bool(kind) and self.changes[i].kind != kind
 
     def _apply_filter(self):
+        shown = [c for i, c in enumerate(self.changes) if not self._hidden(i)]
         for i in range(len(self.changes)):
             self.list.setRowHidden(i, self._hidden(i))
+        # ticks on the scrollbars, like an overview of the whole document
+        self.old_view.set_marks([((c.old or [c.old_at])[0], KIND_COLORS[c.kind]) for c in shown if c.old or c.old_at])
+        self.new_view.set_marks([((c.new or [c.new_at])[0], KIND_COLORS[c.kind]) for c in shown if c.new or c.new_at])
         if self.current < 0 or self._hidden(self.current):
             self.current = -1
             self.step(1)
@@ -569,6 +615,14 @@ class CompareTab(QWidget):
 
     def zoom_fit(self):
         self._zoom_to(1.0)
+
+    def zoom_page(self):
+        """One whole page on screen, starting at its top."""
+        page, _ = self.old_view.position()
+        self._zoom_to(min(self.old_view.page_fit_scale(), self.new_view.page_fit_scale()))
+        self.old_view.scroll_to(page, 0)
+        if not self.sync.isChecked():
+            self.new_view.scroll_to(self.new_view.position()[0], 0)
 
     def _follow_x(self, src: DocView, dst: DocView):
         """Zoomed in, moving sideways on one document moves the other the same way."""

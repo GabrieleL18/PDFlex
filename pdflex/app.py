@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
@@ -65,8 +66,16 @@ class MainWindow(QMainWindow):
         h.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
         self.editor.title_changed.connect(lambda name: self.setWindowTitle(f"{name} - PDFlex" if name else "PDFlex"))
+        QShortcut(QKeySequence("F11"), self, lambda: ui.toggle_full_screen(self))
+        self.esc = QShortcut(QKeySequence("Esc"), self, lambda: ui.toggle_full_screen(self))
+        self.esc.setEnabled(False)  # only while full screen: elsewhere Esc belongs to the widgets
         if path:  # "Apri con PDFlex" or double click on a PDF
             self.editor.open(path)
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if hasattr(self, "esc"):  # changeEvent also comes while __init__ is still running
+            self.esc.setEnabled(self.isFullScreen())
 
     def closeEvent(self, e):
         if self.editor.confirm_discard():

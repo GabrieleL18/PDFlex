@@ -174,7 +174,9 @@ def test_preview_fills_sample_data(make_pdf, tmp_path):
     src = make_pdf(tmp_path, ["x"])
     fields = [Field("text", 0, (10, 10, 200, 30), "nome"), Field("text", 0, (10, 40, 200, 60), "x", default="Mio"),
               Field("checkbox", 0, (10, 70, 24, 84), "ok"), Field("dropdown", 0, (10, 90, 200, 110), "d", options=["a", "b"]),
-              Field("radio", 0, (10, 120, 24, 134), "g", value="si"), Field("radio", 0, (30, 120, 44, 134), "g", value="no"),
+              Field("radio", 0, (10, 120, 24, 134), "g", value="si"),
+              Field("radio", 0, (30, 120, 44, 134), "g", value="no", default="1"),
+              Field("checkbox", 0, (50, 70, 64, 84), "spunta", default="1"),
               Field("date", 0, (10, 140, 200, 160), "data")]
     doc = build_pdf(src, fields)
     fill_sample(doc)
@@ -182,6 +184,10 @@ def test_preview_fills_sample_data(make_pdf, tmp_path):
     for w in doc[0].widgets():
         vals.setdefault(w.field_name, w.field_value)
     assert vals["nome"] == "Mario Rossi" and vals["x"] == "Mio"
-    assert vals["ok"] in (True, "Yes") and vals["d"] == "a" and vals["g"] == "si"
+    assert vals["d"] == "a"
+    # boxes and choices show their initial value, not an example that would hide it
+    assert vals["ok"] in (False, "Off", "") and vals["spunta"] in (True, "Yes")
+    chosen = [w.on_state() for w in doc[0].widgets() if w.field_name == "g" and w.field_value == w.on_state()]
+    assert chosen == ["no"]
     assert vals["data"].count("/") == 2
     assert open_pdf(src)[0].first_widget is None  # the source file is untouched

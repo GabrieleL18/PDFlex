@@ -40,6 +40,7 @@ class Field:
     calc: list[str] = dc_field(default_factory=list)  # names of the fields this one sums
     comb: int = 0  # text split into this many boxes, one character each (codice fiscale); 0 = normal
     image: str = dc_field(default="", repr=False)  # kind "image": PNG as base64 (a hand-drawn signature)
+    font: str = ""  # "" Helvetica, "TiRo" Times, "Cour" Courier (same width for every letter)
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
@@ -72,6 +73,7 @@ def _xref_ref(doc, xref, key):
 
 
 FORMATS = {"": "Testo libero", "number": "Numero", "amount": "Importo in euro", "email": "Email"}
+FONTS = {"": "Helvetica", "TiRo": "Times", "Cour": "Courier (larghezza fissa)"}
 _FMT_JS = {  # (format, keystroke, validate); 2 decimals, Italian separators (1.234,56)
     "number": ('AFNumber_Format(2, 2, 0, 0, "", true);', 'AFNumber_Keystroke(2, 2, 0, 0, "", true);', None),
     # € stays a JS escape: viewers misread a raw UTF-8 euro sign inside scripts
@@ -120,7 +122,7 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
                     kind = "multiline"
             f = Field(kind, page.number, tuple(w.rect), w.field_name or "",
                       required=bool(w.field_flags & pymupdf.PDF_FIELD_IS_REQUIRED),
-                      font_size=w.text_fontsize or 0,
+                      font_size=w.text_fontsize or 0, font=w.text_font if w.text_font in FONTS else "",
                       xref=w.xref, parent=_xref_ref(doc, w.xref, "Parent"))
             if kind in ("checkbox", "radio"):
                 on = w.on_state()
@@ -163,6 +165,10 @@ def _check_names(fields):
                 dup.append(name)
     if dup:
         raise ValueError("Nomi di campo duplicati: " + ", ".join(sorted(dup)))
+    menus = sorted(f.name for f in fields if f.kind == "dropdown" and f.default and f.default not in f.options
+                   and (not f.xref or f.default != f.orig.default))
+    if menus:
+        raise ValueError("Il valore iniziale deve essere una delle opzioni del menu: " + ", ".join(menus))
     missing = sorted({n for f in fields for n in f.calc if n not in by_name})
     if missing:
         raise ValueError("La somma usa campi che non esistono: " + ", ".join(missing))
@@ -182,6 +188,7 @@ def _new_widget(f: Field) -> pymupdf.Widget:
     w.field_name = f.name
     w.rect = pymupdf.Rect(f.rect)
     w.text_fontsize = f.font_size
+    w.text_font = f.font or "Helv"
     w.border_width = 1
     w.border_color = (0.6, 0.6, 0.6)  # visible box for whoever fills the form
     if f.required:
@@ -225,6 +232,22 @@ def _set_inherited(doc, f: Field, key: str, value: str) -> None:
 def _update_widget(doc, f: Field) -> None:
     """Change only what the user edited, so properties PDFlex does not show survive."""
     o = f.orig
+    # PyMuPDF 2.1 writes these on the widget only, but viewers read them from the parent field.
+    # Written first: update() below redraws the field's look from them (font, size, options)
+    if f.name != o.name:
+        doc.xref_set_key(f.parent or f.xref, "T", pymupdf.get_pdf_str(f.name))
+    if f.required != o.required:
+        flags = int(_inherited(doc, f, "Ff") or 0)
+        _set_inherited(doc, f, "Ff", str(flags ^ pymupdf.PDF_FIELD_IS_REQUIRED))
+    if f.font_size != o.font_size or f.font != o.font:
+        da = _inherited(doc, f, "DA") or "0 0 0 rg /Helv 0 Tf"
+        if f.font_size != o.font_size:
+            da = re.sub(r"[\d.]+ Tf", f"{f.font_size:g} Tf", da)
+        if f.font != o.font:
+            da = re.sub(r"/\S+(\s+[\d.]+ Tf)", rf"/{f.font or 'Helv'}\1", da)
+        _set_inherited(doc, f, "DA", pymupdf.get_pdf_str(da))
+    if f.options != o.options:
+        _set_inherited(doc, f, "Opt", "[" + "".join(pymupdf.get_pdf_str(x) for x in f.options) + "]")
     page = doc[f.page]  # keep the page alive: the widget only holds a weak reference to it
     w = page.load_widget(f.xref)
     if f.rect != o.rect:
@@ -235,18 +258,6 @@ def _update_widget(doc, f: Field) -> None:
         elif f.kind != "radio":
             w.field_value = f.default
     w.update()
-    # PyMuPDF 2.1 writes these on the widget only, but viewers read them from the parent field
-    if f.name != o.name:
-        doc.xref_set_key(f.parent or f.xref, "T", pymupdf.get_pdf_str(f.name))
-    if f.required != o.required:
-        flags = int(_inherited(doc, f, "Ff") or 0)
-        _set_inherited(doc, f, "Ff", str(flags ^ pymupdf.PDF_FIELD_IS_REQUIRED))
-    if f.font_size != o.font_size:
-        da = _inherited(doc, f, "DA") or "0 0 0 rg /Helv 0 Tf"
-        da = re.sub(r"[\d.]+ Tf", f"{f.font_size:g} Tf", da)
-        _set_inherited(doc, f, "DA", pymupdf.get_pdf_str(da))
-    if f.options != o.options:
-        _set_inherited(doc, f, "Opt", "[" + "".join(pymupdf.get_pdf_str(x) for x in f.options) + "]")
 
 
 def _set_radio_state(doc, xref, old, new, checked, was_checked):
@@ -384,9 +395,11 @@ def _sample_text(f_name: str, multiline: bool) -> str:
 
 
 def fill_sample(doc: pymupdf.Document) -> None:
-    """Fill every field with its default or a plausible example, for the preview."""
+    """Fill the empty text fields and menus with a plausible example, for the preview.
+
+    Check boxes and choices stay as they start (their initial value): ticking them all
+    made the preview contradict what was set in "Selezionata all'apertura"."""
     from datetime import date
-    groups = set()
     for page in doc:
         for w in page.widgets():
             t = w.field_type
@@ -398,20 +411,16 @@ def fill_sample(doc: pymupdf.Document) -> None:
                 else:
                     w.field_value = (f"{date.today():%d/%m/%Y}" if _is_date(doc, w)
                                      else _sample_text(w.field_name or "", multiline))
-            elif t == pymupdf.PDF_WIDGET_TYPE_CHECKBOX and w.field_value in (False, "Off", "", None):
-                w.field_value = True
             elif t == pymupdf.PDF_WIDGET_TYPE_COMBOBOX and not w.field_value and w.choice_values:
                 c = w.choice_values[0]
                 w.field_value = c if isinstance(c, str) else c[0]
-            elif t == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON and w.field_name not in groups:
-                groups.add(w.field_name)  # first button of each group
-                w.field_value = w.on_state()
             else:
                 continue
             w.update()
 
 
-_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "comb", "image")
+_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "comb", "image",
+               "font")
 
 
 def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
@@ -457,19 +466,21 @@ def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | 
 
 from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, QSize, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
-    QBrush, QColor, QFont, QImage, QIntValidator, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut,
+    QBrush, QColor, QFont, QFontMetricsF, QImage, QIntValidator, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
+    QShortcut,
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QButtonGroup, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPlainTextEdit, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout,
-    QWidget,
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
+from pdflex import ui  # noqa: E402
 from pdflex.ui import (  # noqa: E402
     Toggle, add_recent, ask_text, info, load_bytes, load_json, message, recent_files, save_bytes, save_json, warn,
-    ACCENT, DocView, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
+    ACCENT, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
 
 KIND_LABELS = {"text": "Testo", "multiline": "Testo lungo", "checkbox": "Casella di spunta",
@@ -516,16 +527,15 @@ class FieldItem(QGraphicsRectItem):
         painter.setBrush(fill)
         painter.drawRoundedRect(r, 3, 3)
         label = self.field.name + (f" = {self.field.value}" if self.field.kind == "radio" else "")
-        if r.width() > 40 and not sel and self.field.kind != "image":
-            painter.setPen(line.darker(130))
-            painter.drawText(r.adjusted(5, 0, -4, 0), Qt.AlignLeft | Qt.AlignVCenter, label)
+        if self.field.kind != "image":
+            self._paint_info(painter, r, QColor(color).darker(150))
         if sel:
             # outer ring in the app accent so the selection reads at a glance
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor(ACCENT), 2, Qt.DashLine))
             painter.drawRoundedRect(r.adjusted(-4, -4, 4, 4), 5, 5)
             # name tag
-            f = QFont(painter.font())
+            f = QFont()
             f.setBold(True)
             painter.setFont(f)
             text = f"{KIND_LABELS[self.field.kind]}: {label}"
@@ -540,7 +550,77 @@ class FieldItem(QGraphicsRectItem):
             painter.setPen(QPen(color, 2))
             painter.setBrush(Qt.white)
             painter.drawEllipse(QRectF(r.right() - HANDLE / 2, r.bottom() - HANDLE / 2, HANDLE, HANDLE))
-        self.setToolTip(f"{KIND_LABELS[self.field.kind]}: {label}")
+        details = self.details()
+        self.setToolTip(f"{KIND_LABELS[self.field.kind]}: {label}" + (f"\n{details}" if details else ""))
+
+    def details(self) -> str:
+        """What was set in the properties, in a few words."""
+        f = self.field
+        parts = []
+        if f.default and f.kind not in ("checkbox", "radio"):
+            parts.append(f"«{f.default}»")
+        if f.kind in ("checkbox", "radio") and f.default == "1":
+            parts.append("selezionata")
+        if f.fmt:
+            parts.append(FORMATS[f.fmt])
+        if f.calc:
+            parts.append("somma di " + " + ".join(f.calc))
+        if f.comb:
+            parts.append(f"{f.comb} caselle")
+        if f.kind == "dropdown":
+            parts.append(f"{len(f.options)} opzioni" if f.options else "nessuna opzione")
+        if f.font:
+            parts.append(FONTS[f.font].split(" ")[0])
+        if f.font_size:
+            parts.append(f"{f.font_size:g} pt")
+        return " · ".join(parts)
+
+    def _paint_info(self, p, r, color):
+        """Name (with * if required) and what was set, inside the box when there is room."""
+        f = self.field
+        if f.comb and f.kind == "text":  # the boxes, one letter each
+            p.setPen(QPen(color, 0.8, Qt.DotLine))
+            for i in range(1, f.comb):
+                x = r.left() + r.width() * i / f.comb
+                p.drawLine(QPointF(x, r.top() + 2), QPointF(x, r.bottom() - 2))
+        if f.kind in ("checkbox", "radio"):
+            if f.default == "1":  # starts ticked / chosen
+                p.setPen(QPen(color, max(1.5, r.width() / 9), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                if f.kind == "checkbox":
+                    path = QPainterPath(QPointF(r.left() + r.width() * .22, r.center().y()))
+                    path.lineTo(r.left() + r.width() * .42, r.bottom() - r.height() * .25)
+                    path.lineTo(r.right() - r.width() * .2, r.top() + r.height() * .25)
+                    p.setBrush(Qt.NoBrush)
+                    p.drawPath(path)
+                else:
+                    p.setBrush(color)
+                    p.drawEllipse(r.center(), r.width() / 5, r.height() / 5)
+            return  # too small for words
+        if r.width() < 34 or r.height() < 9:
+            return
+        name = f.name + (f" = {f.value}" if f.kind == "radio" else "") + (" *" if f.required else "")
+        details = self.details()
+        font = QFont(p.font())
+        font.setPixelSize(max(8, min(13, round(r.height() * 0.42))))
+        fm = QFontMetricsF(font)
+        inner = r.adjusted(5, 1, -4, -1)
+        two_lines = details and inner.height() >= 2 * fm.height() + 1
+        bold = QFont(font)
+        bold.setBold(True)
+        p.setPen(color)
+        if two_lines:
+            top = inner.center().y() - fm.height()
+            p.setFont(bold)
+            p.drawText(QRectF(inner.left(), top, inner.width(), fm.height()), Qt.AlignLeft | Qt.AlignVCenter,
+                       QFontMetricsF(bold).elidedText(name, Qt.ElideRight, inner.width()))
+            p.setFont(font)
+            p.drawText(QRectF(inner.left(), top + fm.height(), inner.width(), fm.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(details, Qt.ElideRight, inner.width()))
+        else:
+            p.setFont(bold)
+            text = name + (f"   {details}" if details else "")
+            p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, QFontMetricsF(bold).elidedText(text, Qt.ElideRight,
+                                                                                            inner.width()))
 
     def _on_handle(self, pos):
         r = self.rect()
@@ -575,9 +655,25 @@ class PageView(QGraphicsView):
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setRenderHint(QPainter.Antialiasing)
 
+    ARROWS = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}
+
+    def keyPressEvent(self, e):
+        """Arrows nudge the selected fields, Shift+arrows line them up with the next field,
+        Ctrl+arrows scroll the page."""
+        d = self.ARROWS.get(e.key())
+        if d is None or not self.tab.doc:
+            return super().keyPressEvent(e)
+        if e.modifiers() & Qt.ControlModifier or not self.tab.selection:
+            bar = self.horizontalScrollBar() if d[0] else self.verticalScrollBar()
+            bar.setValue(bar.value() + (d[0] or d[1]) * 80)
+        elif e.modifiers() & Qt.ShiftModifier:
+            self.tab.snap_selection(*d)
+        else:
+            self.tab.nudge(*d, push=not e.isAutoRepeat())  # holding the key down is one undo step
+
     def mousePressEvent(self, e):
         if self.tab.mode == "select" or e.button() != Qt.LeftButton or not self.tab.doc:
-            return super().mousePressEvent(e)
+            return super().mousePressEvent(e)  # select mode: dragging on the page selects several fields
         self.start = self.mapToScene(e.position().toPoint())
         self.band = self.scene().addRect(QRectF(self.start, self.start), QPen(QColor(ACCENT), 1.5, Qt.DashLine),
                                          QBrush(QColor(59, 63, 174, 30)))
@@ -601,24 +697,6 @@ class PageView(QGraphicsView):
         self.scene().removeItem(self.band)
         self.band = None
         self.drawn.emit((r.left(), r.top(), r.right(), r.bottom()))
-
-
-class PreviewDialog(QDialog):
-    def __init__(self, doc, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Anteprima con dati di esempio")
-        self.resize(820, 900)
-        self.doc = doc  # keep it alive while shown
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        note = QLabel("Così vedrà il modulo chi lo compila. I dati sono di esempio e non vengono salvati.",
-                      objectName="Muted")
-        note.setContentsMargins(16, 10, 16, 10)
-        lay.addWidget(note)
-        view = DocView(annots=True)
-        lay.addWidget(view, 1)
-        view.show_doc(doc)
 
 
 class SignatureCanvas(QWidget):
@@ -774,7 +852,7 @@ class EditorTab(QWidget):
 
         # left: field palette
         palette = QFrame(objectName="PanelLeft")
-        palette.setFixedWidth(210)
+        palette.setMinimumWidth(180)
         pl = QVBoxLayout(palette)
         pl.setContentsMargins(12, 16, 12, 16)
         pl.addWidget(QLabel("Campi", objectName="H2"))
@@ -827,26 +905,31 @@ class EditorTab(QWidget):
         pl.addWidget(self.block_combo)
         pl.addWidget(self.b_block)
         pl.addStretch()
-        pl.addWidget(QLabel("Ctrl+clic seleziona più campi\nCanc elimina, Ctrl+D duplica\n"
-                            "Ctrl+Z annulla, Ctrl+Y ripete", objectName="Muted"))
+        keys = QLabel("Trascina sul vuoto o Ctrl+clic: più campi\n"
+                      "Frecce: sposta di poco\nMaiusc+frecce: allinea al campo vicino\nCtrl+frecce: scorri la pagina\n"
+                      "Canc elimina, Ctrl+D duplica\nCtrl+Z annulla, Ctrl+Y ripete", objectName="Muted")
+        keys.setWordWrap(True)
+        pl.addWidget(keys)
 
         # center: command bar + page
-        bar = QFrame(objectName="Bar")
+        bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
-        self.b_open = button("Apri", "open")
-        self.b_save = button("Salva con nome", "save", "Primary")
+        self.b_open = button("Apri", "open", tip="Apri un PDF (Ctrl+O)")
+        self.b_save = button("Salva con nome", "save", "Primary", "Salva il modulo con i campi (Ctrl+S)")
         self.b_list = button("Elenco campi", "list", tip="Mostra o nascondi l'elenco di tutti i campi")
         self.b_list.setCheckable(True)
         self.b_preview = button("Anteprima", "eye", tip="Vedi il modulo compilato con dati di esempio")
         self.b_open.clicked.connect(self.ask_open)
         self.b_save.clicked.connect(self.ask_save)
-        self.b_list.toggled.connect(lambda on: self.list_panel.setVisible(on))
+        self.b_list.toggled.connect(self._show_list)
         self.b_preview.clicked.connect(self.preview)
         self.file_label = QLabel("", objectName="Muted")
+        self.file_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never forces the window wider
         self.b_prev = button("", "prev", "Ghost", "Pagina precedente")
         self.b_next = button("", "next", "Ghost", "Pagina successiva")
         self.page_label = QLabel("")
+        self.page_label.setMinimumWidth(self.page_label.fontMetrics().horizontalAdvance("Pag. 999/999") + 4)
         self.b_zout = button("", "zoom-out", "Ghost", "Riduci")
         self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci")
         self.zoom_label = button("", None, "Ghost", "Torna al 100%  (Ctrl+rotellina per ingrandire)")
@@ -862,9 +945,9 @@ class EditorTab(QWidget):
         self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
         self.b_undo.clicked.connect(self.undo)
         self.b_redo.clicked.connect(self.redo)
-        for w in (self.b_open, self.b_save, self.b_undo, self.b_redo, self.file_label, self.b_close):
+        for w in (self.b_open, self.b_save, self.b_undo, self.b_redo, self.b_close):
             bl.addWidget(w)
-        bl.addStretch()
+        bl.addWidget(self.file_label, 1)
         for w in (self.b_list, self.b_preview):
             bl.addWidget(w)
         bl.addSpacing(12)
@@ -900,18 +983,37 @@ class EditorTab(QWidget):
 
         # field list (toggled from the bar)
         self.list_panel = QFrame(objectName="PanelRight")
-        self.list_panel.setFixedWidth(250)
+        self.list_panel.setMinimumWidth(200)
         lp = QVBoxLayout(self.list_panel)
         lp.setContentsMargins(0, 16, 0, 0)
+        head = QHBoxLayout()
+        head.setContentsMargins(14, 0, 8, 0)
         self.list_title = QLabel("Campi e ordine Tab", objectName="H2")
-        self.list_title.setContentsMargins(14, 0, 14, 0)
-        lp.addWidget(self.list_title)
+        self.b_stack = button("", "rows", "Ghost")
+        self.b_stack.clicked.connect(lambda: self.set_stacked(self.side.orientation() == Qt.Horizontal))
+        head.addWidget(self.list_title, 1)
+        head.addWidget(self.b_stack)
+        lp.addLayout(head)
         tip = QLabel("Chi compila passa da un campo al successivo con Tab in questo ordine. "
                      "Trascina per cambiarlo.", objectName="Muted")
         tip.setWordWrap(True)
         tip.setContentsMargins(14, 0, 14, 4)
         lp.addWidget(tip)
-        self.b_sort = button("Ordina per posizione", "list", "Ghost")
+        filters = QVBoxLayout()  # one under the other: readable even with a narrow panel
+        filters.setContentsMargins(10, 2, 10, 2)
+        filters.setSpacing(4)
+        self.f_page, self.f_kind = QComboBox(), QComboBox()
+        self.f_page.setToolTip("Mostra solo i campi di una pagina")
+        self.f_kind.setToolTip("Mostra solo un tipo di campo")
+        self.f_kind.addItem("Tutti i tipi", "")
+        for k, label in KIND_LABELS.items():
+            self.f_kind.addItem(dot(KIND_COLORS[k]), label, k)
+        for c in (self.f_page, self.f_kind):
+            c.currentIndexChanged.connect(self._filter_list)
+            filters.addWidget(c)
+        lp.addLayout(filters)
+        self.b_sort = button("Ordina per posizione", "list", "Ghost",
+                             "Ordine Tab da sinistra a destra, dall'alto in basso, pagina per pagina")
         self.b_sort.clicked.connect(self.sort_by_position)
         sort_row = QHBoxLayout()
         sort_row.setContentsMargins(8, 0, 8, 4)
@@ -927,8 +1029,7 @@ class EditorTab(QWidget):
         self.list_panel.hide()
 
         # right: properties
-        props = QFrame(objectName="PanelRight")
-        props.setFixedWidth(290)
+        props = QFrame(objectName="Panel")
         pr = QVBoxLayout(props)
         pr.setContentsMargins(16, 16, 16, 16)
         pr.addWidget(QLabel("Proprietà", objectName="H2"))
@@ -944,9 +1045,15 @@ class EditorTab(QWidget):
         self.p_name, self.p_required, self.p_default = QLineEdit(), Toggle("Obbligatorio"), QLineEdit()
         self.p_checked, self.p_size = Toggle("Selezionata all'apertura"), QLineEdit()
         self.p_options, self.p_value = QPlainTextEdit(), QLineEdit()
-        self.p_fmt, self.p_calc = QComboBox(), QLineEdit()
+        self.p_fmt, self.p_calc, self.p_font = QComboBox(), QLineEdit(), QComboBox()
         for key, label in FORMATS.items():
             self.p_fmt.addItem(label, key)
+        for key, label in FONTS.items():
+            self.p_font.addItem(label, key)
+        self.p_font.setToolTip("Courier dà a ogni lettera la stessa larghezza: utile per codici e caselle")
+        for c in (self.p_fmt, self.p_font):  # the panel can be narrowed: combos follow, never cut it
+            c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            c.setMinimumContentsLength(6)
         self.p_calc.setPlaceholderText("es. importo_1, importo_2")
         self.p_calc.setToolTip("Il campo mostra la somma di questi campi e non si può scrivere a mano")
         self.p_options.setPlaceholderText("Roma\nMilano\nNapoli")
@@ -963,6 +1070,7 @@ class EditorTab(QWidget):
         form.addRow("Valore di questa scelta", self.p_value)
         form.addRow("Formato", self.p_fmt)
         form.addRow("Somma dei campi (facoltativo)", self.p_calc)
+        form.addRow("Carattere", self.p_font)
         form.addRow("Dimensione testo (pt)", self.p_size)
         form.addRow("Caselle, una lettera ciascuna", self.p_comb)
         form.addRow(self.p_checked)
@@ -970,6 +1078,7 @@ class EditorTab(QWidget):
         for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc, self.p_comb):
             w.editingFinished.connect(self._props_edited)
         self.p_fmt.currentIndexChanged.connect(self._props_edited)
+        self.p_font.currentIndexChanged.connect(self._props_edited)
         self.p_required.toggled.connect(self._props_edited)
         self.p_checked.toggled.connect(self._props_edited)
         self.p_options.textChanged.connect(self._props_edited)
@@ -1006,13 +1115,28 @@ class EditorTab(QWidget):
         pr.addWidget(self.multi_box)
         pr.addStretch()
 
+        props_scroll = QScrollArea(objectName="PanelRight")  # long forms on small screens: scroll, never cut
+        props_scroll.setWidget(props)
+        props_scroll.setWidgetResizable(True)
+        props_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        props_scroll.setMinimumWidth(250)
+
+        # list and properties side by side or one above the other; every border can be dragged
+        self.side = QSplitter(Qt.Horizontal)
+        self.side.addWidget(self.list_panel)
+        self.side.addWidget(props_scroll)
+        self.side.setChildrenCollapsible(False)
+        self.main = QSplitter(Qt.Horizontal)
+        for w in (palette, center, self.side):
+            self.main.addWidget(w)
+        self.main.setChildrenCollapsible(False)
+        self.main.setStretchFactor(1, 1)
+        self.main.setSizes([210, 900, 300])
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(palette)
-        root.addWidget(center, 1)
-        root.addWidget(self.list_panel)
-        root.addWidget(props)
+        root.addWidget(self.main)
+        self.set_stacked(bool(load_json("layout.json", {}).get("stacked")))
 
         QShortcut(QKeySequence.Delete, self.view, self.delete_selected)
         QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
@@ -1020,8 +1144,8 @@ class EditorTab(QWidget):
         QShortcut(QKeySequence.Save, self, self.ask_save)
         QShortcut(QKeySequence("Ctrl+W"), self, self.close_doc)
         QShortcut(QKeySequence.Undo, self, self.undo)
-        QShortcut(QKeySequence.Redo, self, self.redo)
-        QShortcut(QKeySequence("Ctrl+Y"), self, self.redo)
+        QShortcut(QKeySequence.Redo, self, self.redo)  # Ctrl+Y and Ctrl+Shift+Z (a second Ctrl+Y made both dead)
+        self.view.setDragMode(QGraphicsView.RubberBandDrag)
         self.refresh()
 
     # ---- drag & drop anywhere on the tab
@@ -1074,6 +1198,7 @@ class EditorTab(QWidget):
         self.recent_lay.addWidget(QLabel("Aperti di recente", objectName="H2"))
         for p in files[:6]:
             b = button(f"{Path(p).name}   {Path(p).parent}", "clock", "Recent", tip=p)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)  # a long path must not widen the window
             b.clicked.connect(lambda _=False, p=p: self.open(p))
             self.recent_lay.addWidget(b)
         self.recent_lay.addStretch()
@@ -1097,9 +1222,24 @@ class EditorTab(QWidget):
         add_recent(path)
         self.fit_width()
 
+    def set_stacked(self, on: bool):
+        """Field list above the properties (on) or beside them; remembered for next time."""
+        self.side.setOrientation(Qt.Vertical if on else Qt.Horizontal)
+        self.b_stack.setIcon(icon("columns" if on else "rows"))
+        self.b_stack.setToolTip("Affianca elenco e proprietà" if on else "Metti l'elenco sopra le proprietà")
+        save_json("layout.json", {"stacked": on})
+
+    def _show_list(self, on: bool):
+        self.list_panel.setVisible(on)
+        sizes = self.main.sizes()
+        if on and self.side.orientation() == Qt.Horizontal and sum(sizes):
+            extra = max(0, 520 - sizes[2])  # make room for both panels, taken from the page
+            self.main.setSizes([sizes[0], sizes[1] - extra, sizes[2] + extra])
+
     def ask_save(self) -> bool:
         if not self.doc:
             return False
+        self._props_edited()  # a value still being typed (Ctrl+S keeps the focus there) counts too
         path, _ = QFileDialog.getSaveFileName(self, "Salva con nome", suggest_save_path(self.path), "PDF (*.pdf)")
         if not path:
             return False
@@ -1129,13 +1269,16 @@ class EditorTab(QWidget):
     def preview(self):
         if not self.doc:
             return
+        self._props_edited()
         try:
             doc = build_pdf(self.path, self.fields)
         except ValueError as e:
             warn(self, str(e))
             return
         fill_sample(doc)
-        PreviewDialog(doc, self).exec()
+        ui.show_doc(self, doc, "Anteprima con dati di esempio",
+                    "Così vedrà il modulo chi lo compila. Valori iniziali e caselle sono come li hai impostati; "
+                    "i campi vuoti hanno dati di esempio, che non vengono salvati.")
 
     # ---- undo / redo: whole snapshots of the field list (forms have tens of fields, not thousands)
     def _push(self, snapshot=None):
@@ -1239,6 +1382,58 @@ class EditorTab(QWidget):
             self.dirty = True
         self.refresh()
 
+    def _chosen(self) -> list[Field]:
+        return [f for f in self.selection if f.page == self.page_no]
+
+    def _move(self, fields, dx: float, dy: float, push: bool = True):
+        page = self.doc[self.page_no]
+        if push:
+            self._push()
+        for f in fields:
+            x0, y0, x1, y1 = to_view(page, f.rect)
+            f.rect = from_view(page, self._clamp((x0 + dx, y0 + dy, x1 + dx, y1 + dy)))
+        self.dirty = True
+        self._sync_items()
+
+    def nudge(self, dx: int, dy: int, push: bool = True):
+        """Arrow keys: 1 point at a time (5 with the magnetic grid, staying on it)."""
+        chosen = self._chosen()
+        if not chosen:
+            return
+        if not self.grid:
+            return self._move(chosen, dx, dy, push)
+        page = self.doc[self.page_no]
+        x0, y0 = to_view(page, chosen[0].rect)[:2]
+        tx, ty = (round(x0 / 5) + dx) * 5, (round(y0 / 5) + dy) * 5
+        self._move(chosen, tx - x0 if dx else 0, ty - y0 if dy else 0, push)
+
+    def snap_selection(self, dx: int, dy: int):
+        """Shift+arrow: move until an edge of the selection lines up with the nearest edge of another field."""
+        chosen = self._chosen()
+        if not chosen:
+            return
+        page = self.doc[self.page_no]
+        mine = [to_view(page, f.rect) for f in chosen]
+        others = [to_view(page, f.rect) for f in self.fields
+                  if f.page == self.page_no and not any(f is c for c in chosen)]
+        axis, sign = (0, dx) if dx else (1, dy)
+        edges = [min(r[axis] for r in mine), max(r[axis + 2] for r in mine)]
+        steps = [o[k] - e for o in others for k in (axis, axis + 2) for e in edges if (o[k] - e) * sign > 0.5]
+        if steps:
+            delta = min(steps, key=abs)
+            self._move(chosen, delta if dx else 0, delta if dy else 0)
+
+    def _sync_items(self):
+        """Put the fields' boxes where their rects say, without re-rendering the page (keys held down)."""
+        page, z = self.doc[self.page_no], self.zoom
+        for i in self.scene.items():
+            if isinstance(i, FieldItem):
+                x0, y0, x1, y1 = to_view(page, i.field.rect)
+                i.setPos(x0 * z, y0 * z)
+                i.setRect(0, 0, (x1 - x0) * z, (y1 - y0) * z)
+        self.b_undo.setEnabled(bool(self._undo))
+        self.file_label.setText(Path(self.path).name + "  (modificato)")
+
     def delete_selected(self):
         if self.selection:
             self._push()
@@ -1283,8 +1478,10 @@ class EditorTab(QWidget):
         """Add the fields detect_fields finds on every page; returns how many."""
         from pdflex.detect import detect_fields
         found = []
-        for page in self.doc:
-            found += detect_fields(page, self.fields + found)
+        with ui.progress(self, "Cerco i campi nelle pagine...", self.doc.page_count) as step:
+            for page in self.doc:
+                step(page.number)
+                found += detect_fields(page, self.fields + found)
         if found:
             self._push()
             self.fields += found
@@ -1371,7 +1568,7 @@ class EditorTab(QWidget):
         page = self.doc[s.page]
         x0, y0, x1, y1 = to_view(page, s.rect)
         f = self.add_field(s.kind, s.page, from_view(page, self._clamp((x0 + 10, y0 + 10, x1 + 10, y1 + 10))))
-        f.required, f.font_size, f.options, f.fmt = s.required, s.font_size, list(s.options), s.fmt
+        f.required, f.font_size, f.options, f.fmt, f.font = s.required, s.font_size, list(s.options), s.fmt, s.font
         if s.kind == "radio":
             f.name = s.name
             f.value = self._free_value(s.name)
@@ -1389,6 +1586,7 @@ class EditorTab(QWidget):
     # ---- view
     def set_mode(self, mode):
         self.mode = mode
+        self.view.setDragMode(QGraphicsView.RubberBandDrag if mode == "select" else QGraphicsView.NoDrag)
         self.view.viewport().setCursor(Qt.ArrowCursor if mode == "select" else Qt.CrossCursor)
 
     def set_zoom(self, z):
@@ -1428,7 +1626,7 @@ class EditorTab(QWidget):
         self.b_redo.setEnabled(bool(self._redo))
         if has:
             self.file_label.setText(Path(self.path).name + ("  (modificato)" if self.dirty else ""))
-            self.page_label.setText(f"Pagina {self.page_no + 1} di {self.doc.page_count}")
+            self.page_label.setText(f"Pag. {self.page_no + 1}/{self.doc.page_count}")
             self.zoom_label.setText(f"{round(self.zoom * 100)}%")
             self.b_prev.setEnabled(self.page_no > 0)
             self.b_next.setEnabled(self.page_no < self.doc.page_count - 1)
@@ -1468,22 +1666,40 @@ class EditorTab(QWidget):
                 item.setToolTip(f"{w.field_name}: campo non modificabile con PDFlex, resta com'è")
 
     def _fill_list(self):
+        scroll = self.field_list.verticalScrollBar().value()  # rebuilding must not jump back to the top
         self.field_list.clear()
         self.list_title.setText(f"Campi e ordine Tab ({len(self.fields)})")
-        self.b_list.setText(f"Elenco campi ({len(self.fields)})" if self.doc else "Elenco campi")
+        pages = self.doc.page_count if self.doc else 0
+        if self.f_page.count() != pages + 1:
+            self.f_page.blockSignals(True)
+            self.f_page.clear()
+            self.f_page.addItem("Tutte le pagine", -1)
+            for i in range(pages):
+                self.f_page.addItem(f"Pagina {i + 1}", i)
+            self.f_page.blockSignals(False)
         for n, f in enumerate(self.fields, 1):
-            label = f.name + (f" = {f.value}" if f.kind == "radio" else "")
+            label = f.name + (f" = {f.value}" if f.kind == "radio" else "") + (" *" if f.required else "")
             item = QListWidgetItem(dot(KIND_COLORS[f.kind]),
                                    f"{n}. {label}\n{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
             item.setData(Qt.UserRole, id(f))
             self.field_list.addItem(item)
             if any(f is s for s in self.selection):
                 item.setSelected(True)
+        self._filter_list()
+        self.field_list.verticalScrollBar().setValue(scroll)
+
+    def _filter_list(self, *_):
+        page, kind = self.f_page.currentData(), self.f_kind.currentData()
+        by_id = {id(f): f for f in self.fields}
+        for i in range(self.field_list.count()):
+            f = by_id.get(self.field_list.item(i).data(Qt.UserRole))
+            hide = f is None or (page is not None and page >= 0 and f.page != page) or (kind and f.kind != kind)
+            self.field_list.setRowHidden(i, bool(hide))
 
     def _list_clicked(self, item):
         f = next((f for f in self.fields if id(f) == item.data(Qt.UserRole)), None)
-        if f:
-            self.select_field(f)
+        if f:  # after the click is over: selecting rebuilds the list, item included
+            QTimer.singleShot(0, lambda: self.select_field(f) if any(f is g for g in self.fields) else None)
 
     def _selection_changed(self):
         items = [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)]
@@ -1524,6 +1740,7 @@ class EditorTab(QWidget):
         self.p_options.setPlainText("\n".join(f.options))
         self.p_value.setText(f.value)
         self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(f.fmt), 0))
+        self.p_font.setCurrentIndex(max(self.p_font.findData(f.font), 0))
         self.p_calc.setText(", ".join(f.calc))
         self.p_comb.setText(str(f.comb) if f.comb else "")
         self._update_rows(f)
@@ -1533,13 +1750,14 @@ class EditorTab(QWidget):
         k = f.kind
         if k == "image":
             for w in (self.p_default, self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required,
-                      self.p_fmt, self.p_calc, self.p_comb):
+                      self.p_fmt, self.p_calc, self.p_comb, self.p_font):
                 self.form.setRowVisible(w, False)
             self.form.labelForField(self.p_name).setText("Nome")
             return
         self.form.setRowVisible(self.p_default, k in ("text", "multiline", "date", "dropdown"))
         self.form.setRowVisible(self.p_checked, k in ("checkbox", "radio"))
         self.form.setRowVisible(self.p_size, k in ("text", "multiline", "date", "dropdown"))
+        self.form.setRowVisible(self.p_font, k in ("text", "multiline", "date", "dropdown"))
         self.form.setRowVisible(self.p_options, k == "dropdown")
         self.form.setRowVisible(self.p_value, k == "radio")
         self.form.setRowVisible(self.p_required, k != "signature")
@@ -1547,14 +1765,16 @@ class EditorTab(QWidget):
         self.form.setRowVisible(self.p_calc, k == "text" and f.fmt in ("number", "amount"))
         self.form.setRowVisible(self.p_comb, k == "text")
         self.form.labelForField(self.p_name).setText("Nome del gruppo" if k == "radio" else "Nome del campo")
-        self.p_default.setPlaceholderText("gg/mm/aaaa" if k == "date" else "Vuoto")
+        self.p_default.setPlaceholderText("gg/mm/aaaa" if k == "date" else "Una delle opzioni" if k == "dropdown"
+                                          else "Vuoto")
 
     def _props_edited(self, *_):
         f = self.selected
         if not f or self._loading:
             return
         snapshot = copy.deepcopy(self.fields)
-        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default, f.fmt, list(f.calc), f.comb)
+        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default, f.fmt, list(f.calc), f.comb,
+                  f.font)
         new_name = self.p_name.text().strip()
         if f.kind == "radio" and new_name != f.name:  # renaming the group renames all its buttons
             for o in self.fields:
@@ -1566,6 +1786,8 @@ class EditorTab(QWidget):
         f.options = [o.strip() for o in self.p_options.toPlainText().splitlines() if o.strip()]
         if f.kind in ("text", "multiline"):
             f.fmt = self.p_fmt.currentData() or ""
+        if f.kind in ("text", "multiline", "date", "dropdown"):
+            f.font = self.p_font.currentData() or ""
         f.calc = ([n.strip() for n in self.p_calc.text().split(",") if n.strip()]
                   if f.kind == "text" and f.fmt in ("number", "amount") else [])
         f.comb = int(self.p_comb.text() or 0) if f.kind == "text" else 0
@@ -1581,7 +1803,11 @@ class EditorTab(QWidget):
                         o.default = ""
         else:
             f.default = self.p_default.text()
-        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default, f.fmt, f.calc, f.comb):
+            if f.kind == "dropdown":  # "milano" picks the option "Milano"
+                f.default = next((o for o in f.options if o.casefold() == f.default.strip().casefold()), f.default)
+                if self.p_default.text() != f.default:
+                    self.p_default.setText(f.default)
+        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default, f.fmt, f.calc, f.comb, f.font):
             self._push(snapshot)
             self.b_undo.setEnabled(True)
             self._update_rows(f)

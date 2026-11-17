@@ -133,7 +133,7 @@ class BatchTab(QWidget):
         self.rows: list[dict] = []
         self.mapping: dict[str, str] = {}
 
-        bar = QFrame(objectName="Bar")
+        bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
         bl.addWidget(QLabel("Compila in serie", objectName="H2"))

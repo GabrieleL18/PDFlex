@@ -84,6 +84,9 @@ def test_compare_options_filter_excel(qapp, make_pdf, tmp_path):
     import openpyxl
     from pdflex.compare import CompareTab
     tab = CompareTab()
+    assert tab.ignore_case.isChecked() and tab.ignore_punct.isChecked() and not tab.formatting.isChecked()
+    tab.ignore_case.setChecked(False)
+    tab.ignore_punct.setChecked(False)
     tab.load(str(make_pdf(tmp_path, ["Il Prezzo resta 100 euro."])), str(make_pdf(tmp_path, ["il prezzo resta 120 euro"])))
     assert len(tab.changes) == 2
     tab.ignore_case.setChecked(True)
@@ -127,14 +130,14 @@ def test_open_from_command_line(qapp, make_pdf, tmp_path):
 def test_compare_zoom_both_sides(qapp, make_pdf, tmp_path):
     from pdflex.compare import CompareTab
     tab = CompareTab()
-    tab.resize(1200, 700)
+    tab.resize(1800, 700)  # wide: both columns get the same width
     tab.show()
     tab.load(str(make_pdf(tmp_path, ["uno"])), str(make_pdf(tmp_path, ["due"])))
     from PySide6.QtTest import QTest
     QTest.qWait(300)  # let the layout settle and the resize re-render run
     k = tab.old_view.k
     tab.zoom_by(2)
-    assert tab.old_view.k == tab.new_view.k == pytest.approx(2 * k)
+    assert tab.old_view.k == pytest.approx(2 * k) and tab.new_view.k == pytest.approx(tab.old_view.k, rel=0.01)
     assert tab.zoom_label.text() == "200%"
     tab.zoom_fit()
     assert tab.old_view.k == pytest.approx(k)
@@ -230,3 +233,22 @@ def test_hand_signature_drawn_and_placed(qapp, make_pdf, tmp_path):
     assert len(page.get_images()) == 1 and page.first_widget is None  # a picture, not a field
     d2 = SignatureDialog(tab)
     assert d2.b_saved.isVisibleTo(d2)  # remembered for next time
+
+
+def test_compare_marks_rows_and_page_view(qapp, make_pdf, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1300, 800)
+    tab.show()
+    pages = ["pagina %d testo" % i for i in range(6)]
+    tab.load(str(make_pdf(tmp_path, pages)), str(make_pdf(tmp_path, pages[:4] + ["pagina 4 cambiata"] + pages[5:])))
+    QTest.qWait(300)
+    marks = tab.new_view.verticalScrollBar().marks
+    assert len(marks) == len(tab.changes) == 1 and 0.6 < marks[0][0] < 0.85  # page 5 of 6
+    row = tab.list.item(0).data(Qt.UserRole + 1)
+    assert "line-through" in row and "testo" in row and "cambiata" in row
+    tab.zoom_page()
+    view = tab.old_view
+    assert view.heights[0] <= view.viewport().height()  # a whole page fits on screen

@@ -1,16 +1,18 @@
 """Look & feel and shared widgets: palette, stylesheet, icons, sharp page rendering, page stack view."""
 import json
 import os
+from contextlib import contextmanager
 import struct
 import tempfile
 from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap, QTextDocument
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel, QPushButton,
+    QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
+    QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
     QVBoxLayout,
 )
 
@@ -36,14 +38,28 @@ QMainWindow, #Root {{ background: #F6F7FA; }}
 #PanelLeft {{ background: #FFFFFF; border-right: 1px solid {LINE}; }}
 #PanelRight {{ background: #FFFFFF; border-left: 1px solid {LINE}; }}
 QPushButton {{ border: 1px solid #D9DEE7; border-radius: 8px; padding: 6px 12px; background: #FFFFFF; }}
-QPushButton:hover {{ background: #F1F3F7; }}
-QPushButton:disabled {{ color: #A9B0BB; border-color: {LINE}; }}
+QPushButton:hover {{ background: #F1F3F7; border-color: #C3C9D4; }}
+QPushButton:pressed {{ background: #E4E7EE; }}
+QPushButton:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; border-color: #C9CCF6; font-weight: 600; }}
+QPushButton:focus {{ border-color: {ACCENT}; }}
+QPushButton:disabled {{ color: #A9B0BB; border-color: {LINE}; background: #FAFBFC; }}
 QPushButton#Primary {{ background: {ACCENT}; color: white; border: none; font-weight: 600; padding: 7px 16px; }}
 QPushButton#Primary:hover {{ background: #3236A0; }}
+QPushButton#Primary:pressed {{ background: #292D8A; }}
 QPushButton#Primary:disabled {{ background: #AEB1DE; }}
-QPushButton#Ghost {{ border: none; background: transparent; padding: 6px 8px; }}
+QPushButton#Ghost {{ border: 1px solid transparent; background: transparent; padding: 6px 8px; }}
 QPushButton#Ghost:hover {{ background: #F1F3F7; }}
+QPushButton#Ghost:pressed {{ background: #E4E7EE; }}
+QPushButton#Ghost:checked {{ background: {ACCENT_SOFT}; }}
+QPushButton#Ghost:disabled {{ background: transparent; }}
 QPushButton#Danger {{ color: {RED}; }}
+QPushButton#Danger:hover {{ background: #FDEEEE; border-color: #F0C2C2; }}
+QToolTip {{ background: {INK}; color: #FFFFFF; border: none; padding: 5px 8px; }}
+QProgressDialog {{ background: #FFFFFF; }}
+QProgressBar {{ border: none; background: {LINE}; border-radius: 4px; max-height: 8px; color: transparent; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
+QScrollArea {{ border: none; background: #FFFFFF; }}
+#DropZone[loaded="true"] {{ border: 2px solid {GREEN}; background: #F3FBF6; }}
 #Palette QToolButton {{ border: none; border-radius: 8px; padding: 8px 10px; text-align: left; }}
 #Palette QToolButton:hover:!checked {{ background: #F1F3F7; }}
 #Palette QToolButton:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; font-weight: 600; }}
@@ -69,9 +85,14 @@ QListWidget#Changes {{ border: none; background: #FFFFFF; outline: none; }}
 QListWidget#Changes::item {{ padding: 8px 6px; border-radius: 8px; margin: 1px 6px; }}
 QListWidget#Changes::item:selected {{ background: {ACCENT_SOFT}; color: {INK}; }}
 QListWidget#Changes::item:hover:!selected {{ background: #F5F6F9; }}
-QSplitter::handle {{ background: {LINE}; width: 1px; }}
+QSplitter::handle {{ background: {LINE}; }}
+QSplitter::handle:horizontal {{ width: 4px; }}
+QSplitter::handle:vertical {{ height: 4px; }}
+QSplitter::handle:hover {{ background: {ACCENT}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #C3C9D4; border-radius: 4px; min-height: 30px; }}
+QScrollBar#Marks:vertical {{ width: 16px; background: #F1F3F7; }}
+QScrollBar#Marks::handle:vertical {{ background: rgba(91, 102, 117, 90); }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: #C3C9D4; border-radius: 4px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none; border: none; width: 0; height: 0; }}
@@ -115,6 +136,12 @@ _ICONS = {
     "wand": '<path d="m4 20 11-11M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1zM19 11l.6 1.4L21 13l-1.4.6L19 15l-.6-1.4L17 13l1.4-.6z"/>',
     "batch": '<rect x="7" y="3" width="13" height="16" rx="2"/><path d="M4 7v12a2 2 0 0 0 2 2h10M10.5 8h6M10.5 12h6M10.5 16h3"/>',
     "table": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10"/>',
+    "rotate-left": '<path d="M4 4.5V9h4.5"/><path d="M4.8 9a7.5 7.5 0 1 1 1.4 7.6"/>',
+    "rotate-right": '<path d="M20 4.5V9h-4.5"/><path d="M19.2 9a7.5 7.5 0 1 0-1.4 7.6"/>',
+    "expand": '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+    "page": '<rect x="6" y="3.5" width="12" height="17" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+    "columns": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
+    "rows": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 12h17"/>',
     "refresh": '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15"/>',
 }
 
@@ -220,6 +247,40 @@ def write_ico(path: str | Path) -> None:
     Path(path).write_bytes(out + b"".join(d for _, d in pngs))
 
 
+class Bar(QFrame):
+    """Command bar at the top of a tab. When the window is too narrow for it, the buttons with an icon
+    drop their text (it stays in the tooltip) instead of forcing the whole window wider."""
+
+    def __init__(self):
+        super().__init__(objectName="Bar")
+        self.setMinimumWidth(360)
+        self._compact = False
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _set_compact(self, on: bool):
+        self._compact = on
+        for b in self.findChildren(QPushButton):
+            full = b.property("full")
+            if full is None and b.icon().isNull():
+                continue
+            if full is None:
+                full = b.text()
+                b.setProperty("full", full)
+                if full and not b.toolTip():
+                    b.setToolTip(full)
+            b.setText("" if on else full)
+
+    def _fit(self):
+        if self._compact:
+            self._set_compact(False)  # measure with the words back
+        self.layout().invalidate()
+        if self.layout().sizeHint().width() > self.width():
+            self._set_compact(True)
+
+
 class DropZone(QFrame):
     """Big dashed target: click to choose a PDF, or drop one on it."""
     picked = Signal(str)
@@ -235,17 +296,24 @@ class DropZone(QFrame):
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignCenter)
         lay.setSpacing(8)
-        pic = QLabel()
-        pic.setPixmap(icon(glyph, ACCENT).pixmap(44, 44))
-        pic.setAlignment(Qt.AlignCenter)
+        self.glyph, self.default_hint = glyph, hint
+        self.pic = QLabel()
+        self.pic.setPixmap(icon(glyph, ACCENT).pixmap(44, 44))
+        self.pic.setAlignment(Qt.AlignCenter)
         self.title = QLabel(title, objectName="H2", alignment=Qt.AlignCenter)
         self.hint = QLabel(hint, objectName="Muted", alignment=Qt.AlignCenter)
         self.hint.setWordWrap(True)
-        for w in (pic, self.title, self.hint):
+        for w in (self.pic, self.title, self.hint):
             lay.addWidget(w)
 
-    def set_file(self, path: str):
-        self.hint.setText(Path(path).name)
+    def set_file(self, path: str | None):
+        """Green frame, tick and the file name once a file is chosen; None goes back to empty."""
+        self.setProperty("loaded", bool(path))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.pic.setPixmap(icon("checkbox" if path else self.glyph, GREEN if path else ACCENT).pixmap(44, 44))
+        self.hint.setText(f"{Path(path).name}\nCaricato. Clicca per cambiarlo." if path else self.default_hint)
+        self.hint.setStyleSheet(f"color: {GREEN}; font-weight: 600;" if path else "")
 
     def _hot(self, on):
         self.setProperty("hot", on)
@@ -391,6 +459,79 @@ def warn(parent, text: str) -> None:
     message(parent, text, "warn")
 
 
+@contextmanager
+def progress(parent, text: str, total: int):
+    """Bar for slow work on long documents, shown only if it lasts more than half a second.
+
+    Yields set_value(done); on a modal dialog that also keeps the window painted."""
+    d = QProgressDialog(text, "", 0, max(total, 1), parent)
+    d.setCancelButton(None)
+    d.setWindowTitle("PDFlex")
+    d.setWindowModality(Qt.WindowModal)
+    d.setMinimumDuration(500)
+    d.setMinimumWidth(360)
+    try:
+        yield d.setValue
+    finally:
+        d.reset()  # also stops the timer that would pop it up later
+        d.deleteLater()
+
+
+def toggle_full_screen(widget) -> None:
+    w = widget.window()
+    w.setWindowState(w.windowState() ^ Qt.WindowFullScreen)  # back to maximized if it was
+
+
+def show_doc(parent, doc, title: str, note: str = "") -> None:
+    """A document in its own resizable window. Afterwards the window is deleted and the document closed,
+    so nothing piles up in memory and the file is not left locked (it was making PDFlex crash)."""
+    d = QDialog(parent)
+    d.setWindowTitle(title)
+    d.setWindowFlag(Qt.WindowMaximizeButtonHint)
+    d.resize(880, 940)
+    lay = QVBoxLayout(d)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    if note:
+        label = QLabel(note, objectName="Muted")
+        label.setWordWrap(True)
+        label.setContentsMargins(16, 10, 16, 10)
+        lay.addWidget(label)
+    view = DocView(annots=True)
+    lay.addWidget(view, 1)
+    view.show_doc(doc)
+    d.exec()
+    view.doc = None  # no late re-render of a closed document
+    d.deleteLater()
+    doc.close()
+
+
+class HtmlDelegate(QStyledItemDelegate):
+    """List rows drawn from the HTML stored in Qt.UserRole + 1 (colours, struck-through words)."""
+    PAD = 14  # item margin + padding of QListWidget#Changes
+
+    def _doc(self, option, index) -> QTextDocument:
+        d = QTextDocument()
+        d.setDefaultFont(option.font)
+        d.setDocumentMargin(0)
+        d.setHtml(index.data(Qt.UserRole + 1) or "")
+        d.setTextWidth(max(self.parent().viewport().width() - 2 * self.PAD - 4, 80))
+        return d
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text, opt.icon = "", QIcon()
+        opt.widget.style().drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)  # hover/selection
+        painter.save()
+        painter.translate(opt.rect.left() + self.PAD, opt.rect.top() + 9)
+        self._doc(option, index).drawContents(painter)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(0, round(self._doc(option, index).size().height()) + 20)
+
+
 def dot(color: str, size=10) -> QIcon:
     pm = QPixmap(size * 2, size * 2)
     pm.fill(Qt.transparent)
@@ -420,6 +561,34 @@ def page_shadow(item):
     item.setGraphicsEffect(fx)
 
 
+class MarkBar(QScrollBar):
+    """Vertical scrollbar with a coloured tick wherever there is a change; a click jumps there."""
+
+    def __init__(self):
+        super().__init__(Qt.Vertical)
+        self.setObjectName("Marks")
+        self.marks: list[tuple[float, str]] = []  # (0..1 down the document, colour)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.marks:
+            return
+        p = QPainter(self)
+        h = self.height() - 6
+        for frac, color in self.marks:
+            p.fillRect(QRectF(2, 3 + frac * h - 1.5, self.width() - 4, 3), QColor(color))
+
+    def mousePressEvent(self, e):
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        handle = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
+        if e.button() == Qt.LeftButton and not handle.contains(e.position().toPoint()):
+            total = self.maximum() + self.pageStep()
+            self.setValue(round(e.position().y() / max(self.height(), 1) * total - self.pageStep() / 2))
+        else:
+            super().mousePressEvent(e)
+
+
 class DocView(QGraphicsView):
     """All pages of a document stacked, fitted to the width and re-rendered sharp on resize.
 
@@ -441,8 +610,10 @@ class DocView(QGraphicsView):
         self._marks = []
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBar(MarkBar())
+        self.marks = []  # (word, colour) shown as ticks on the scrollbar
         self._timer = QTimer(self, singleShot=True, interval=120, timeout=self.render)
-        self._rendered, self._dpr = set(), 1.0
+        self._rendered, self._dpr = {}, 1.0  # page number -> its picture on the scene
         self.verticalScrollBar().valueChanged.connect(self._render_visible)
 
     def show_doc(self, doc):
@@ -464,7 +635,7 @@ class DocView(QGraphicsView):
         self.k = max(avail - 2 * self.GAP, 200) / widest * self.scale
         dpr = self.devicePixelRatioF()
         self.offsets, self.heights, y = [], [], self.GAP
-        self._rendered, self._dpr = set(), dpr
+        self._rendered, self._dpr = {}, dpr
         for page in self.doc:  # white sheets now, the picture only when the page comes into view
             w, h = page.rect.width * self.k, page.rect.height * self.k
             sheet = s.addRect(self.GAP, y, w, h, QPen(Qt.NoPen), QBrush(Qt.white))
@@ -479,9 +650,21 @@ class DocView(QGraphicsView):
         self._paint_current()
         bar.setValue(round(frac * bar.maximum()))
         self._render_visible()
+        self._update_marks()
+
+    def set_marks(self, marks):
+        self.marks = list(marks)
+        self._update_marks()
+
+    def _update_marks(self):
+        total = self.scene().sceneRect().height() if self.offsets else 0
+        bar = self.verticalScrollBar()
+        bar.marks = [(self.word_rect(w)[1] / total, color) for w, color in self.marks] if total else []
+        bar.update()
 
     def _render_visible(self):
-        """Draw the pages on screen (and one screen above/below); long documents stay quick."""
+        """Draw the pages on screen (and one screen above/below) and free the ones far away:
+        long documents stay quick and memory stays flat however much you scroll."""
         if not self.doc or not self.offsets or self.scene() is None:  # None while the view is being destroyed
             return
         top = self.verticalScrollBar().value()
@@ -491,14 +674,25 @@ class DocView(QGraphicsView):
                 item = self.scene().addPixmap(render_page(self.doc[i], self.k, self.annots, self._dpr))
                 item.setOffset(self.GAP, off)
                 item.setZValue(-1)  # under the highlights
-                self._rendered.add(i)
+                self._rendered[i] = item
+            elif i in self._rendered and (off + h < top - 3 * span or off > top + 4 * span):
+                self.scene().removeItem(self._rendered.pop(i))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._timer.start()
 
+    def page_fit_scale(self) -> float:
+        """The zoom that shows the current page whole."""
+        if not self.offsets:
+            return self.scale
+        i, _ = self.position()
+        page_h = self.heights[i] / self.k  # points
+        fit_width = self.k / self.scale
+        return (self.viewport().height() - 2 * self.GAP) / (page_h * fit_width)
+
     def set_scale(self, scale: float):
-        scale = min(max(scale, 0.5), 5.0)
+        scale = min(max(scale, 0.2), 5.0)
         if abs(scale - self.scale) > 1e-6:
             self.scale = scale
             self.render()
