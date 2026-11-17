@@ -50,3 +50,30 @@ def test_compare_scrolls_together(qapp, make_pdf, tmp_path):
     tab.sync.setChecked(False)
     tab.old_view.scroll_to(0, 0.0)
     assert tab.new_view.position()[0] == 2
+
+
+def test_editor_undo_redo_align_order_detect(qapp, make_pdf, tmp_path):
+    tab = EditorTab()
+    src = make_pdf(tmp_path, ["Nome: ____________________"])
+    tab.open(str(src))
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    b = tab.add_field("text", 0, (40, 60, 90, 80))
+    assert len(tab.fields) == 2
+    tab.undo()
+    assert [f.name for f in tab.fields] == ["text_1"]
+    tab.redo()
+    assert [f.name for f in tab.fields] == ["text_1", "text_2"]
+    a, b = tab.fields
+    tab.select_many([a, b])
+    tab.align("left")
+    assert tab.fields[0].rect[0] == tab.fields[1].rect[0] == 10
+    tab.undo()
+    assert tab.fields[1].rect[0] == 40
+    tab.select_many(tab.fields)
+    tab.delete_selected()
+    assert tab.fields == []
+    tab.undo()
+    tab.set_order(list(reversed(tab.fields)))
+    assert [f.name for f in tab.fields] == ["text_2", "text_1"]
+    n = tab.detect()
+    assert n == 1 and tab.fields[-1].name == "nome"

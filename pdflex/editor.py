@@ -408,10 +408,11 @@ def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | 
 
 # ---------------------------------------------------------------- UI
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal  # noqa: E402
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QKeySequence, QPainter, QPen, QShortcut  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QButtonGroup, QCheckBox, QDialog, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
+    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
+    QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPlainTextEdit, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout,
     QWidget,
@@ -563,8 +564,12 @@ class EditorTab(QWidget):
         super().__init__()
         self.doc, self.path, self.fields = None, None, []
         self.page_no, self.zoom, self.mode = 0, 1.5, "select"
-        self.selected: Field | None = None
+        self.selected: Field | None = None  # the field shown in the properties panel
+        self.selection: list[Field] = []  # every selected field (Ctrl+click for more)
         self.dirty = False
+        self.grid = False
+        self._undo: list[list[Field]] = []
+        self._redo: list[list[Field]] = []
         self._loading = False
         self.setAcceptDrops(True)
 
@@ -603,8 +608,17 @@ class EditorTab(QWidget):
                 tl.addWidget(sep)
         self.mode_buttons["select"].setChecked(True)
         pl.addWidget(tools)
+        pl.addSpacing(12)
+        self.b_detect = button("Rileva campi", "wand", tip="Cerca righe ____, caselle e spazi vuoti e crea i campi")
+        self.b_detect.clicked.connect(self._detect_clicked)
+        pl.addWidget(self.b_detect)
+        self.c_grid = QCheckBox("Griglia magnetica")
+        self.c_grid.setToolTip("Allinea posizione e misure dei campi a passi di 5 punti")
+        self.c_grid.toggled.connect(lambda on: setattr(self, "grid", on))
+        pl.addWidget(self.c_grid)
         pl.addStretch()
-        pl.addWidget(QLabel("Canc elimina il campo\nCtrl+D lo duplica\nCtrl+S salva", objectName="Muted"))
+        pl.addWidget(QLabel("Ctrl+clic seleziona più campi\nCanc elimina, Ctrl+D duplica\n"
+                            "Ctrl+Z annulla, Ctrl+Y ripete", objectName="Muted"))
 
         # center: command bar + page
         bar = QFrame(objectName="Bar")
@@ -632,7 +646,11 @@ class EditorTab(QWidget):
         self.b_next.clicked.connect(lambda: self.go_page(self.page_no + 1))
         self.b_zout.clicked.connect(lambda: self.set_zoom(self.zoom / 1.2))
         self.b_zin.clicked.connect(lambda: self.set_zoom(self.zoom * 1.2))
-        for w in (self.b_open, self.b_save, self.file_label):
+        self.b_undo = button("", "undo", "Ghost", "Annulla (Ctrl+Z)")
+        self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
+        self.b_undo.clicked.connect(self.undo)
+        self.b_redo.clicked.connect(self.redo)
+        for w in (self.b_open, self.b_save, self.b_undo, self.b_redo, self.file_label):
             bl.addWidget(w)
         bl.addStretch()
         for w in (self.b_list, self.b_preview):
@@ -668,12 +686,26 @@ class EditorTab(QWidget):
         self.list_panel.setFixedWidth(250)
         lp = QVBoxLayout(self.list_panel)
         lp.setContentsMargins(0, 16, 0, 0)
-        self.list_title = QLabel("Tutti i campi", objectName="H2")
-        self.list_title.setContentsMargins(14, 0, 14, 4)
+        self.list_title = QLabel("Campi e ordine Tab", objectName="H2")
+        self.list_title.setContentsMargins(14, 0, 14, 0)
         lp.addWidget(self.list_title)
+        tip = QLabel("Chi compila passa da un campo al successivo con Tab in questo ordine. "
+                     "Trascina per cambiarlo.", objectName="Muted")
+        tip.setWordWrap(True)
+        tip.setContentsMargins(14, 0, 14, 4)
+        lp.addWidget(tip)
+        self.b_sort = button("Ordina per posizione", "list", "Ghost")
+        self.b_sort.clicked.connect(self.sort_by_position)
+        sort_row = QHBoxLayout()
+        sort_row.setContentsMargins(8, 0, 8, 4)
+        sort_row.addWidget(self.b_sort)
+        sort_row.addStretch()
+        lp.addLayout(sort_row)
         self.field_list = QListWidget(objectName="Changes")
         self.field_list.setIconSize(QSize(10, 10))
+        self.field_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.field_list.itemClicked.connect(self._list_clicked)
+        self.field_list.model().rowsMoved.connect(lambda *_: QTimer.singleShot(0, self._list_reordered))
         lp.addWidget(self.field_list)
         self.list_panel.hide()
 
@@ -695,6 +727,11 @@ class EditorTab(QWidget):
         self.p_name, self.p_required, self.p_default = QLineEdit(), QCheckBox("Obbligatorio"), QLineEdit()
         self.p_checked, self.p_size = QCheckBox("Selezionata all'apertura"), QLineEdit()
         self.p_options, self.p_value = QPlainTextEdit(), QLineEdit()
+        self.p_fmt, self.p_calc = QComboBox(), QLineEdit()
+        for key, label in FORMATS.items():
+            self.p_fmt.addItem(label, key)
+        self.p_calc.setPlaceholderText("es. importo_1, importo_2")
+        self.p_calc.setToolTip("Il campo mostra la somma di questi campi e non si può scrivere a mano")
         self.p_options.setPlaceholderText("Roma\nMilano\nNapoli")
         self.p_default.setPlaceholderText("Vuoto")
         self.p_size.setPlaceholderText("Automatica")
@@ -703,11 +740,14 @@ class EditorTab(QWidget):
         form.addRow("Valore iniziale", self.p_default)
         form.addRow("Opzioni, una per riga", self.p_options)
         form.addRow("Valore di questa scelta", self.p_value)
+        form.addRow("Formato", self.p_fmt)
+        form.addRow("Somma dei campi (facoltativo)", self.p_calc)
         form.addRow("Dimensione testo (pt)", self.p_size)
         form.addRow(self.p_checked)
         form.addRow(self.p_required)
-        for w in (self.p_name, self.p_default, self.p_value, self.p_size):
+        for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc):
             w.editingFinished.connect(self._props_edited)
+        self.p_fmt.currentIndexChanged.connect(self._props_edited)
         self.p_required.toggled.connect(self._props_edited)
         self.p_checked.toggled.connect(self._props_edited)
         self.p_options.textChanged.connect(self._props_edited)
@@ -723,6 +763,22 @@ class EditorTab(QWidget):
         self.actions_box.setLayout(actions)
         actions.setContentsMargins(0, 8, 0, 0)
         pr.addWidget(self.actions_box)
+        self.multi_box = QWidget()
+        grid = QGridLayout(self.multi_box)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
+        aligns = [("Allinea a sinistra", "left"), ("Allinea a destra", "right"), ("Allinea in alto", "top"),
+                  ("Allinea in basso", "bottom"), ("Stessa larghezza", "same_width"),
+                  ("Stessa altezza", "same_height"), ("Distribuisci in verticale", "distribute_v"),
+                  ("Distribuisci in orizzontale", "distribute_h")]
+        for i, (label, how) in enumerate(aligns):
+            b = button(label)
+            b.clicked.connect(lambda _=False, h=how: self.align(h))
+            grid.addWidget(b, i // 2, i % 2)
+        b_del_all = button("Elimina selezionati", "trash", "Danger")
+        b_del_all.clicked.connect(self.delete_selected)
+        grid.addWidget(b_del_all, len(aligns) // 2, 0, 1, 2)
+        pr.addWidget(self.multi_box)
         pr.addStretch()
 
         root = QHBoxLayout(self)
@@ -737,6 +793,9 @@ class EditorTab(QWidget):
         QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
+        QShortcut(QKeySequence.Undo, self, self.undo)
+        QShortcut(QKeySequence.Redo, self, self.redo)
+        QShortcut(QKeySequence("Ctrl+Y"), self, self.redo)
         self.refresh()
 
     # ---- drag & drop anywhere on the tab
@@ -776,7 +835,10 @@ class EditorTab(QWidget):
         if self.doc:
             self.doc.close()
         self.doc, self.path, self.fields = doc, path, load_fields(doc)
-        self.page_no, self.selected, self.dirty = 0, None, False
+        self.page_no, self.dirty = 0, False
+        self._select(None)
+        self._undo.clear()
+        self._redo.clear()
         self.title_changed.emit(Path(path).name)
         self.fit_width()
 
@@ -802,7 +864,10 @@ class EditorTab(QWidget):
             raise
         self.doc, self.path = open_pdf(path), path
         self.fields = load_fields(self.doc)  # now they point at the saved widgets
-        self.selected, self.dirty = None, False
+        self._select(None)
+        self.dirty = False
+        self._undo.clear()  # snapshots point at widgets of the previous file
+        self._redo.clear()
         self.title_changed.emit(Path(path).name)
         self.refresh()
 
@@ -817,8 +882,40 @@ class EditorTab(QWidget):
         fill_sample(doc)
         PreviewDialog(doc, self).exec()
 
+    # ---- undo / redo: whole snapshots of the field list (forms have tens of fields, not thousands)
+    def _push(self, snapshot=None):
+        self._undo.append(snapshot if snapshot is not None else copy.deepcopy(self.fields))
+        del self._undo[:-50]
+        self._redo.clear()
+
+    def _restore(self, src, dst):
+        if not src:
+            return
+        dst.append(copy.deepcopy(self.fields))
+        self.fields = src.pop()
+        self._select(None)
+        self.dirty = True
+        self.refresh()
+
+    def undo(self):
+        self._restore(self._undo, self._redo)
+
+    def redo(self):
+        self._restore(self._redo, self._undo)
+
+    def _select(self, f: Field | None):
+        self.selected = f
+        self.selection = [f] if f else []
+
+    def select_many(self, fields: list[Field]):
+        self.selection = list(fields)
+        self.selected = fields[0] if fields else None
+        self.refresh()
+
     # ---- fields
-    def add_field(self, kind: str, page: int, rect) -> Field:
+    def add_field(self, kind: str, page: int, rect, push: bool = True) -> Field:
+        if push:
+            self._push()
         if kind == "radio":
             groups = [f.name for f in self.fields if f.kind == "radio"]
             name = groups[-1] if groups else self._free_name("radio")
@@ -851,6 +948,12 @@ class EditorTab(QWidget):
         x0, y0 = min(max(x0, 0), pr.width - w), min(max(y0, 0), pr.height - h)
         return x0, y0, x0 + w, y0 + h
 
+    def _snap(self, r):
+        if not self.grid:
+            return r
+        x0, y0, x1, y1 = snap(r)
+        return x0, y0, max(x1, x0 + 5), max(y1, y0 + 5)
+
     def _drawn(self, r):
         x0, y0, x1, y1 = (v / self.zoom for v in r)
         if x1 - x0 < 8 or y1 - y0 < 8:  # a click, not a drag: default size
@@ -858,26 +961,88 @@ class EditorTab(QWidget):
                     "signature": (180, 50)}.get(self.mode, (150, 20))
             x1, y1 = x0 + w, y0 + h
         page = self.doc[self.page_no]
-        f = self.add_field(self.mode, self.page_no, from_view(page, self._clamp((x0, y0, x1, y1))))
+        f = self.add_field(self.mode, self.page_no, from_view(page, self._clamp(self._snap((x0, y0, x1, y1)))))
         self.mode_buttons["select"].click()
-        self.selected = f
+        self._select(f)
         self.refresh()
 
     def item_moved(self, item: FieldItem):
-        p, r, z = item.pos(), item.rect(), self.zoom
-        shown = self._clamp((p.x() / z, p.y() / z, (p.x() + r.width()) / z, (p.y() + r.height()) / z))
-        new = from_view(self.doc[self.page_no], shown)
-        if any(abs(a - b) > 0.01 for a, b in zip(new, item.field.rect)):
-            item.field.rect = new
+        """Qt moved every selected item together; copy their new places into the fields."""
+        items = [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)] or [item]
+        page, z = self.doc[self.page_no], self.zoom
+        moves = []
+        for i in items:
+            p, r = i.pos(), i.rect()
+            shown = (p.x() / z, p.y() / z, (p.x() + r.width()) / z, (p.y() + r.height()) / z)
+            new = from_view(page, self._clamp(self._snap(shown)))
+            if any(abs(a - b) > 0.01 for a, b in zip(new, i.field.rect)):
+                moves.append((i.field, new))
+        if moves:
+            self._push()
+            for f, new in moves:
+                f.rect = new
+            self.dirty = True
+        self.refresh()
+
+    def delete_selected(self):
+        if self.selection:
+            self._push()
+            gone = {id(f) for f in self.selection}
+            self.fields = [f for f in self.fields if id(f) not in gone]
+            self._select(None)
             self.dirty = True
             self.refresh()
 
-    def delete_selected(self):
-        if self.selected:
-            self.fields.remove(self.selected)
-            self.selected = None
+    def align(self, how: str):
+        chosen = [f for f in self.selection if f.page == self.page_no]
+        if len(chosen) < 2:
+            return
+        page = self.doc[self.page_no]
+        new = align_rects([to_view(page, f.rect) for f in chosen], how)
+        self._push()
+        for f, r in zip(chosen, new):
+            f.rect = from_view(page, self._clamp(r))
+        self.dirty = True
+        self.refresh()
+
+    def set_order(self, fields: list[Field]):
+        """The list order is the Tab order of the saved form."""
+        self._push()
+        self.fields = list(fields)
+        self.dirty = True
+        self.refresh()
+
+    def sort_by_position(self):
+        def key(f):
+            r = to_view(self.doc[f.page], f.rect)
+            return f.page, round(r[1] / 6), r[0]  # same line (within ~6 pt), then left to right
+        self.set_order(sorted(self.fields, key=key))
+
+    def _list_reordered(self):
+        by_id = {id(f): f for f in self.fields}
+        order = [by_id[self.field_list.item(i).data(Qt.UserRole)] for i in range(self.field_list.count())]
+        if order != self.fields:
+            self.set_order(order)
+
+    def detect(self) -> int:
+        """Add the fields detect_fields finds on every page; returns how many."""
+        from pdflex.detect import detect_fields
+        found = []
+        for page in self.doc:
+            found += detect_fields(page, self.fields + found)
+        if found:
+            self._push()
+            self.fields += found
             self.dirty = True
             self.refresh()
+        return len(found)
+
+    def _detect_clicked(self):
+        if not self.doc:
+            return
+        n = self.detect()
+        QMessageBox.information(self, "PDFlex", f"Trovati {n} campi. Controlla nomi e posizioni; Ctrl+Z li toglie."
+                                if n else "Nessun nuovo campo trovato: disegnali dalla tavolozza.")
 
     def duplicate_selected(self):
         if not self.selected:
@@ -886,15 +1051,16 @@ class EditorTab(QWidget):
         page = self.doc[s.page]
         x0, y0, x1, y1 = to_view(page, s.rect)
         f = self.add_field(s.kind, s.page, from_view(page, self._clamp((x0 + 10, y0 + 10, x1 + 10, y1 + 10))))
-        f.required, f.font_size, f.options = s.required, s.font_size, list(s.options)
+        f.required, f.font_size, f.options, f.fmt = s.required, s.font_size, list(s.options), s.fmt
         if s.kind == "radio":
             f.name = s.name
             f.value = self._free_value(s.name)
-        self.selected = f
+        self._select(f)
         self.refresh()
 
     def select_field(self, f: Field):
-        self.page_no, self.selected = f.page, f
+        self.page_no = f.page
+        self._select(f)
         self.refresh()
         for item in self.scene.items():
             if isinstance(item, FieldItem) and item.field is f:
@@ -918,7 +1084,8 @@ class EditorTab(QWidget):
 
     def go_page(self, n):
         if self.doc and 0 <= n < self.doc.page_count:
-            self.page_no, self.selected = n, None
+            self.page_no = n
+            self._select(None)
             self.refresh()
             self.view.verticalScrollBar().setValue(0)
 
@@ -927,8 +1094,11 @@ class EditorTab(QWidget):
         self.scene.clear()
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
-        for w in (self.b_save, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list, self.b_preview):
+        for w in (self.b_save, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list, self.b_preview,
+                  self.b_detect):
             w.setEnabled(has)
+        self.b_undo.setEnabled(bool(self._undo))
+        self.b_redo.setEnabled(bool(self._redo))
         if has:
             self.file_label.setText(Path(self.path).name + ("  (modificato)" if self.dirty else ""))
             self.page_label.setText(f"Pagina {self.page_no + 1} di {self.doc.page_count}")
@@ -948,10 +1118,10 @@ class EditorTab(QWidget):
             for f in self.fields:
                 if f.page == self.page_no:
                     item = FieldItem(f, to_view(page, f.rect), self.zoom, self)
-                    if f is self.selected:
-                        item.setZValue(10)
+                    chosen = any(f is s for s in self.selection)
+                    item.setZValue(10 if chosen else 0)
                     self.scene.addItem(item)
-                    item.setSelected(f is self.selected)
+                    item.setSelected(chosen)
         self.scene.blockSignals(False)
         self._fill_list()
         self._show_props()
@@ -972,15 +1142,16 @@ class EditorTab(QWidget):
 
     def _fill_list(self):
         self.field_list.clear()
-        self.list_title.setText(f"Tutti i campi ({len(self.fields)})")
+        self.list_title.setText(f"Campi e ordine Tab ({len(self.fields)})")
         self.b_list.setText(f"Elenco campi ({len(self.fields)})" if self.doc else "Elenco campi")
-        for f in sorted(self.fields, key=lambda f: (f.page, f.rect[1], f.rect[0])):
+        for n, f in enumerate(self.fields, 1):
             label = f.name + (f" = {f.value}" if f.kind == "radio" else "")
-            item = QListWidgetItem(dot(KIND_COLORS[f.kind]), f"{label}\n{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
+            item = QListWidgetItem(dot(KIND_COLORS[f.kind]),
+                                   f"{n}. {label}\n{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
             item.setData(Qt.UserRole, id(f))
             self.field_list.addItem(item)
-            if f is self.selected:
-                self.field_list.setCurrentItem(item)
+            if any(f is s for s in self.selection):
+                item.setSelected(True)
 
     def _list_clicked(self, item):
         f = next((f for f in self.fields if id(f) == item.data(Qt.UserRole)), None)
@@ -989,7 +1160,9 @@ class EditorTab(QWidget):
 
     def _selection_changed(self):
         items = [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)]
-        self.selected = items[0].field if items else None
+        self.selection = [i.field for i in items]
+        if not any(self.selected is f for f in self.selection):
+            self.selected = self.selection[0] if self.selection else None
         for i in self.scene.items():
             if isinstance(i, FieldItem):
                 i.setZValue(10 if i.field is self.selected else 0)
@@ -998,9 +1171,16 @@ class EditorTab(QWidget):
         self._show_props()
 
     def _show_props(self):
-        f = self.selected
+        many = len(self.selection) > 1
+        f = None if many else self.selected
+        self.multi_box.setVisible(many)
         self.props.setVisible(f is not None)
         self.actions_box.setVisible(f is not None)
+        if many:
+            self.kind_label.setText(f"{len(self.selection)} campi selezionati")
+            self.kind_label.setStyleSheet(f"color: white; background: {ACCENT}; border-radius: 6px;"
+                                          "padding: 4px 8px; font-weight: 600;")
+            return
         if not f:
             self.kind_label.setText("Seleziona un campo sulla pagina per modificarlo.")
             self.kind_label.setStyleSheet("")
@@ -1016,6 +1196,12 @@ class EditorTab(QWidget):
         self.p_size.setText(str(int(f.font_size)) if f.font_size else "")
         self.p_options.setPlainText("\n".join(f.options))
         self.p_value.setText(f.value)
+        self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(f.fmt), 0))
+        self.p_calc.setText(", ".join(f.calc))
+        self._update_rows(f)
+        self._loading = False
+
+    def _update_rows(self, f: Field):
         k = f.kind
         self.form.setRowVisible(self.p_default, k in ("text", "multiline", "date", "dropdown"))
         self.form.setRowVisible(self.p_checked, k in ("checkbox", "radio"))
@@ -1023,15 +1209,17 @@ class EditorTab(QWidget):
         self.form.setRowVisible(self.p_options, k == "dropdown")
         self.form.setRowVisible(self.p_value, k == "radio")
         self.form.setRowVisible(self.p_required, k != "signature")
+        self.form.setRowVisible(self.p_fmt, k in ("text", "multiline"))
+        self.form.setRowVisible(self.p_calc, k == "text" and f.fmt in ("number", "amount"))
         self.form.labelForField(self.p_name).setText("Nome del gruppo" if k == "radio" else "Nome del campo")
         self.p_default.setPlaceholderText("gg/mm/aaaa" if k == "date" else "Vuoto")
-        self._loading = False
 
     def _props_edited(self, *_):
         f = self.selected
         if not f or self._loading:
             return
-        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default)
+        snapshot = copy.deepcopy(self.fields)
+        before = (f.name, f.required, f.font_size, list(f.options), f.value, f.default, f.fmt, list(f.calc))
         new_name = self.p_name.text().strip()
         if f.kind == "radio" and new_name != f.name:  # renaming the group renames all its buttons
             for o in self.fields:
@@ -1041,6 +1229,10 @@ class EditorTab(QWidget):
         f.required = self.p_required.isChecked()
         f.font_size = float(self.p_size.text() or 0)
         f.options = [o.strip() for o in self.p_options.toPlainText().splitlines() if o.strip()]
+        if f.kind in ("text", "multiline"):
+            f.fmt = self.p_fmt.currentData() or ""
+        f.calc = ([n.strip() for n in self.p_calc.text().split(",") if n.strip()]
+                  if f.kind == "text" and f.fmt in ("number", "amount") else [])
         if f.kind == "radio":
             f.value = clean_value(self.p_value.text())
             if self.p_value.text() != f.value:
@@ -1053,7 +1245,10 @@ class EditorTab(QWidget):
                         o.default = ""
         else:
             f.default = self.p_default.text()
-        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default):
+        if before != (f.name, f.required, f.font_size, f.options, f.value, f.default, f.fmt, f.calc):
+            self._push(snapshot)
+            self.b_undo.setEnabled(True)
+            self._update_rows(f)
             self.dirty = True
             self.file_label.setText(Path(self.path).name + "  (modificato)")
             self._fill_list()
