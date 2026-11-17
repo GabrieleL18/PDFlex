@@ -119,7 +119,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex import ui  # noqa: E402
-from pdflex.ui import button  # noqa: E402
+from pdflex.ui import button, info, warn  # noqa: E402
 
 
 class BatchTab(QWidget):
@@ -191,7 +191,7 @@ class BatchTab(QWidget):
             try:
                 fn(path)
             except (ValueError, OSError) as e:
-                QMessageBox.warning(self, "PDFlex", f"{Path(path).name}: {e}")
+                warn(self, f"{Path(path).name}: {e}")
         return run
 
     def set_template(self, path: str):
@@ -236,9 +236,9 @@ class BatchTab(QWidget):
         try:
             made = self.run(out)
         except (ValueError, OSError, RuntimeError) as e:
-            QMessageBox.warning(self, "PDFlex", f"Creazione non riuscita: {e}")
+            warn(self, f"Creazione non riuscita: {e}")
             return
-        QMessageBox.information(self, "PDFlex", f"Creati {len(made)} PDF in {out}")
+        info(self, f"Creati {len(made)} PDF in {out}")
 
     def run(self, out_dir: str) -> list[Path]:
         dlg = QProgressDialog("Creo i PDF...", "Ferma", 0, len(self.rows), self)

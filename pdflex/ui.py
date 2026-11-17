@@ -8,7 +8,7 @@ from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, QSize, Qt, QT
 from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel, QPushButton,
+    QCheckBox, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel, QPushButton,
     QVBoxLayout,
 )
 
@@ -71,7 +71,10 @@ QScrollBar::handle:vertical {{ background: #C3C9D4; border-radius: 4px; min-heig
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: #C3C9D4; border-radius: 4px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none; border: none; width: 0; height: 0; }}
-QMessageBox QPushButton {{ min-width: 70px; }}
+QMessageBox {{ background: #FFFFFF; }}
+QMessageBox QLabel#qt_msgbox_label {{ min-width: 320px; max-width: 460px; font-size: 10.5pt; padding: 4px 0 8px 6px; }}
+QMessageBox QLabel#qt_msgbox_informativelabel {{ color: {MUTED}; padding-left: 6px; }}
+QMessageBox QPushButton {{ min-width: 84px; padding: 7px 14px; }}
 """
 
 # 24x24 line icons, drawn for this app (stroke = currentColor).
@@ -82,6 +85,9 @@ _ICONS = {
     "zoom-in": '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2M8.5 11h5M11 8.5v5"/>',
     "zoom-out": '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2M8.5 11h5"/>',
     "prev": '<path d="m14.5 6-6 6 6 6"/>',
+    "info": '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6h.01"/>',
+    "alert": '<path d="M10.3 4.9 2.9 17.6A2 2 0 0 0 4.6 20.6h14.8a2 2 0 0 0 1.7-3L13.7 4.9a2 2 0 0 0-3.4 0z"/><path d="M12 10v4M12 17.2h.01"/>',
+    "help": '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4M12 17h.01"/>',
     "next": '<path d="m9.5 6 6 6-6 6"/>',
     "down": '<path d="m6 9.5 6 6 6-6"/>',
     "select": '<path d="M6 4l12 7.5-5.2 1.3L10.5 18z"/>',
@@ -290,6 +296,41 @@ class Toggle(QCheckBox):
         p.drawText(self.rect().adjusted(self.W + 10, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, self.text())
 
 
+def message(parent, text: str, kind: str = "info", buttons=("OK",), note: str = "") -> int:
+    """App-styled, Italian message box. buttons[0] is the highlighted default, the last one answers Esc.
+
+    Returns the index of the button pressed."""
+    box = QMessageBox(parent)
+    box.setWindowTitle("PDFlex")
+    box.setText(text)
+    if note:
+        box.setInformativeText(note)
+    glyph, color = {"info": ("info", ACCENT), "ask": ("help", ACCENT), "warn": ("alert", AMBER),
+                    "error": ("alert", RED)}[kind]
+    box.setIconPixmap(icon(glyph, color).pixmap(40, 40))
+    made = []
+    for i, label in enumerate(buttons):
+        b = box.addButton(label, QMessageBox.AcceptRole if i == 0 else
+                          QMessageBox.RejectRole if i == len(buttons) - 1 else QMessageBox.DestructiveRole)
+        b.setCursor(Qt.PointingHandCursor)
+        made.append(b)
+    made[0].setObjectName("Primary")
+    made[0].style().unpolish(made[0])  # the name changed after styling: restyle
+    made[0].style().polish(made[0])
+    box.setDefaultButton(made[0])
+    box.setEscapeButton(made[-1])
+    box.exec()
+    return made.index(box.clickedButton()) if box.clickedButton() in made else len(made) - 1
+
+
+def info(parent, text: str) -> None:
+    message(parent, text, "info")
+
+
+def warn(parent, text: str) -> None:
+    message(parent, text, "warn")
+
+
 def dot(color: str, size=10) -> QIcon:
     pm = QPixmap(size * 2, size * 2)
     pm.fill(Qt.transparent)
@@ -324,6 +365,7 @@ class DocView(QGraphicsView):
 
     Words/marks are anything with .page and .rect (display coordinates, points)."""
     GAP = 16
+    scaled = Signal(float)  # Ctrl+wheel changed the zoom
 
     def __init__(self, annots=True):
         self._scene = QGraphicsScene()  # keep a Python reference or Qt frees it
@@ -331,13 +373,14 @@ class DocView(QGraphicsView):
         self.annots = annots
         self.doc = None
         self.k = 1.0
+        self.scale = 1.0  # zoom on top of "fit to width"
         self.offsets: list[float] = []
         self.heights: list[float] = []
         self.highlights = []  # (words, rgb, opacity)
         self.current = ([], None)
         self._marks = []
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._timer = QTimer(self, singleShot=True, interval=120, timeout=self.render)
 
     def show_doc(self, doc):
@@ -354,7 +397,9 @@ class DocView(QGraphicsView):
         s.clear()
         self._marks = []
         widest = max(p.rect.width for p in self.doc)
-        self.k = max(self.viewport().width() - 2 * self.GAP, 200) / widest
+        # width with the scrollbar always reserved: it comes and goes with the zoom, the fit must not move
+        avail = self.width() - 2 * self.frameWidth() - self.verticalScrollBar().sizeHint().width()
+        self.k = max(avail - 2 * self.GAP, 200) / widest * self.scale
         dpr = self.devicePixelRatioF()
         self.offsets, self.heights, y = [], [], self.GAP
         # ponytail: renders every page on each resize; very long documents are slow/heavy, render lazily if it bites
@@ -374,6 +419,19 @@ class DocView(QGraphicsView):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._timer.start()
+
+    def set_scale(self, scale: float):
+        scale = min(max(scale, 0.5), 5.0)
+        if abs(scale - self.scale) > 1e-6:
+            self.scale = scale
+            self.render()
+
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier:
+            self.set_scale(self.scale * (1.15 if e.angleDelta().y() > 0 else 1 / 1.15))
+            self.scaled.emit(self.scale)
+        else:
+            super().wheelEvent(e)
 
     def word_rect(self, w):
         x0, y0, x1, y1 = w.rect

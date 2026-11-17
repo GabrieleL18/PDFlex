@@ -1,3 +1,4 @@
+import pytest
 from pdflex import open_pdf
 from pdflex.editor import EditorTab, load_fields
 
@@ -121,3 +122,32 @@ def test_open_from_command_line(qapp, make_pdf, tmp_path):
     from pdflex.app import MainWindow
     w = MainWindow(str(make_pdf(tmp_path, ["ciao"])))
     assert w.editor.doc is not None and w.tabs.currentIndex() == 0
+
+
+def test_compare_zoom_both_sides(qapp, make_pdf, tmp_path):
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1200, 700)
+    tab.show()
+    tab.load(str(make_pdf(tmp_path, ["uno"])), str(make_pdf(tmp_path, ["due"])))
+    from PySide6.QtTest import QTest
+    QTest.qWait(300)  # let the layout settle and the resize re-render run
+    k = tab.old_view.k
+    tab.zoom_by(2)
+    assert tab.old_view.k == tab.new_view.k == pytest.approx(2 * k)
+    assert tab.zoom_label.text() == "200%"
+    tab.zoom_fit()
+    assert tab.old_view.k == pytest.approx(k)
+    tab.include_list.setChecked(False)
+    out = tmp_path / "c.pdf"
+    tab.export(str(out))
+    assert open_pdf(out).page_count == 1
+
+
+def test_errors_are_logged(tmp_path):
+    from pdflex.app import log_error
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as e:
+        text = log_error(type(e), e, e.__traceback__, tmp_path / "errori.log")
+    assert "boom" in text and "boom" in (tmp_path / "errori.log").read_text(encoding="utf-8")

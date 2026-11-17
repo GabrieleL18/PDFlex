@@ -419,7 +419,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex.ui import (  # noqa: E402
-    Toggle,
+    Toggle, info, message, warn,
     ACCENT, DocView, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
 
@@ -814,11 +814,11 @@ class EditorTab(QWidget):
         """True when it is fine to drop the current fields (saved, discarded, or nothing to lose)."""
         if not self.dirty:
             return True
-        r = QMessageBox.question(self, "PDFlex", "Hai modifiche non salvate. Vuoi salvarle prima?",
-                                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
-        if r == QMessageBox.Save:
+        r = message(self, "Hai modifiche non salvate. Vuoi salvarle prima?", "ask",
+                    ("Salva", "Non salvare", "Annulla"), note="Se non salvi, i campi aggiunti o cambiati vanno persi.")
+        if r == 0:
             return self.ask_save()
-        return r == QMessageBox.Discard
+        return r == 1
 
     def ask_open(self):
         path, _ = QFileDialog.getOpenFileName(self, "Apri PDF", "", "PDF (*.pdf)")
@@ -831,7 +831,7 @@ class EditorTab(QWidget):
         try:
             doc = open_pdf(path)
         except ValueError as e:
-            QMessageBox.warning(self, "PDFlex", str(e))
+            warn(self, str(e))
             return
         if self.doc:
             self.doc.close()
@@ -852,7 +852,7 @@ class EditorTab(QWidget):
         try:
             self.save(path)
         except (ValueError, OSError) as e:
-            QMessageBox.warning(self, "PDFlex", f"Salvataggio non riuscito: {e}")
+            warn(self, f"Salvataggio non riuscito: {e}")
             return False
         return True
 
@@ -878,7 +878,7 @@ class EditorTab(QWidget):
         try:
             doc = build_pdf(self.path, self.fields)
         except ValueError as e:
-            QMessageBox.warning(self, "PDFlex", str(e))
+            warn(self, str(e))
             return
         fill_sample(doc)
         PreviewDialog(doc, self).exec()
@@ -1042,7 +1042,7 @@ class EditorTab(QWidget):
         if not self.doc:
             return
         n = self.detect()
-        QMessageBox.information(self, "PDFlex", f"Trovati {n} campi. Controlla nomi e posizioni; Ctrl+Z li toglie."
+        info(self, f"Trovati {n} campi. Controlla nomi e posizioni; Ctrl+Z li toglie."
                                 if n else "Nessun nuovo campo trovato: disegnali dalla tavolozza.")
 
     def duplicate_selected(self):

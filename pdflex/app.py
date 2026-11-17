@@ -1,5 +1,9 @@
 import ctypes
+import os
 import sys
+import traceback
+from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
@@ -69,6 +73,28 @@ class MainWindow(QMainWindow):
             e.ignore()
 
 
+LOG = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "PDFlex" / "errori.log"
+
+
+def log_error(exc_type, exc, tb, log=LOG) -> str:
+    """Append the error to the log; returns the full text."""
+    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    try:
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"--- {datetime.now():%d/%m/%Y %H:%M:%S}\n{text}\n")
+    except OSError:
+        pass
+    return text
+
+
+def _show_error(exc_type, exc, tb):
+    """Without a console an error would vanish and the button would just 'do nothing': say it."""
+    log_error(exc_type, exc, tb)
+    ui.message(QApplication.activeWindow(), f"Qualcosa non ha funzionato: {exc}", "error",
+               note=f"I dettagli sono salvati in {LOG}")
+
+
 def setup(app: QApplication) -> None:
     app.setStyle("Fusion")
     app.setStyleSheet(ui.stylesheet())
@@ -80,6 +106,7 @@ def main() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PDFlex")
     app = QApplication.instance() or QApplication(sys.argv)
     setup(app)
+    sys.excepthook = _show_error
     w = MainWindow(next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), None))
     w.show()
     sys.exit(app.exec())

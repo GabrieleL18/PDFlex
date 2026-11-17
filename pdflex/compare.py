@@ -114,7 +114,7 @@ def _summary_pages(out, old_path, new_path, changes):
         y += size + 6
 
 
-def export_report(old_path, new_path, changes: list[Change], out_path) -> None:
+def export_report(old_path, new_path, changes: list[Change], out_path, summary: bool = True) -> None:
     old, new = open_pdf(old_path), open_pdf(new_path)
     # show_pdf_page draws rotated pages wrong: derotate the source and rotate while placing
     ro, rn = [(p.rect, p.rotation) for p in old], [(p.rect, p.rotation) for p in new]
@@ -122,7 +122,8 @@ def export_report(old_path, new_path, changes: list[Change], out_path) -> None:
         for p in d:
             p.set_rotation(0)
     out = pymupdf.open()
-    _summary_pages(out, old_path, new_path, changes)
+    if summary:
+        _summary_pages(out, old_path, new_path, changes)
     for i in range(max(old.page_count, new.page_count)):
         r_old = ro[min(i, len(ro) - 1)][0]  # a missing page leaves a blank of the last page's size
         r_new = rn[min(i, len(rn) - 1)][0]
@@ -175,7 +176,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex import ui  # noqa: E402
-from pdflex.ui import DocView, button, dot  # noqa: E402
+from pdflex.ui import DocView, button, dot, info, warn  # noqa: E402
 
 KIND_NAMES = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato"}
 KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER}
@@ -202,6 +203,12 @@ class CompareTab(QWidget):
         self.sync = ui.Toggle("Scorri insieme")
         self.sync.setChecked(True)
         self.sync.setToolTip("Scorrendo un documento, l'altro segue alla stessa pagina")
+        self.b_zout = button("", "zoom-out", "Ghost", "Rimpicciolisci (Ctrl+rotellina)")
+        self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci (Ctrl+rotellina)")
+        self.zoom_label = button("100%", None, "Ghost", "Adatta alla larghezza")
+        self.b_zout.clicked.connect(lambda: self.zoom_by(1 / 1.25))
+        self.b_zin.clicked.connect(lambda: self.zoom_by(1.25))
+        self.zoom_label.clicked.connect(self.zoom_fit)
         self.b_prev = button("Precedente", "prev")
         self.b_next = button("Successiva", "next")
         self.b_export = button("Esporta PDF", "export", "Primary")
@@ -214,6 +221,9 @@ class CompareTab(QWidget):
         bl.addSpacing(10)
         bl.addWidget(self.summary)
         bl.addStretch()
+        for w in (self.b_zout, self.zoom_label, self.b_zin):
+            bl.addWidget(w)
+        bl.addSpacing(10)
         bl.addWidget(self.sync)
         bl.addSpacing(10)
         for w in (self.b_prev, self.b_next, self.b_xlsx, self.b_export):
@@ -247,6 +257,8 @@ class CompareTab(QWidget):
         self.old_view, self.new_view = DocView(), DocView()
         self.old_view.verticalScrollBar().valueChanged.connect(lambda: self._follow(self.old_view, self.new_view))
         self.new_view.verticalScrollBar().valueChanged.connect(lambda: self._follow(self.new_view, self.old_view))
+        self.old_view.scaled.connect(self._zoom_to)
+        self.new_view.scaled.connect(self._zoom_to)
         self.old_label, self.new_label = QLabel(), QLabel()
         self.list = QListWidget(objectName="Changes")
         self.list.setIconSize(QSize(10, 10))
@@ -279,9 +291,13 @@ class CompareTab(QWidget):
         self.kind_filter.currentIndexChanged.connect(self._apply_filter)
         self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
         self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
+        self.include_list = ui.Toggle("Elenco modifiche nel PDF esportato")
+        self.include_list.setChecked(True)
+        self.include_list.setToolTip("Spento: il PDF esportato contiene solo le pagine affiancate")
         for c in (self.ignore_case, self.ignore_punct):
             c.toggled.connect(self._rediff)
             opts.addWidget(c)
+        opts.addWidget(self.include_list)
         opts.addWidget(self.kind_filter)
         sl.addLayout(opts)
         sl.addWidget(self.list)
@@ -318,10 +334,10 @@ class CompareTab(QWidget):
         try:
             doc = open_pdf(path)
         except ValueError as e:
-            QMessageBox.warning(self, "PDFlex", f"{name}: {e}")
+            warn(self, f"{name}: {e}")
             return False
         if not any(page.get_text("words") for page in doc) and not ocr_available():
-            QMessageBox.information(self, "PDFlex", NO_OCR.format(name))
+            info(self, NO_OCR.format(name))
             return False
         return True
 
@@ -349,8 +365,8 @@ class CompareTab(QWidget):
 
     def _buttons(self):
         loaded = self.stack.currentIndex() == 1
-        self.b_new.setVisible(loaded)
-        self.sync.setVisible(loaded)
+        for w in (self.b_new, self.sync, self.b_zout, self.b_zin, self.zoom_label):
+            w.setVisible(loaded)
         self.b_export.setEnabled(loaded)
         self.b_xlsx.setEnabled(bool(self.changes))
         self.b_prev.setEnabled(self._next_visible(-1) is not None)
@@ -361,7 +377,7 @@ class CompareTab(QWidget):
         try:
             old, new = open_pdf(old_path), open_pdf(new_path)
         except ValueError as e:
-            QMessageBox.warning(self, "PDFlex", str(e))
+            warn(self, str(e))
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)  # OCR of a scan can take a while
         try:
@@ -370,7 +386,7 @@ class CompareTab(QWidget):
             QApplication.restoreOverrideCursor()
         empty = [Path(p).name for p, w in ((old_path, old_words), (new_path, new_words)) if not w]
         if empty:
-            QMessageBox.information(self, "PDFlex", NO_OCR.format(", ".join(empty)))
+            info(self, NO_OCR.format(", ".join(empty)))
             return
         self.old_path, self.new_path = old_path, new_path
         self.docs, self.words = (old, new), (old_words, new_words)
@@ -434,6 +450,26 @@ class CompareTab(QWidget):
         if i is not None:
             self.go_to(i)
 
+    def _zoom_to(self, scale: float):
+        """Both documents always share the same zoom, keeping the reader on the same spot."""
+        pos = self.old_view.position() if self.old_view.offsets else None
+        self._syncing = True
+        try:
+            self.old_view.set_scale(scale)
+            self.new_view.set_scale(scale)
+            if pos:
+                self.old_view.scroll_to(*pos)
+                self.new_view.scroll_to(*pos)
+        finally:
+            self._syncing = False
+        self.zoom_label.setText(f"{round(self.old_view.scale * 100)}%")
+
+    def zoom_by(self, factor: float):
+        self._zoom_to(self.old_view.scale * factor)
+
+    def zoom_fit(self):
+        self._zoom_to(1.0)
+
     def _follow(self, src: DocView, dst: DocView):
         if self._syncing or not self.sync.isChecked() or not src.offsets or not dst.offsets:
             return
@@ -467,9 +503,9 @@ class CompareTab(QWidget):
             try:
                 self.export(path)
             except (ValueError, OSError, RuntimeError) as e:
-                QMessageBox.warning(self, "PDFlex", f"Esportazione non riuscita: {e}")
+                warn(self, f"Esportazione non riuscita: {e}")
                 return
-            QMessageBox.information(self, "PDFlex", f"Confronto esportato in {path}")
+            info(self, f"Confronto esportato in {path}")
 
     def ask_export_xlsx(self):
         default = str(Path(self.new_path).with_name(Path(self.new_path).stem + "_modifiche.xlsx"))
@@ -478,13 +514,13 @@ class CompareTab(QWidget):
             try:
                 self.export_xlsx(path)
             except OSError as e:
-                QMessageBox.warning(self, "PDFlex", f"Esportazione non riuscita (il file è aperto in Excel?): {e}")
+                warn(self, f"Esportazione non riuscita (il file è aperto in Excel?): {e}")
                 return
-            QMessageBox.information(self, "PDFlex", f"Elenco esportato in {path}")
+            info(self, f"Elenco esportato in {path}")
 
     def export_xlsx(self, path: str) -> None:
         export_changes_xlsx(self.changes, path, Path(self.old_path).name, Path(self.new_path).name)
 
     def export(self, path: str) -> None:
-        export_report(self.old_path, self.new_path, self.changes, path)
+        export_report(self.old_path, self.new_path, self.changes, path, summary=self.include_list.isChecked())
 

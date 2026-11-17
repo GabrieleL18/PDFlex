@@ -107,3 +107,12 @@ def test_ocr_unavailable_is_graceful(make_pdf, tmp_path):
     assert isinstance(ocr_available(), bool)
     if not ocr_available():
         assert extract_words(doc, ocr=True) == []
+
+
+def test_export_without_list_of_changes(make_pdf, tmp_path):
+    old, new = make_pdf(tmp_path, ["prezzo 100 euro"]), make_pdf(tmp_path, ["prezzo 120 euro"])
+    changes = diff_words(extract_words(open_pdf(old)), extract_words(open_pdf(new)))
+    out = tmp_path / "solo_pagine.pdf"
+    export_report(old, new, changes, out, summary=False)
+    doc = open_pdf(out)
+    assert doc.page_count == 1 and "Confronto PDF" not in doc[0].get_text()
