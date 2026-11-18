@@ -4,9 +4,11 @@ Programma Windows per creare moduli PDF compilabili, confrontare due versioni di
 
 ## Cosa fa
 
+- **Editor**: sistema la grafica del PDF prima di farne un modulo. Prendi e sposta linee, rettangoli, forme, immagini e testi della pagina, cambiane misure, colori e parole, o aggiungi testo, linee, rettangoli e immagini. Campi e pulsanti non si vedono e restano intatti. Una striscia gialla avvisa di ciò che non si può modificare (testo disegnato come forme, sfumature, ritagli), e una modifica che toccherebbe altro viene annullata. *Salva PDF* crea `<nome>_modificato.pdf`; *Apri in Moduli* lo passa a Moduli per sistemare i campi.
 - **Moduli**: disegna campi (testo, data, caselle, scelte, menu, firma) oppure premi *Rileva campi* per crearli da righe `____` e caselle vuote. Ci sono anche:
   - formati (numero, importo, percentuale con decimali a scelta; data e ora; CAP, codice fiscale, telefono, email), somme automatiche, carattere, dimensione, colore e allineamento del testo;
-  - *Per compilazione*: salva una copia con i campi invisibili e vuoti, da far compilare a un altro programma;
+  - *Salva modulo*: il PDF con i campi come li vedi, da riaprire in PDFlex o da far compilare a una persona;
+  - *Esporta per gestionale*: una copia con i campi vuoti, senza bordi né pulsanti, per un programma che li riempie da solo;
   - allineamento di più campi (Ctrl+clic per selezionarli) e griglia magnetica;
   - ordine Tab trascinabile e annulla/ripeti (Ctrl+Z / Ctrl+Y);
   - anteprima con dati di esempio;

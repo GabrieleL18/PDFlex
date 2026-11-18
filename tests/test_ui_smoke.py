@@ -33,7 +33,7 @@ def test_compare_tab(qapp, make_pdf, tmp_path):
 def test_main_window(qapp):
     from pdflex.app import MainWindow
     w = MainWindow()
-    assert w.tabs.count() == 4
+    assert w.tabs.count() == 5 and w.tabs.currentWidget() is w.editor
 
 
 def test_compare_scrolls_together(qapp, make_pdf, tmp_path):
@@ -125,7 +125,7 @@ def test_batch_tab(qapp, make_pdf, tmp_path):
 def test_open_from_command_line(qapp, make_pdf, tmp_path):
     from pdflex.app import MainWindow
     w = MainWindow(str(make_pdf(tmp_path, ["ciao"])))
-    assert w.editor.doc is not None and w.tabs.currentIndex() == 0
+    assert w.editor.doc is not None and w.tabs.currentWidget() is w.editor
 
 
 def test_compare_zoom_both_sides(qapp, make_pdf, tmp_path):
@@ -299,3 +299,32 @@ def test_dark_theme_switch_and_remember(qapp):
         assert ui.THEME == "light" and w.b_theme.text() == "Scuro"
     finally:
         ui.apply_theme(qapp, "light")
+
+
+def test_compare_middle_resize_moves_both(qapp, make_pdf, tmp_path):
+    from PySide6.QtTest import QTest
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1300, 800)
+    tab.show()
+    tab.load(str(make_pdf(tmp_path, ["a"])), str(make_pdf(tmp_path, ["b"])))
+    QTest.qWait(100)
+    pair = tab.pair
+    pair.parent().setSizes([1000, 300])  # room for the documents, whatever the side panel asked for
+    QTest.qWait(50)
+    assert pair.count() == 2 and tab.bar.parent() is not None and pair.handle(1).isAncestorOf(tab.bar)
+    old, new = pair.sizes()
+    pair.moveSplitter(pair.handle(1).x() + 120, 1)  # one divider: one PDF grows, the other shrinks
+    o, n = pair.sizes()
+    assert o > old and n < new and o + n == old + new
+
+
+def test_editor_hands_its_pdf_to_moduli(qapp, make_pdf, tmp_path):
+    from pdflex.app import MainWindow
+    w = MainWindow()
+    path = str(make_pdf(tmp_path, ["ciao"]))
+    w.rail[w.design].click()
+    assert w.tabs.currentWidget() is w.design
+    w.design.open(path)
+    w.design.b_forms.click()
+    assert w.tabs.currentWidget() is w.editor and w.editor.path == path and w.rail[w.editor].isChecked()

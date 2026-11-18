@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from pdflex import ui
 from pdflex.batch import BatchTab
 from pdflex.compare import CompareTab
+from pdflex.designer import DesignTab
 from pdflex.editor import EditorTab
 from pdflex.pages import PagesTab
 
@@ -30,13 +31,15 @@ class MainWindow(QMainWindow):
         saved = ui.load_json("finestra.json", {}).get("geometria")
         if saved:  # size, place and maximized as when it was last closed
             self.restoreGeometry(QByteArray(base64.b64decode(saved)))
+        self.design = DesignTab()
         self.editor = EditorTab()
         self.compare = CompareTab()
         self.batch = BatchTab()
         self.pages = PagesTab()
         self.tabs = QStackedWidget()
-        for w in (self.editor, self.compare, self.batch, self.pages):
+        for w in (self.design, self.editor, self.compare, self.batch, self.pages):
             self.tabs.addWidget(w)
+        self.tabs.setCurrentWidget(self.editor)  # Moduli stays the tab PDFlex opens on
 
         rail = QFrame(objectName="Rail")
         rail.setFixedWidth(92)
@@ -48,18 +51,22 @@ class MainWindow(QMainWindow):
         rl.addWidget(logo)
         rl.addSpacing(14)
         group = QButtonGroup(self)
-        for i, (glyph, label) in enumerate([("form", "Moduli"), ("compare", "Confronta"), ("batch", "In serie"), ("list", "Pagine")]):
+        self.rail = {}
+        for glyph, label, tab in [("page", "Editor", self.design), ("form", "Moduli", self.editor),
+                                  ("compare", "Confronta", self.compare), ("batch", "In serie", self.batch),
+                                  ("list", "Pagine", self.pages)]:
             b = QToolButton()
             b.setText(label)
             ui.set_glyph(b, glyph, "accent")
             b.setIconSize(QSize(24, 24))
             b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             b.setCheckable(True)
-            b.setChecked(i == 0)
+            b.setChecked(tab is self.editor)
             b.setFixedWidth(76)
             b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(lambda _=False, i=i: self.tabs.setCurrentIndex(i))
+            b.clicked.connect(lambda _=False, t=tab: self.tabs.setCurrentWidget(t))
             group.addButton(b)
+            self.rail[tab] = b
             rl.addWidget(b, alignment=Qt.AlignHCenter)
         rl.addStretch()
         self.b_theme = QToolButton()
@@ -78,12 +85,20 @@ class MainWindow(QMainWindow):
         h.addWidget(rail)
         h.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
+        self.design.open_in_forms.connect(self.open_in_forms)
         self.editor.title_changed.connect(lambda name: self.setWindowTitle(f"{name} - PDFlex" if name else "PDFlex"))
         QShortcut(QKeySequence("F11"), self, lambda: ui.toggle_full_screen(self))
         self.esc = QShortcut(QKeySequence("Esc"), self, lambda: ui.toggle_full_screen(self))
         self.esc.setEnabled(False)  # only while full screen: elsewhere Esc belongs to the widgets
         if path:  # "Apri con PDFlex" or double click on a PDF
             self.editor.open(path)
+
+    def open_in_forms(self, path: str):
+        """The Editor hands its saved PDF to Moduli, to fix the fields."""
+        self.editor.open(path)
+        if self.editor.path == path:
+            self.tabs.setCurrentWidget(self.editor)
+            self.rail[self.editor].setChecked(True)
 
     def _theme_button(self):
         dark = ui.THEME == "dark"
@@ -103,7 +118,7 @@ class MainWindow(QMainWindow):
             self.esc.setEnabled(self.isFullScreen())
 
     def closeEvent(self, e):
-        if self.editor.confirm_discard():
+        if self.design.confirm_discard() and self.editor.confirm_discard():
             ui.save_json("finestra.json", {"geometria": base64.b64encode(bytes(self.saveGeometry())).decode()})
             e.accept()
         else:

@@ -39,7 +39,7 @@ THEMES = {
         "danger_border": "#F0C2C2", "tip_bg": INK, "tip_fg": "#FFFFFF", "hot_bg": "#FAFAFF", "row_hover": "#F5F6F9",
         "handle": "#C3C9D4", "marks_handle": "rgba(91, 102, 117, 90)", "green": GREEN, "loaded_bg": "#F3FBF6",
         "toggle_off": "#C5CCD6", "focus_ring": "#DCE0F7", "text_red": "#B42318", "text_green": "#1E7B45",
-        "white": "#FFFFFF",
+        "white": "#FFFFFF", "warn_bg": "#FFF6D6", "warn_fg": "#6B4E00", "warn_border": "#F0DC9A",
     },
     "dark": {
         "ink": "#E4E8EE", "muted": "#9AA4B2", "line": "#2F3540", "desk": "#14171C", "bg": "#1A1E24",
@@ -50,7 +50,8 @@ THEMES = {
         "danger_border": "#6E363C", "tip_bg": "#E4E8EE", "tip_fg": "#1A1E24", "hot_bg": "#252A3B",
         "row_hover": "#272D35", "handle": "#4C5563", "marks_handle": "rgba(210, 215, 225, 70)", "green": "#4CB873",
         "loaded_bg": "#1B2D23", "toggle_off": "#4C5563", "focus_ring": "#3A3F73", "text_red": "#F97066",
-        "text_green": "#5BD08E", "white": "#FFFFFF",
+        "text_green": "#5BD08E", "white": "#FFFFFF", "warn_bg": "#3A3218", "warn_fg": "#F2D58A",
+        "warn_border": "#5C4E22",
     },
 }
 THEME = "light"  # the one in use: apply_theme() changes it
@@ -150,6 +151,7 @@ QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::su
 QSlider::groove:horizontal {{ height: 4px; background: {line}; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {accent_bg}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {surface}; border: 1px solid {border_strong}; width: 14px; margin: -6px 0; border-radius: 7px; }}
+QLabel#DesignBanner {{ background: {warn_bg}; color: {warn_fg}; border-bottom: 1px solid {warn_border}; padding: 8px 14px; }}
 QMessageBox {{ background: {surface}; }}
 QMessageBox QLabel#qt_msgbox_label {{ min-width: 320px; max-width: 460px; font-size: 10.5pt; padding: 4px 0 8px 6px; }}
 QMessageBox QLabel#qt_msgbox_informativelabel {{ color: {muted}; padding-left: 6px; }}
@@ -199,6 +201,9 @@ _ICONS = {
     "moon": '<path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10z"/>',
     "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
     "button": '<rect x="3" y="7" width="18" height="10" rx="3.5"/><path d="M8 12h8"/>',
+    "line": '<path d="M5 19 19 5"/>',
+    "rect": '<rect x="4" y="6" width="16" height="12" rx="1.5"/>',
+    "image": '<rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 3.5 3 3-2.5 4.5 4"/>',
     "refresh": '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15"/>',
 }
 

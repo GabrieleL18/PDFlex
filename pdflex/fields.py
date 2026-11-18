@@ -24,30 +24,8 @@ _TYPES = {
     "button": pymupdf.PDF_WIDGET_TYPE_BUTTON,
 }
 
-# Push buttons: Field.default is the caption, Field.value the action ("" = a script made elsewhere, kept as is)
-_FILL_TEST_JS = """// PDFlex: Popola test
-for (var i = 0; i < this.numFields; i++) {
-    var f = this.getField(this.getNthFieldName(i));
-    if (f == null || f.type != "text" || f.readonly) continue;
-    var nome = f.name.toLowerCase();
-    if (nome.indexOf("data") != -1 || nome.indexOf("date") != -1) f.value = util.printd("dd/mm/yyyy", new Date());
-    else if (nome.indexOf("fiscale") != -1) f.value = "RSSMRA80A01H501U";
-    else if (nome.indexOf("num") != -1 || nome.indexOf("tot") != -1 || nome.indexOf("importo") != -1) f.value = "1500";
-    else if (nome.indexOf("perc") != -1) f.value = "0.15";
-    else if (nome.indexOf("indirizzo") != -1)
-        f.value = "Test di un indirizzo lungo per capire se ci sta tutto il testo oppure no " + (i + 1);
-    else f.value = "Test corto";
-}"""
-BUTTON_ACTIONS = {"fill_test": ("Popola test", _FILL_TEST_JS), "reset": ("Svuota test", "this.resetForm();")}
-
-
-def button_action(script: str) -> str:
-    """The action of a button's script: PDFlex's own, or one that does the same (filling / emptying the form)."""
-    if "resetForm" in script:
-        return "reset"
-    if "getNthFieldName" in script and ".value" in script:
-        return "fill_test"
-    return ""
+# Push buttons (made by another program): shown, moved and deleted; Field.default is the caption,
+# their script stays as it is
 
 
 @dataclass
@@ -243,7 +221,7 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
                 f.options = [c if isinstance(c, str) else c[0] for c in (w.choice_values or [])]
                 f.default = w.field_value or ""
             elif kind == "button":
-                f.default, f.value = w.button_caption or "", button_action(w.script or "")
+                f.default = w.button_caption or ""
             elif kind != "signature":
                 f.default = w.field_value or ""
             if kind == "text" and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB:
@@ -320,11 +298,6 @@ def _new_widget(f: Field) -> pymupdf.Widget:
         w.field_value = f.default
     if f.kind == "checkbox":
         w.field_value = f.default == "1"
-    if f.kind == "button":
-        w.button_caption = f.default or BUTTON_ACTIONS.get(f.value, ("Pulsante",))[0]
-        w.script = BUTTON_ACTIONS[f.value][1] if f.value in BUTTON_ACTIONS else None
-        w.fill_color = (0.9, 0.92, 0.95)
-        w.text_color = (0.1, 0.15, 0.25)
     return w
 
 
@@ -409,13 +382,9 @@ def _update_widget(doc, f: Field) -> None:
     if f.default != o.default:
         if f.kind == "checkbox":
             w.field_value = f.default == "1"
-        elif f.kind == "button":
-            w.button_caption = f.default
         elif f.kind != "radio" and f.default:
             w.field_value = f.default
     _safe_update(doc, w)
-    if f.kind == "button" and f.value != o.value and f.value in BUTTON_ACTIONS:
-        doc.xref_set_key(f.xref, "A", f"<</S/JavaScript/JS {pymupdf.get_pdf_str(BUTTON_ACTIONS[f.value][1])}>>")
     changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt), "V": (f.fmt, o.fmt),
                                    "C": (f.calc, o.calc)}.items() if a != b]
     if changed:
@@ -684,9 +653,12 @@ _BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "v
 
 def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
     """Fields (with their on-screen rects) -> a reusable block, positions relative to its top-left corner."""
-    x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
+    kept = [(f, r) for f, r in zip(fields, rects) if f.kind != "button"]  # a button's script can't be copied
+    if not kept:
+        return []
+    x0, y0 = min(r[0] for _, r in kept), min(r[1] for _, r in kept)
     return [{**{k: copy.deepcopy(getattr(f, k)) for k in _BLOCK_KEYS},
-             "rect": [r[0] - x0, r[1] - y0, r[2] - x0, r[3] - y0]} for f, r in zip(fields, rects)]
+             "rect": [r[0] - x0, r[1] - y0, r[2] - x0, r[3] - y0]} for f, r in kept]
 
 
 def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dict, tuple]]:

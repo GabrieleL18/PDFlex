@@ -90,7 +90,7 @@ def test_ctrl_z_belongs_to_the_tab_on_screen(qapp, make_pdf, tmp_path):
     w.show()
     w.editor.open(str(make_pdf(tmp_path, ["x"])))
     w.editor.add_field("text", 0, (10, 10, 100, 30))
-    w.tabs.setCurrentIndex(3)
+    w.tabs.setCurrentWidget(w.pages)
     w.pages.add_files([str(make_pdf(tmp_path, ["a"]))])
     w.activateWindow()
     QTest.qWaitForWindowActive(w)

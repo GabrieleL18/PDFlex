@@ -535,6 +535,8 @@ class CompareTab(QWidget):
         self.bar.valueChanged.connect(own.setValue)
         self.bar.picked.connect(self.go_to)
         self.old_label, self.new_label = QLabel(), QLabel()
+        for label in (self.old_label, self.new_label):  # a long file name must not stop the divider
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.list = QListWidget(objectName="Changes")
         self.list.setItemDelegate(ui.HtmlDelegate(self.list))
         self.list.setResizeMode(QListView.Adjust)  # rows re-wrap when the panel is resized
@@ -583,12 +585,23 @@ class CompareTab(QWidget):
         opts.addWidget(self.kind_filter)
         sl.addLayout(opts)
         sl.addWidget(self.list)
+        # the two documents share one divider, with the changes' bar inside it: dragging its edges
+        # widens one PDF and narrows the other
+        self.pair = QSplitter()
+        self.pair.addWidget(column(self.old_label, self.old_view, ui.RED))
+        self.pair.addWidget(column(self.new_label, self.new_view, ui.GREEN))
+        self.pair.setHandleWidth(self.bar.width() + 8)
+        self.pair.setChildrenCollapsible(False)
+        self.pair.setSizes([520, 520])  # the same width each, also when the window grows
+        self.pair.setStretchFactor(0, 1)
+        self.pair.setStretchFactor(1, 1)
+        inside = QVBoxLayout(self.pair.handle(1))
+        inside.setContentsMargins(4, 0, 4, 0)
+        inside.addWidget(column(QLabel(), self.bar, ui.color("line")))
         split = QSplitter()
-        split.addWidget(column(self.old_label, self.old_view, ui.RED))
-        split.addWidget(column(QLabel(), self.bar, ui.color("line")))
-        split.addWidget(column(self.new_label, self.new_view, ui.GREEN))
+        split.addWidget(self.pair)
         split.addWidget(side)
-        split.setSizes([520, 22, 520, 300])
+        split.setSizes([1040, 300])
         split.setChildrenCollapsible(False)
 
         self.stack = QStackedWidget()
