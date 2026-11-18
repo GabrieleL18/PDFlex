@@ -12,13 +12,14 @@ from PySide6.QtCore import (
     QBuffer, QByteArray, QEventLoop, QIODevice, QPoint, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QGuiApplication, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QTextDocument,
+    QBrush, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
+    QTextDocument,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
     QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 INK = "#1D2633"  # on the page (always white paper) and as the light theme's text
@@ -120,6 +121,9 @@ QPushButton#Recent:hover {{ background: {surface}; }}
 QLabel#H1 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 14pt; font-weight: 600; }}
 QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11pt; font-weight: 600; }}
 QLabel#Muted {{ color: {muted}; }}
+QLabel#Key {{ background: {bg}; border: 1px solid {border_strong}; border-bottom-width: 2px; border-radius: 5px;
+             padding: 1px 7px; font-size: 9pt; font-weight: 600; }}
+QLabel#KeysGroup {{ color: {accent}; font-weight: 600; }}
 #DropZone {{ border: 2px dashed {border_strong}; border-radius: 16px; background: {surface}; }}
 #DropZone:hover, #DropZone[hot="true"] {{ border-color: {accent}; background: {hot_bg}; }}
 QMenu {{ background: {surface}; color: {ink}; border: 1px solid {border}; padding: 4px; }}
@@ -447,11 +451,63 @@ class RecentFiles(QWidget):
         self.lay.addStretch()
 
 
-def keys_button(text: str) -> QPushButton:
-    """The keyboard shortcuts of a tab: shown on hover, and in a box on click, instead of a wall of text."""
-    b = button("Tasti rapidi", "help", "Ghost", text.replace("\n", "<br>"))
-    b.clicked.connect(lambda: message(b.window(), "Tasti rapidi", "info", note=text))
+def keys_button(groups: list) -> QPushButton:
+    """The keyboard shortcuts of a tab, behind a button and F1 (while the tab is the one shown).
+    groups: [(title, [(keys, what it does)])]; keys like "Ctrl+Z", alternatives with " / "."""
+    b = button("Tasti rapidi", "help", "Ghost", "Tutti i tasti rapidi di questa sezione (F1)")
+    b.clicked.connect(lambda: show_keys(b.window(), groups))
+    QShortcut(QKeySequence("F1"), b, lambda: show_keys(b.window(), groups))
     return b
+
+
+def _caps(keys: str) -> QWidget:
+    """ "Ctrl+C / Ctrl+V" as keys drawn like the ones on the keyboard."""
+    w = QWidget()
+    h = QHBoxLayout(w)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(4)
+    for i, alt in enumerate(keys.split(" / ")):
+        if i:
+            h.addWidget(QLabel("o", objectName="Muted"))
+        for j, k in enumerate(alt.split("+")):
+            if j:
+                h.addWidget(QLabel("+", objectName="Muted"))
+            h.addWidget(QLabel(k, objectName="Key"), alignment=Qt.AlignVCenter)
+    h.addStretch()
+    return w
+
+
+def keys_dialog(parent, groups: list) -> QDialog:
+    d = QDialog(parent)
+    d.setWindowTitle("Tasti rapidi")
+    lay = QVBoxLayout(d)
+    lay.setContentsMargins(28, 24, 28, 20)
+    lay.setSpacing(18)
+    cols = QGridLayout()  # two groups per row
+    cols.setHorizontalSpacing(44)
+    cols.setVerticalSpacing(22)
+    for n, (title, rows) in enumerate(groups):
+        g = QGridLayout()
+        g.setHorizontalSpacing(14)
+        g.setVerticalSpacing(8)
+        g.addWidget(QLabel(title, objectName="KeysGroup"), 0, 0, 1, 2)
+        for r, (keys, what) in enumerate(rows, 1):
+            g.addWidget(_caps(keys), r, 0)
+            g.addWidget(QLabel(what), r, 1)  # one line each: short words, no wrapping to cut
+        g.setColumnStretch(1, 1)
+        g.setRowStretch(len(rows) + 1, 1)
+        cols.addLayout(g, n // 2, n % 2)
+    lay.addLayout(cols)
+    close = button("Chiudi", None, "Primary")
+    close.clicked.connect(d.accept)
+    lay.addWidget(close, alignment=Qt.AlignRight)
+    return d
+
+
+def show_keys(parent, groups: list) -> None:
+    d = keys_dialog(parent, groups)
+    d.exec()
+    d.deleteLater()
 
 
 class DropZone(QFrame):

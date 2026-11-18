@@ -346,12 +346,17 @@ class EditorTab(QWidget):
         pl.addWidget(self.block_combo)
         pl.addWidget(self.b_block)
         pl.addStretch()
-        pl.addWidget(ui.keys_button("Trascina sul vuoto o Ctrl+clic: più campi\n"
-                                    "Frecce: sposta di poco\nMaiusc+frecce: allinea al campo vicino\n"
-                                    "Ctrl+frecce: scorri la pagina\n"
-                                    "Ctrl+C / Ctrl+V copia e incolla, anche su un'altra pagina\n"
-                                    "Canc elimina, Ctrl+D duplica\nCtrl+Z annulla, Ctrl+Y ripete"),
-                     alignment=Qt.AlignLeft)
+        pl.addWidget(ui.keys_button([
+            ("Selezionare", [("Clic", "un campo"), ("Ctrl+Clic", "aggiungi o togli un campo dalla selezione"),
+                             ("Trascina", "sul vuoto: i campi dentro il riquadro")]),
+            ("Spostare", [("Frecce", "sposta di poco"), ("Maiusc+Frecce", "allinea al campo vicino"),
+                          ("Ctrl+Frecce", "scorri la pagina"), ("Ctrl+Rotellina", "ingrandisci o riduci la pagina")]),
+            ("Modificare", [("Ctrl+C / Ctrl+V", "copia e incolla, anche su un'altra pagina"), ("Ctrl+D", "duplica"),
+                            ("Canc", "elimina")]),
+            ("File", [("Ctrl+O", "apri un PDF"), ("Ctrl+S", "salva il modulo"), ("Ctrl+Maiusc+S", "esporta per gestionale"),
+                   ("Ctrl+W", "chiudi il documento"), ("Ctrl+Z", "annulla"),
+                   ("Ctrl+Y", "ripeti"), ("F11", "schermo intero"), ("F1", "questi tasti rapidi")]),
+        ]), alignment=Qt.AlignLeft)
 
         # center: command bar + page
         bar = ui.Bar()

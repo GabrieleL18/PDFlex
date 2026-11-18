@@ -328,3 +328,23 @@ def test_editor_hands_its_pdf_to_moduli(qapp, make_pdf, tmp_path):
     w.design.open(path)
     w.design.b_forms.click()
     assert w.tabs.currentWidget() is w.editor and w.editor.path == path and w.rail[w.editor].isChecked()
+
+
+def test_keys_window_and_f1_of_the_tab_shown(qapp, monkeypatch):
+    from PySide6.QtTest import QTest
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel
+    from pdflex import ui
+    from pdflex.app import MainWindow
+    d = ui.keys_dialog(None, [("Modificare", [("Ctrl+C / Ctrl+V", "copia e incolla")])])
+    assert [l.text() for l in d.findChildren(QLabel) if l.objectName() == "Key"] == ["Ctrl", "C", "Ctrl", "V"]
+    shown = []
+    monkeypatch.setattr(ui, "show_keys", lambda parent, groups: shown.append(groups[0][1][0][1]))
+    w = MainWindow()
+    w.show()
+    for tab, first in ((w.design, "un oggetto"), (w.editor, "un campo")):
+        w.tabs.setCurrentWidget(tab)
+        qapp.processEvents()
+        QTest.keyClick(w, Qt.Key_F1)
+        assert shown[-1] == first
+    w.close()

@@ -407,12 +407,20 @@ class DesignTab(QWidget):
         self.layers.viewport().installEventFilter(self)  # the mouse leaving the list: no object shown
         self.rows: list[design.Obj] = []
         pl.addWidget(self.layers, 1)
-        pl.addWidget(ui.keys_button("Trascina sul vuoto o Ctrl+clic: più oggetti (quelli tutti dentro il riquadro, "
-                      "anche uno sfondo grande)\nFrecce: sposta di 1 pt, Maiusc+frecce di 10\n"
-                      "Maiusc mentre disegni: linea dritta\nAlt mentre trascini: senza guide\n"
-                      "Maniglia tonda: ruota (Maiusc: a 15°)\nCanc elimina\nCtrl+C / Ctrl+V copia e incolla, "
-                      "anche su un'altra pagina\nCtrl+G raggruppa, Ctrl+L blocca\nCtrl+H trova e sostituisci\n"
-                      "Ctrl+Z annulla, Ctrl+Y ripete"), alignment=Qt.AlignLeft)
+        pl.addWidget(ui.keys_button([
+            ("Selezionare", [("Clic", "un oggetto"), ("Ctrl+Clic", "aggiungi o togli un oggetto dalla selezione"),
+                             ("Trascina", "sul vuoto: tutto quello che sta nel riquadro")]),
+            ("Spostare e disegnare", [("Frecce", "sposta di 1 pt"), ("Maiusc+Frecce", "sposta di 10 pt"),
+                                      ("Alt", "tenuto mentre trascini: senza guide"),
+                                      ("Maiusc", "tenuto mentre disegni: linea dritta"),
+                                      ("Maiusc", "tenuto mentre ruoti: a scatti di 15°"),
+                                      ("Ctrl+Rotellina", "ingrandisci o riduci la pagina")]),
+            ("Modificare", [("Ctrl+C / Ctrl+V", "copia e incolla, anche su un'altra pagina"), ("Ctrl+D", "duplica"),
+                            ("Canc", "elimina"), ("Ctrl+G", "raggruppa o separa"), ("Ctrl+L", "blocca o sblocca"),
+                            ("Ctrl+H", "trova e sostituisci in tutto il PDF")]),
+            ("File", [("Ctrl+O", "apri un PDF"), ("Ctrl+S", "salva il PDF"), ("Ctrl+Z", "annulla"),
+                   ("Ctrl+Y", "ripeti"), ("F11", "schermo intero"), ("F1", "questi tasti rapidi")]),
+        ]), alignment=Qt.AlignLeft)
 
         # center: bar, warnings, page
         bar = ui.Bar()
