@@ -2,13 +2,15 @@
 
 The page on screen is always the real PDF (pdflex.design changes it in place); fields and buttons are not shown
 and never touched, so they are all still there in the saved file."""
+import json
+import math
 from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
+    QApplication, QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -29,6 +31,38 @@ AS_SHAPES = ": testo disegnato come forme, si sposta e si ridimensiona ma le par
 GLYPHS = {"line": "line", "rect": "rect", "shape": "rect", "image": "image", "text": "text"}
 COPY_OFFSET = 10  # pt: where a copy goes, right and down from the original
 HELVETICA = "Il carattere di questo testo non ha le lettere: {}. Uso Helvetica per questo testo?"
+TURN = 24  # px: the turning handle, above the box
+SNAP = 6  # px: how close an edge or a middle comes before it catches another
+MARKS = "PDFlexEditor"  # the Editor's own notes in the PDF: groups and locked objects, by page
+DASHES = ["Continuo", "Tratteggiato", "Punteggiato"]
+
+
+def _marks(doc) -> dict:
+    typ, val = doc.xref_get_key(doc.pdf_catalog(), MARKS)
+    try:
+        return json.loads(val) if typ == "string" else {}
+    except ValueError:
+        return {}
+
+
+def _put_marks(doc, marks: dict) -> None:
+    doc.xref_set_key(doc.pdf_catalog(), MARKS, pymupdf.get_pdf_str(json.dumps(marks)))
+
+
+def _key(o: design.Obj) -> list:
+    return [round(v, 1) for v in o.rect] + [o.kind]
+
+
+def _is(o: design.Obj, key) -> bool:
+    return bool(key) and o.kind == key[4] and all(abs(a - b) < 1.5 for a, b in zip(o.rect, key[:4]))
+
+
+def _same_key(a, b) -> bool:
+    return a[4] == b[4] and all(abs(x - y) < 0.15 for x, y in zip(a[:4], b[:4]))
+
+
+def _words(o: design.Obj) -> str:
+    return "".join(s["text"] for s in o.data["spans"])
 
 
 def _muted(text: str) -> QLabel:
@@ -44,7 +78,7 @@ def _kept(o: design.Obj, r: tuple) -> bool:
     if len(r) == 5:
         box, mid = pymupdf.Rect(r[:4]), pymupdf.Rect(o.rect)
         return (o.kind == r[4] and abs(box.x0 + box.x1 - mid.x0 - mid.x1) < 3 and abs(box.y0 + box.y1 - mid.y0 - mid.y1) < 3
-                and (box + (-1.5, -1.5, 1.5, 1.5)).contains(mid))
+                and (box + (-10, -10, 10, 10)).contains(mid))  # 10: an arrow's head sticks out of its line
     if all(abs(a - b) < 1.5 for a, b in zip(o.rect, r)):
         return True
     a, b = o.rect, r
@@ -62,7 +96,7 @@ def _label(o: design.Obj) -> str:
     else:
         r = pymupdf.Rect(o.rect)
         text = f"{KINDS[o.kind]}  {r.width:.0f} × {r.height:.0f} pt"
-    return ("🔒 " if o.state == "locked" else "") + text
+    return ("🔒 " if o.state == "locked" else "📌 " if o.data.get("pinned") else "") + text
 
 
 def _hex(rgb) -> str:
@@ -79,6 +113,7 @@ class ObjItem(QGraphicsRectItem):
         pad = 3 if obj.kind == "line" else 0  # a hairline still has something to grab
         super().__init__(-pad, -pad, max(r.width, 1) + 2 * pad, max(r.height, 1) + 2 * pad)
         self.setPos(r.x0, r.y0)
+        self.home = QPointF(r.x0, r.y0)  # where it is on the page: a drag moves it from here
         self.obj, self.tab, self.zoom, self.grab = obj, tab, zoom, None
         self.hover = False
         # a background as big as the page lets clicks through: a drag "on the empty page" draws the selection
@@ -90,6 +125,9 @@ class ObjItem(QGraphicsRectItem):
             self.setToolTip(f"🔒 {obj.reason}")
             if not big:
                 self.setCursor(Qt.ForbiddenCursor)
+        elif obj.data.get("pinned"):  # locked by the user: it can be selected, to unlock it
+            self.setFlags(QGraphicsItem.ItemIsSelectable)
+            self.setToolTip("📌 Bloccato: sbloccalo per spostarlo o cambiarlo")
         else:
             self.setFlags(QGraphicsItem.ItemIsSelectable | (QGraphicsItem.GraphicsItemFlag(0) if big
                                                             else QGraphicsItem.ItemIsMovable))
@@ -99,12 +137,19 @@ class ObjItem(QGraphicsRectItem):
 
     def handles(self) -> list[QPointF]:
         """Local points the user can drag to resize: a line's ends, a box's corners and sides."""
-        if self.obj.state == "locked" or self.obj.kind == "text":
+        if self.obj.state == "locked" or self.obj.kind == "text" or self.obj.data.get("pinned"):
             return []  # text grows from its size in the properties, not stretched
         if self.obj.kind == "line":
             return [QPointF(*self.obj.data[k]) * self.zoom - self.pos() for k in ("p1", "p2")]
         r = self.rect()
         return [QPointF(r.left() + fx * r.width(), r.top() + fy * r.height()) for fx, fy in SPOTS]
+
+    def knob(self) -> QPointF | None:
+        """The round handle above the box that turns it: only when it is the one object selected."""
+        if (not self.isSelected() or self.obj.state == "locked" or self.obj.data.get("pinned")
+                or len(self.tab.selection) != 1):
+            return None
+        return QPointF(self.rect().center().x(), self.rect().top() - TURN)
 
     def paint(self, p, option, widget=None):
         p.setRenderHint(QPainter.Antialiasing)
@@ -122,13 +167,29 @@ class ObjItem(QGraphicsRectItem):
             p.setBrush(Qt.white)
             for h in self.handles():
                 p.drawEllipse(h, HANDLE / 2, HANDLE / 2)
+            k = self.knob()
+            if k is not None:
+                p.drawLine(QPointF(k.x(), self.rect().top()), k + QPointF(0, HANDLE / 2))
+                p.drawEllipse(k, HANDLE / 2, HANDLE / 2)
         elif self.hover:
             p.setPen(QPen(QColor(ACCENT), 1))
             p.setBrush(Qt.NoBrush)
             p.drawRect(self.rect())
 
-    def boundingRect(self):
-        return self.rect().adjusted(-HANDLE, -HANDLE, HANDLE, HANDLE)
+    def boundingRect(self):  # the turning handle only when selected: a box drawn around it must still hold it
+        return self.rect().adjusted(-HANDLE, -HANDLE - (TURN if self.isSelected() else 0), HANDLE, HANDLE)
+
+    def shape(self):  # the knob above the box gets the click too
+        path = super().shape()
+        k = self.knob()
+        if k is not None:
+            path.addEllipse(k, HANDLE, HANDLE)
+        return path
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.prepareGeometryChange()
+        return super().itemChange(change, value)
 
     def hoverEnterEvent(self, e):
         self.hover = True
@@ -144,21 +205,48 @@ class ObjItem(QGraphicsRectItem):
                 return i
         return None
 
+    def _on_knob(self, pos) -> bool:
+        k = self.knob()
+        return k is not None and (k - pos).manhattanLength() <= HANDLE
+
     def hoverMoveEvent(self, e):
         i = self._handle_at(e.pos()) if self.isSelected() else None
-        if i is not None:
+        if self._on_knob(e.pos()):
+            self.setCursor(Qt.PointingHandCursor)
+        elif i is not None:
             self.setCursor(Qt.CrossCursor if self.obj.kind == "line" else CURSORS[i])
-        elif self.obj.state != "locked":
+        elif self.obj.state != "locked" and not self.obj.data.get("pinned"):
             self.setCursor(Qt.SizeAllCursor)
 
+    def _angle(self, scene_pos) -> float:
+        c = self.turn_centre
+        return math.degrees(math.atan2(scene_pos.y() - c.y(), scene_pos.x() - c.x()))
+
     def mousePressEvent(self, e):
+        if self._on_knob(e.pos()):  # turning: shown on screen, made on the page when the button goes up
+            self.grab = "turn"
+            self.setTransformOriginPoint(self.rect().center())
+            self.turn_centre = self.mapToScene(self.rect().center())
+            self.turn_from = self._angle(e.scenePos())
+            e.accept()
+            return
         self.grab = self._handle_at(e.pos()) if self.isSelected() else None
         self.start, self.start_rect = self.pos(), QRectF(self.rect())
         super().mousePressEvent(e)
+        if self.grab is None:
+            self.tab.start_drag()
 
     def mouseMoveEvent(self, e):
+        if self.grab == "turn":
+            a = (self._angle(e.scenePos()) - self.turn_from + 180) % 360 - 180
+            if e.modifiers() & Qt.ShiftModifier:  # by 15 degrees
+                a = round(a / 15) * 15
+            self.setRotation(a)
+            self.tab.kind_label.setText(f"Rotazione: {a:.0f}° (Maiusc: a scatti di 15°)")
+            return
         if self.grab is None:
-            return super().mouseMoveEvent(e)
+            super().mouseMoveEvent(e)
+            return self.tab.snap_drag(self)
         self.prepareGeometryChange()
         if self.obj.kind == "line":  # the band shows the line from the other end to the mouse
             other = self.handles()[1 - self.grab]
@@ -176,7 +264,16 @@ class ObjItem(QGraphicsRectItem):
         self.setRect(r)
 
     def mouseReleaseEvent(self, e):
+        if self.grab == "turn":
+            a, self.grab = self.rotation(), None
+            self.setRotation(0)
+            if abs(a) > 0.05:
+                self.tab.rotate_selected(round(a, 1))
+            else:
+                self.tab.refresh()
+            return
         super().mouseReleaseEvent(e)
+        self.tab.end_drag()
         z = self.zoom
         if self.grab is not None:
             if self.obj.kind == "line":
@@ -206,7 +303,7 @@ class PageView(QGraphicsView):
 
     def keyPressEvent(self, e):
         d = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}.get(e.key())
-        items = [i for i in self.tab.items if i.isSelected() and i.obj.state != "locked"]
+        items = [i for i in self.tab.items if i.isSelected() and i.obj.state != "locked" and not i.obj.data.get("pinned")]
         if d is None or not items:
             return super().keyPressEvent(e)
         step = 10 if e.modifiers() & Qt.ShiftModifier else 1
@@ -264,6 +361,9 @@ class DesignTab(QWidget):
         self.dirty = False
         self._undo: list[tuple[int, bytes]] = []  # (page changed, the document before)
         self._redo: list[tuple[int, bytes]] = []
+        self.groups: list[list[design.Obj]] = []  # on this page, from the PDF's own notes (see MARKS)
+        self.clip, self.pastes = None, 0  # copied objects: (a copy of their page, their keys, its number)
+        self.guides, self.snap_x, self.snap_y = [], [], []
         self.setAcceptDrops(True)
 
         # left: tools
@@ -307,7 +407,10 @@ class DesignTab(QWidget):
         pl.addWidget(self.layers, 1)
         keys = QLabel("Trascina sul vuoto o Ctrl+clic: più oggetti (quelli tutti dentro il riquadro, "
                       "anche uno sfondo grande)\nFrecce: sposta di 1 pt, Maiusc+frecce di 10\n"
-                      "Maiusc mentre disegni: linea dritta\nCanc elimina\nCtrl+Z annulla, Ctrl+Y ripete",
+                      "Maiusc mentre disegni: linea dritta\nAlt mentre trascini: senza guide\n"
+                      "Maniglia tonda: ruota (Maiusc: a 15°)\nCanc elimina\nCtrl+C / Ctrl+V copia e incolla, "
+                      "anche su un'altra pagina\nCtrl+G raggruppa, Ctrl+L blocca\nCtrl+H trova e sostituisci\n"
+                      "Ctrl+Z annulla, Ctrl+Y ripete",
                       objectName="Muted")
         keys.setWordWrap(True)
         pl.addWidget(keys)
@@ -339,7 +442,11 @@ class DesignTab(QWidget):
         self.b_next.clicked.connect(lambda: self.go_page(self.page_no + 1))
         self.b_zout.clicked.connect(lambda: self.set_zoom(self.zoom / 1.2))
         self.b_zin.clicked.connect(lambda: self.set_zoom(self.zoom * 1.2))
-        for w in (self.b_open, self.b_save, self.b_forms, self.b_undo, self.b_redo):
+        self.b_paste = button("", "paste", "Ghost", "Incolla gli oggetti copiati (Ctrl+V)")
+        self.b_paste.clicked.connect(self.paste)
+        self.b_find = button("", "search", "Ghost", "Trova e sostituisci un testo in tutto il PDF (Ctrl+H)")
+        self.b_find.clicked.connect(self.find_replace)
+        for w in (self.b_open, self.b_save, self.b_forms, self.b_undo, self.b_redo, self.b_paste, self.b_find):
             bl.addWidget(w)
         bl.addWidget(self.file_label, 1)
         for w in (self.b_prev, self.page_label, self.b_next, self.b_zout, self.b_zin):
@@ -407,6 +514,7 @@ class DesignTab(QWidget):
             (row if i < 2 else row2).addWidget(e)
         self.form.addRow(row)
         self.form.addRow(row2)
+        self.p_rows = (row, row2)
         self.p_text = QLineEdit()
         self.p_text.editingFinished.connect(lambda: self.set_text(self.p_text.text()))
         self.p_size = QLineEdit()
@@ -450,6 +558,30 @@ class DesignTab(QWidget):
         self.form.addRow("Spessore (pt)", self.p_width)
         self.form.addRow("Colore", self.p_color)
         self.form.addRow("Riempimento", self.p_fill)
+        self.p_alpha = QLineEdit()
+        self.p_alpha.setValidator(QDoubleValidator(0, 100, 0, self.p_alpha))
+        self.p_alpha.editingFinished.connect(self._alpha_edited)
+        self.form.addRow("Opacità (%)", self.p_alpha)
+        self.p_dash = QComboBox()
+        self.p_dash.addItems(DASHES)
+        self.p_dash.activated.connect(self._dash_edited)
+        self.form.addRow("Tratto", self.p_dash)
+        self.p_heads = QHBoxLayout()
+        self.p_head0 = button("All'inizio", None, tip="Una punta di freccia sul primo estremo")
+        self.p_head1 = button("Alla fine", None, tip="Una punta di freccia sul secondo estremo")
+        for b in (self.p_head0, self.p_head1):
+            b.setCheckable(True)
+            b.clicked.connect(self._heads_edited)
+            self.p_heads.addWidget(b)
+        self.form.addRow("Frecce", self.p_heads)
+        self.p_round = QLineEdit()
+        self.p_round.setValidator(QDoubleValidator(0, 1000, 1, self.p_round))
+        self.p_round.editingFinished.connect(self._round_edited)
+        self.form.addRow("Angoli arrotondati (pt)", self.p_round)
+        self.p_image = button("Sostituisci immagine…", "image", tip="Un'altra immagine al suo posto, nelle sue "
+                                                                  "proporzioni")
+        self.p_image.clicked.connect(self.replace_image)
+        self.form.addRow(self.p_image)
         pr.addWidget(self.props)
         # arrangement: for one object or more
         self.arrange = QWidget()
@@ -464,6 +596,16 @@ class DesignTab(QWidget):
             aligns.addWidget(b)
         aligns.addStretch()
         al.addLayout(aligns)
+        self.spread = QWidget()
+        sl = QHBoxLayout(self.spread)
+        sl.setContentsMargins(0, 0, 0, 0)
+        for axis, tip in (("h", "Stessa distanza tra loro, in orizzontale"), ("v", "Stessa distanza tra loro, "
+                                                                                    "in verticale")):
+            b = button("", "distribute-" + axis, "Ghost", tip + " (tre oggetti o più)")
+            b.clicked.connect(lambda _=False, axis=axis: self.distribute_selected(axis))
+            sl.addWidget(b)
+        sl.addStretch()
+        al.addWidget(self.spread)
         al.addWidget(_muted("Ruota (gradi, in senso orario)"))
         turns = QHBoxLayout()
         self.p_turn = QLineEdit()
@@ -496,13 +638,24 @@ class DesignTab(QWidget):
                 line.addWidget(b)
             ll.addLayout(line)
         al.addWidget(self.layers_box)
+        marks = QHBoxLayout()
+        self.b_group = button("Raggruppa", None, tip="Si selezionano, si spostano e si copiano insieme (Ctrl+G)")
+        self.b_group.clicked.connect(self.group_selected)
+        self.b_pin = button("Blocca", None, tip="Non si sposta e non si cambia per sbaglio (Ctrl+L)")
+        self.b_pin.clicked.connect(self.pin_selected)
+        marks.addWidget(self.b_group)
+        marks.addWidget(self.b_pin)
+        al.addLayout(marks)
         pr.addWidget(self.arrange)
         self.b_dup = button("Duplica", "copy", tip="Una copia accanto all'originale (Ctrl+D)")
         self.b_dup.clicked.connect(self.duplicate_selected)
         self.b_del = button("Elimina", "trash", "Danger")
         self.b_del.clicked.connect(self.delete_selected)
         acts = QHBoxLayout()
+        self.b_copy = button("Copia", "copy", tip="Copia, per incollarlo anche su un'altra pagina (Ctrl+C)")
+        self.b_copy.clicked.connect(self.copy_selected)
         acts.addWidget(self.b_dup)
+        acts.addWidget(self.b_copy)
         acts.addWidget(self.b_del)
         pr.addLayout(acts)
         pr.addStretch()
@@ -524,6 +677,11 @@ class DesignTab(QWidget):
 
         QShortcut(QKeySequence.Delete, self.view, self.delete_selected)
         QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
+        QShortcut(QKeySequence.Copy, self, self.copy_selected)
+        QShortcut(QKeySequence.Paste, self, self.paste)
+        QShortcut(QKeySequence("Ctrl+G"), self, self.group_selected)
+        QShortcut(QKeySequence("Ctrl+L"), self, self.pin_selected)
+        QShortcut(QKeySequence("Ctrl+H"), self, self.find_replace)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
         QShortcut(QKeySequence.Undo, self, self.undo)
@@ -632,6 +790,7 @@ class DesignTab(QWidget):
     def _load_page(self, keep: list[tuple] = ()):
         """Read the page's objects again; keep: rects (PDF points) of objects to select again afterwards."""
         self.objects, warnings = design.page_objects(self.doc[self.page_no]) if self.doc else ([], [])
+        self._apply_marks()
         self.selection = [o for o in self.objects if o.state != "locked" and any(_kept(o, r) for r in keep)]
         self.banner.setText(f"Pagina {self.page_no + 1}: " + " ".join(warnings) if warnings else "")
         self.banner.setVisible(bool(warnings))
@@ -642,9 +801,43 @@ class DesignTab(QWidget):
         self.selection = list(objs)
         self.refresh()
 
-    def _edit(self, fn, *args, keep: list[tuple] = ()) -> bool:
-        """Every change goes through here: a copy for Annulla first; if the change fails, the copy comes back."""
+    def _apply_marks(self):
+        """The groups and the locked objects of this page, from the notes in the PDF."""
+        marks, p = (_marks(self.doc), str(self.page_no)) if self.doc else ({}, "")
+        for o in self.objects:
+            o.data.pop("pinned", None)
+            if o.state != "locked" and any(_is(o, k) for k in marks.get("pinned", {}).get(p, [])):
+                o.data["pinned"] = True
+        found = ([o for o in self.objects if any(_is(o, k) for k in keys)] for keys in marks.get("groups", {}).get(p, []))
+        self.groups = [g for g in found if len(g) > 1]
+
+    def _follow(self, old: list, keep):
+        """Groups and locks go with their objects: old = their keys before the change, keep = where they went
+        (shorter: the others are gone)."""
+        marks, p = _marks(self.doc), str(self.page_no)
+        moved = []
+        for k, r in zip(old, list(keep) + [None] * len(old)):
+            o = next((o for o in self.objects if _kept(o, r)), None) if r is not None else None
+            moved.append((k, _key(o) if o else None))
+
+        def new(key):
+            hit = next((n for k, n in moved if k[4] == key[4] and all(abs(a - b) < 0.15 for a, b in zip(k, key[:4]))), key)
+            return hit
+
+        groups = [[n for n in map(new, g) if n] for g in marks.get("groups", {}).get(p, [])]
+        pinned = [n for n in map(new, marks.get("pinned", {}).get(p, [])) if n]
+        if groups != marks.get("groups", {}).get(p, []) or pinned != marks.get("pinned", {}).get(p, []):
+            marks.setdefault("groups", {})[p] = [g for g in groups if len(g) > 1]
+            marks.setdefault("pinned", {})[p] = pinned
+            _put_marks(self.doc, marks)
+            self._apply_marks()
+            self.refresh()
+
+    def _edit(self, fn, *args, keep: list[tuple] = (), follow: list = ()) -> bool:
+        """Every change goes through here: a copy for Annulla first; if the change fails, the copy comes back.
+        follow: the objects changed, in the order of keep, so their groups and locks go with them."""
         snapshot = self.doc.tobytes()
+        old = [_key(o) for o in follow]
         try:
             fn(self.doc[self.page_no], *args)
         except design.EditError as e:
@@ -657,6 +850,8 @@ class DesignTab(QWidget):
         self.dirty = True
         self.thumbs.item(self.page_no).setIcon(self._thumb(self.doc[self.page_no]))
         self._load_page(keep)
+        if old:
+            self._follow(old, keep)
         return True
 
     def _restore(self, data: bytes):
@@ -681,39 +876,77 @@ class DesignTab(QWidget):
     def redo(self):
         self._step(self._redo, self._undo)
 
+    def _free(self) -> list[design.Obj]:
+        """The selected objects that can change: not locked by the page, not locked by the user."""
+        return [o for o in self.selection if o.state != "locked" and not o.data.get("pinned")]
+
     def move_selected(self, dx: float, dy: float) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        objs = [o for o in self.selection if o.state != "locked"]
+        objs = self._free()
         if objs:
-            self._edit(design.move, objs, dx, dy,
-                       keep=[tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o in objs])
+            self._edit(design.move, objs, dx, dy, keep=[tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o in objs],
+                       follow=objs)
 
     def resize_object(self, obj: design.Obj, rect: tuple) -> None:
         box = pymupdf.Rect(rect).normalize() if obj.kind == "line" else pymupdf.Rect(rect)
-        self._edit(design.set_rect, obj, rect, keep=[tuple(box)])
+        keep = (*box, "line") if "arrows" in obj.data else tuple(box)  # the heads stick out of the line's ends
+        self._edit(design.set_rect, obj, rect, keep=[keep], follow=[obj])
 
     def duplicate_selected(self) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        objs = [o for o in self.selection if o.state != "locked"]
+        objs = self._free()
         d = COPY_OFFSET
         if objs:  # the copies are selected afterwards: they are where the originals are, moved by d
             self._edit(design.duplicate, objs, d, d, keep=[tuple(pymupdf.Rect(o.rect) + (d, d, d, d)) for o in objs])
 
+    def copy_selected(self) -> None:
+        self.view.flush_nudge()
+        objs = [o for o in self.selection if o.state != "locked"]
+        if not objs:
+            return
+        page = pymupdf.open()  # their page as it is now: what is pasted later is what was copied
+        page.insert_pdf(self.doc, from_page=self.page_no, to_page=self.page_no, annots=False)
+        self.clip, self.pastes = (page.tobytes(), [_key(o) for o in objs], self.page_no), 0
+        self.refresh()
+
+    def paste(self) -> None:
+        self.view.flush_nudge()
+        if not self.doc or not self.clip:
+            return
+        data, keys, page_no = self.clip
+        src = pymupdf.open("pdf", data)
+        objs = [o for o in design.page_objects(src[0])[0] if any(_is(o, k) for k in keys)]
+        same = page_no == self.page_no  # on their own page: a little further each time, not on themselves
+        self.pastes = self.pastes + 1 if same else 0
+        d = COPY_OFFSET * self.pastes
+        if objs:
+            self._edit(design.paste, src[0], objs, d, d, keep=[tuple(pymupdf.Rect(o.rect) + (d, d, d, d)) for o in objs])
+
+    def _lined_up(self, fn, moves: list, *args) -> None:
+        objs = self._free()
+        keep = {id(o): tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o, dx, dy in moves}
+        self._edit(fn, objs, *args, keep=[keep.get(id(o), o.rect) for o in objs], follow=objs)
+
     def align_selected(self, how: str) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        objs = [o for o in self.selection if o.state != "locked"]
+        objs = self._free()
         moves = design.alignment(self.doc[self.page_no], objs, how) if objs else []
         if moves:
-            moved = {id(o) for o, _, _ in moves}
-            keep = [tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o, dx, dy in moves]
-            self._edit(design.align, objs, how, keep=keep + [o.rect for o in objs if id(o) not in moved])
+            self._lined_up(design.align, moves, how)
+
+    def distribute_selected(self, axis: str) -> None:
+        self.view.flush_nudge()
+        moves = design.distribution(self._free(), axis)
+        if moves:
+            self._lined_up(design.distribute, moves, axis)
 
     def rotate_selected(self, degrees: float) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        objs = [o for o in self.selection if o.state != "locked"]
+        objs = self._free()
         if objs and degrees % 360:
             m = design.turning(objs, degrees)
-            self._edit(design.rotate, objs, degrees, keep=[(*(pymupdf.Rect(o.rect) * m), o.kind) for o in objs])
+            self._edit(design.rotate, objs, degrees, keep=[(*(pymupdf.Rect(o.rect) * m), o.kind) for o in objs],
+                       follow=objs)
 
     def _turn_edited(self):
         try:
@@ -724,38 +957,182 @@ class DesignTab(QWidget):
 
     def restack_selected(self, where: str) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        if len(self.selection) == 1 and self.selection[0].state != "locked":
-            o = self.selection[0]
-            self._edit(design.restack, o, where, keep=[o.rect])
+        objs = self._free()
+        if len(objs) == 1 and len(self.selection) == 1:
+            self._edit(design.restack, objs[0], where, keep=[objs[0].rect], follow=objs)
 
     def delete_selected(self) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        objs = [o for o in self.selection if o.state != "locked"]
+        objs = self._free()
         if objs:
-            self._edit(design.delete, objs)
+            self._edit(design.delete, objs, follow=objs)
+
+    def _set_marks(self, change) -> None:
+        """Change the notes of this page (groups, locks) as one step of Annulla."""
+        def apply(page):
+            marks = _marks(page.parent)
+            change(marks, str(self.page_no))
+            _put_marks(page.parent, marks)
+        self._edit(apply, keep=[o.rect for o in self.selection])
+
+    def group_selected(self) -> None:
+        self.view.flush_nudge()
+        objs = [o for o in self.selection if o.state != "locked"]
+        mine = [g for g in self.groups if any(o is s for o in g for s in objs)]
+        if mine:  # Separa: the groups the selection is made of come apart
+            gone = [_key(o) for g in mine for o in g]
+
+            def change(marks, p):
+                marks.setdefault("groups", {})[p] = [g for g in marks["groups"].get(p, [])
+                                                     if not any(_same_key(k, x) for k in g for x in gone)]
+        elif len(objs) > 1:
+            def change(marks, p):
+                marks.setdefault("groups", {}).setdefault(p, []).append([_key(o) for o in objs])
+        else:
+            return
+        self._set_marks(change)
+
+    def pin_selected(self) -> None:
+        self.view.flush_nudge()
+        objs = [o for o in self.selection if o.state != "locked"]
+        if not objs:
+            return
+        unpin = all(o.data.get("pinned") for o in objs)
+        keys = [_key(o) for o in objs]
+
+        def change(marks, p):
+            now = [k for k in marks.setdefault("pinned", {}).get(p, []) if not any(_same_key(k, x) for x in keys)]
+            marks["pinned"][p] = now if unpin else now + keys
+        self._set_marks(change)
+
+    def replace_image(self) -> None:
+        self.view.flush_nudge()
+        objs = self._targets()
+        if len(objs) != 1 or objs[0].kind != "image":
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Scegli un'immagine", "", "Immagini (*.png *.jpg *.jpeg)")
+        if path:
+            o = objs[0]
+            self._edit(design.replace_image, o, Path(path).read_bytes(), keep=[(*o.rect, "image")], follow=[o])
+
+    def find_replace(self) -> None:
+        self.view.flush_nudge()
+        if not self.doc:
+            return
+        find = ui.ask_text(self, "Trova e sostituisci", "Testo da cercare in tutto il PDF:")
+        if not find:
+            return
+        repl = ui.ask_text(self, "Trova e sostituisci", f'Sostituisci "{find}" con:')
+        if repl is None:
+            return
+        done, failed = self.replace_all(find, repl)
+        if not done and not failed:
+            return ui.info(self, f'"{find}" non c\'è nel testo del PDF.')
+        ui.info(self, f"Righe cambiate: {done}." + (f" Non cambiate: {failed} (PDFlex non riesce a riscriverle)."
+                                                     if failed else ""))
+
+    def replace_all(self, find: str, repl: str) -> tuple[int, int]:
+        """find replaced by repl in every line of text of the PDF (missing letters: in Helvetica), as one step of
+        Annulla. Returns the lines changed and those that could not be."""
+        snapshot, done, failed = self.doc.tobytes(), 0, 0
+        for n in range(self.doc.page_count):
+            targets = [o.rect for o in design.page_objects(self.doc[n])[0]
+                       if o.kind == "text" and o.state == "edit" and find in _words(o)]
+            for r in targets:  # read again each time: the line before changed the page
+                page = self.doc[n]
+                o = next((x for x in design.page_objects(page)[0] if x.kind == "text" and _is(x, [*r, "text"])), None)
+                if o is None:
+                    failed += 1
+                    continue
+                before = self.doc.tobytes()
+                try:
+                    text = _words(o).replace(find, repl)
+                    if text.strip():
+                        design.set_text(page, o, text, fallback=True, anchor=self.anchor)
+                    else:
+                        design.delete(page, [o])
+                    done += 1
+                except design.EditError:
+                    self._restore(before)
+                    failed += 1
+        if done:
+            self._undo = (self._undo + [(self.page_no, snapshot)])[-UNDO_MAX:]
+            self._redo.clear()
+            self.dirty = True
+            for n in range(self.doc.page_count):
+                self.thumbs.item(n).setIcon(self._thumb(self.doc[n]))
+        self._load_page()
+        return done, failed
+
+    # ---- guides while dragging
+    def start_drag(self) -> None:
+        """What a drag can catch: edges and middles of the other objects and of the page (screen units)."""
+        z, page = self.zoom, self.doc[self.page_no].rect
+        others = [o for o in self.objects if not any(o is s for s in self.selection)]
+        self.snap_x = [v * z for o in others for v in (o.rect[0], (o.rect[0] + o.rect[2]) / 2, o.rect[2])]
+        self.snap_y = [v * z for o in others for v in (o.rect[1], (o.rect[1] + o.rect[3]) / 2, o.rect[3])]
+        self.snap_x += [0, page.width * z / 2, page.width * z]
+        self.snap_y += [0, page.height * z / 2, page.height * z]
+
+    def snap_drag(self, item) -> None:
+        """While dragging: the selection's edges and middle catch the nearest ones in reach, a guide shows it."""
+        self.end_drag()
+        moving = [i for i in self.items if i.isSelected() and i.flags() & QGraphicsItem.ItemIsMovable]
+        if not moving or QApplication.keyboardModifiers() & Qt.AltModifier:
+            return
+        d = item.pos() - item.home
+        box = pymupdf.Rect(moving[0].obj.rect)
+        for i in moving[1:]:
+            box |= i.obj.rect
+        box = box * self.zoom + (d.x(), d.y(), d.x(), d.y())
+
+        def catch(mine, targets):
+            best = min(((t - v, t) for v in mine for t in targets), key=lambda c: abs(c[0]), default=(SNAP + 1, 0))
+            return best if abs(best[0]) <= SNAP else (0, None)
+
+        (cx, gx), (cy, gy) = (catch((box.x0, (box.x0 + box.x1) / 2, box.x1), self.snap_x),
+                              catch((box.y0, (box.y0 + box.y1) / 2, box.y1), self.snap_y))
+        for i in moving:
+            i.moveBy(cx, cy)
+        pen = QPen(QColor("#D6409F"), 1, Qt.DashLine)
+        rect = self.scene.sceneRect()
+        if gx is not None:
+            self.guides.append(self.scene.addLine(gx, rect.top(), gx, rect.bottom(), pen))
+        if gy is not None:
+            self.guides.append(self.scene.addLine(rect.left(), gy, rect.right(), gy, pen))
+
+    def end_drag(self) -> None:
+        for g in self.guides:
+            if g.scene() is self.scene:
+                self.scene.removeItem(g)
+        self.guides = []
 
     def _restyle(self, **style):
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        o = self.selection[0]
-        if o.kind == "text" and "fontname" not in style and set(style) & {"color"}:
-            words = "".join(s["text"] for s in o.data["spans"])
-            if design.missing_letters(self.doc[self.page_no], o, words):
-                if ui.message(self, HELVETICA.format(design.missing_letters(self.doc[self.page_no], o, words)),
-                              "ask", ["Usa Helvetica", "Annulla"]) != 0:
+        objs = self._targets()
+        if not objs:
+            return
+        page = self.doc[self.page_no]
+        if "fontname" not in style and set(style) & {"color", "opacity"}:  # text written again, in its own font
+            missing = "".join(dict.fromkeys("".join(design.missing_letters(page, o, _words(o)) for o in objs
+                                                     if o.kind == "text")))
+            if missing:
+                if ui.message(self, HELVETICA.format(missing), "ask", ["Usa Helvetica", "Annulla"]) != 0:
                     return self.refresh()
                 style["fontname"] = ""
-        self._edit(lambda page: design.restyle(page, o, **style), keep=[o.rect])
+        self._edit(lambda page: design.restyle(page, objs, **style), keep=[o.rect for o in objs], follow=objs)
 
     def set_text(self, text: str) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        o = self.selection[0] if len(self.selection) == 1 else None
-        if not o or o.kind != "text" or not text or text == "".join(s["text"] for s in o.data["spans"]):
+        objs = self._targets()
+        o = objs[0] if len(objs) == 1 else None
+        if not o or o.kind != "text" or not text or text == _words(o):
             return
         missing = design.missing_letters(self.doc[self.page_no], o, text)
         if missing and ui.message(self, HELVETICA.format(missing), "ask", ["Usa Helvetica", "Annulla"]) != 0:
             return self.refresh()
         self._edit(lambda page: design.set_text(page, o, text, fallback=bool(missing), anchor=self.anchor),
-                   keep=[o.rect])
+                   keep=[o.rect], follow=[o])
 
     def drawn(self, rect: tuple, straight: bool = False) -> None:
         """A component drawn on the page in the current mode (rect in PDF points, as dragged)."""
@@ -786,104 +1163,168 @@ class DesignTab(QWidget):
 
     # ---- properties
     def _box_edited(self):
-        if len(self.selection) != 1:
+        objs = self._targets()
+        if len(objs) != 1 or len(self.selection) != 1:
             return
         try:
             v = [float(e.text().replace(",", ".")) for e in self.p_box]
         except ValueError:
             return
-        o = self.selection[0]
+        o = objs[0]
         if o.kind == "line":
             if (v[0], v[1], v[2], v[3]) != (*o.data["p1"], *o.data["p2"]):
                 self.resize_object(o, tuple(v))
         else:
             r = (v[0], v[1], v[0] + v[2], v[1] + v[3])
             if any(abs(a - b) > 0.05 for a, b in zip(r, o.rect)):
-                self._edit(design.set_rect, o, r, keep=[r])
+                self._edit(design.set_rect, o, r, keep=[r], follow=[o])
+
+    def _number(self, edit: QLineEdit) -> float | None:
+        try:
+            return float(edit.text().replace(",", "."))
+        except ValueError:
+            return None
 
     def _size_edited(self):
-        try:
-            size = float(self.p_size.text().replace(",", "."))
-        except ValueError:
-            return
-        o = self.selection[0] if len(self.selection) == 1 else None
-        if o and o.kind == "text" and abs(size - o.data["spans"][0]["size"]) > 0.05:
+        size, objs = self._number(self.p_size), self._targets()
+        if size is not None and objs and all(o.kind == "text" for o in objs) and any(
+                abs(size - o.data["spans"][0]["size"]) > 0.05 for o in objs):
             self._restyle(fontsize=size, anchor=self.anchor)
 
     def _font_edited(self):
-        o = self.selection[0] if len(self.selection) == 1 else None
-        if not o or o.kind != "text":
+        objs = self._targets()
+        if not objs or not all(o.kind == "text" for o in objs):
             return
         family = self.p_font.currentText() if self.p_font.currentIndex() >= 0 else None
-        family = family or design.font_style(self.doc[self.page_no], o)[0] or "Helvetica"
+        family = family or design.font_style(self.doc[self.page_no], objs[0])[0] or "Helvetica"
         self._restyle(fontname=design.font_spec(family, self.p_bold.isChecked(), self.p_italic.isChecked()),
                       anchor=self.anchor)
 
     def _width_edited(self):
-        try:
-            width = float(self.p_width.text().replace(",", "."))
-        except ValueError:
-            return
-        o = self.selection[0] if len(self.selection) == 1 else None
-        if o and "drawing" in o.data and abs(width - (o.data["drawing"].get("width") or 0)) > 0.05:
+        width, objs = self._number(self.p_width), self._targets()
+        if width is not None and objs and any(abs(width - (o.data.get("drawing", {}).get("width") or 0)) > 0.05
+                                              for o in objs):
             self._restyle(width=width)
 
+    def _alpha_edited(self):
+        a, objs = self._number(self.p_alpha), self._targets()
+        if a is None or not objs:
+            return
+        a = min(max(a, 0), 100) / 100
+        page = self.doc[self.page_no]
+        if any(abs(a - design.opacity(page, o)) > 0.005 for o in objs):
+            self._restyle(opacity=a)
+
+    def _dash_edited(self):
+        objs = self._targets()
+        if not objs:
+            return
+        w = max(objs[0].data.get("drawing", {}).get("width") or 1, 0.5)
+        i = self.p_dash.currentIndex()
+        self._restyle(dashes=() if i == 0 else (max(3, 3 * w), max(2, 2 * w)) if i == 1 else (w, max(2, 2 * w)))
+
+    def _heads_edited(self):
+        objs = self._targets()
+        if len(objs) == 1 and objs[0].kind == "line":
+            o = objs[0]
+            self._edit(design.set_arrows, o, self.p_head0.isChecked(), self.p_head1.isChecked(),
+                       keep=[(*o.rect, "line")], follow=[o])
+
+    def _round_edited(self):
+        r, objs = self._number(self.p_round), self._targets()
+        if r is not None and len(objs) == 1 and objs[0].kind == "rect" and abs(r - objs[0].data.get("round", 0)) > 0.05:
+            self._edit(design.set_round, objs[0], r, keep=[objs[0].rect], follow=objs)
+
     def _pick(self, key: str):
-        o = self.selection[0]
+        objs = self._targets()
+        if not objs:
+            return
+        o = objs[0]
         now = (pymupdf.sRGB_to_pdf(o.data["spans"][0]["color"]) if o.kind == "text"
-               else o.data["drawing"].get(key)) or (0, 0, 0)
+               else o.data.get("drawing", {}).get(key)) or (0, 0, 0)
         c = QColorDialog.getColor(QColor.fromRgbF(*now), self, "Scegli il colore")
         if c.isValid():
             self._restyle(**{key: (c.redF(), c.greenF(), c.blueF())})
 
+    def _targets(self) -> list[design.Obj]:
+        """What the properties change: every selected object, when none is locked or text drawn as shapes."""
+        objs = [o for o in self.selection if o.state == "edit" and not o.data.get("pinned")]
+        return objs if len(objs) == len(self.selection) else []
+
     def _show_props(self):
-        one = self.selection[0] if len(self.selection) == 1 else None
-        editable = one is not None and one.state == "edit"
-        self.props.setVisible(editable)
-        self.b_del.setVisible(bool(self.selection))
-        self.b_dup.setVisible(bool(self.selection))
+        objs, free = self._targets(), self._free()
+        one = objs[0] if len(objs) == 1 else None
+        self.props.setVisible(bool(objs))
+        for b in (self.b_del, self.b_dup, self.b_copy):
+            b.setVisible(bool(free))
         self.arrange.setVisible(bool(self.selection) and all(o.state != "locked" for o in self.selection))
-        self.layers_box.setVisible(len(self.selection) == 1)
+        self.layers_box.setVisible(len(free) == 1 and len(self.selection) == 1)
+        self.spread.setVisible(len(free) >= 3)
+        grouped = any(o is s for g in self.groups for o in g for s in self.selection)
+        self.b_group.setText("Separa" if grouped else "Raggruppa")
+        self.b_group.setEnabled(grouped or len(self.selection) > 1)
+        self.b_pin.setText("Sblocca" if self.selection and all(o.data.get("pinned") for o in self.selection)
+                           else "Blocca")
         if not self.selection:
             self.kind_label.setText("Seleziona un oggetto sulla pagina, o scegli uno strumento per aggiungerne uno.")
             return
-        if not one:
-            self.kind_label.setText(f"{len(self.selection)} oggetti selezionati: trascinali o usa le frecce.")
+        if any(o.data.get("pinned") for o in self.selection):
+            self.kind_label.setText("Bloccato: sbloccalo per spostarlo o cambiarlo.")
+        elif len(self.selection) > 1:
+            self.kind_label.setText(f"{len(self.selection)} oggetti selezionati: trascinali o usa le frecce."
+                                    + (" Le proprietà qui sotto cambiano tutti insieme." if objs else ""))
+        else:
+            o = self.selection[0]
+            self.kind_label.setText(KINDS[o.kind] + ("" if o.state == "edit" else AS_SHAPES))
+        if not objs:
             return
-        self.kind_label.setText(KINDS[one.kind] + ("" if editable else AS_SHAPES))
-        if not editable:
-            return
-        line = one.kind == "line"
-        r = pymupdf.Rect(one.rect)
-        values = [*one.data["p1"], *one.data["p2"]] if line else [r.x0, r.y0, r.width, r.height]
-        for lab, text in zip(self.p_labels, ("X1", "Y1", "X2", "Y2") if line else ("X", "Y", "Larg.", "Alt.")):
-            lab.setText(text)
-        for e, v in zip(self.p_box, values):
-            e.setText(f"{v:.1f}")
-        text = one.kind == "text"
-        drawing = one.data.get("drawing", {})
-        self.form.setRowVisible(self.p_text, text)
-        self.form.setRowVisible(self.p_size, text)
-        self.form.setRowVisible(self.p_font, text)
-        self.form.setRowVisible(self.p_looks, text)
-        self.form.setRowVisible(self.p_anchor, text)
-        self.form.setRowVisible(self.p_width, "drawing" in one.data and drawing.get("color") is not None)
-        self.form.setRowVisible(self.p_color, text or "drawing" in one.data)
-        self.form.setRowVisible(self.p_fill, one.kind in ("rect", "shape") and "drawing" in one.data)
-        for e in (self.p_box[2], self.p_box[3]):  # text grows from its size, not from its box
-            e.setEnabled(not text)
-        if text:
-            self.p_text.setText("".join(s["text"] for s in one.data["spans"]).replace("\xa0", " "))
-            self.p_size.setText(f"{one.data['spans'][0]['size']:.1f}")
-            family, bold, italic = design.font_style(self.doc[self.page_no], one)
+        first, page = objs[0], self.doc[self.page_no]
+        texts = all(o.kind == "text" for o in objs)
+        drawings = all("drawing" in o.data for o in objs)
+        stroked = drawings and all(o.data["drawing"].get("color") is not None for o in objs)
+        for row in self.p_rows:
+            self.form.setRowVisible(row, one is not None)
+        self.form.setRowVisible(self.p_text, one is not None and texts)
+        for w in (self.p_size, self.p_font, self.p_looks, self.p_anchor):
+            self.form.setRowVisible(w, texts)
+        self.form.setRowVisible(self.p_width, stroked)
+        self.form.setRowVisible(self.p_dash, stroked)
+        self.form.setRowVisible(self.p_color, texts or drawings)
+        self.form.setRowVisible(self.p_fill, drawings and all(o.kind in ("rect", "shape") for o in objs))
+        self.form.setRowVisible(self.p_heads, one is not None and one.kind == "line" and drawings)
+        self.form.setRowVisible(self.p_round, one is not None and one.kind == "rect" and drawings)
+        self.form.setRowVisible(self.p_image, one is not None and one.kind == "image")
+        self.p_alpha.setText(f"{design.opacity(page, first) * 100:.0f}")
+        if one is not None:
+            line = one.kind == "line"
+            r = pymupdf.Rect(one.rect)
+            values = [*one.data["p1"], *one.data["p2"]] if line else [r.x0, r.y0, r.width, r.height]
+            for lab, text in zip(self.p_labels, ("X1", "Y1", "X2", "Y2") if line else ("X", "Y", "Larg.", "Alt.")):
+                lab.setText(text)
+            for e, v in zip(self.p_box, values):
+                e.setText(f"{v:.1f}")
+            for e in (self.p_box[2], self.p_box[3]):  # text grows from its size, not from its box
+                e.setEnabled(one.kind != "text")
+            heads = one.data.get("arrows", (False, False))
+            self.p_head0.setChecked(heads[0])
+            self.p_head1.setChecked(heads[1])
+            self.p_round.setText(f"{one.data.get('round', 0):.1f}")
+        if texts:
+            if one is not None:
+                self.p_text.setText(_words(one).replace("\xa0", " "))
+            self.p_size.setText(f"{first.data['spans'][0]['size']:.1f}")
+            family, bold, italic = design.font_style(page, first)
             self.p_font.setCurrentIndex(self.p_font.findText(family) if family else -1)
             self.p_bold.setChecked(bold)
             self.p_italic.setChecked(italic)
-            self._swatch(self.p_color, _hex(pymupdf.sRGB_to_pdf(one.data["spans"][0]["color"])))
-        else:
+            self._swatch(self.p_color, _hex(pymupdf.sRGB_to_pdf(first.data["spans"][0]["color"])))
+        elif drawings:
+            drawing = first.data["drawing"]
             self.p_width.setText(f"{drawing.get('width') or 0:.1f}")
             self._swatch(self.p_color, _hex(drawing.get("color")))
             self._swatch(self.p_fill, _hex(drawing.get("fill")))
+            dashes, w = design.dash_style(first), drawing.get("width") or 1
+            self.p_dash.setCurrentIndex(0 if not dashes else 2 if dashes[0] <= 1.5 * w else 1)
 
     @staticmethod
     def _swatch(b, hex_color: str):
@@ -891,8 +1332,20 @@ class DesignTab(QWidget):
         b.setIcon(ui.dot(hex_color) if hex_color else QIcon())
 
     # ---- drawing the page
+    def _whole_groups(self, objs: list) -> list:
+        """objs with the rest of their groups, also selected on the page."""
+        more = [o for g in self.groups if any(o is s for o in g for s in objs) for o in g
+                if not any(o is s for s in objs)]
+        if more:
+            self.scene.blockSignals(True)
+            for i in self.items:
+                if any(i.obj is o for o in more):
+                    i.setSelected(True)
+            self.scene.blockSignals(False)
+        return list(objs) + more
+
     def _selection_changed(self):
-        self.selection = [i.obj for i in self.items if i.isSelected()]
+        self.selection = self._whole_groups([i.obj for i in self.items if i.isSelected()])
         self._mark_layers()
         self._show_props()
 
@@ -928,7 +1381,7 @@ class DesignTab(QWidget):
         for item in self.items:
             item.setSelected(any(item.obj is o for o in picked))
         self.scene.blockSignals(False)
-        self.selection = picked
+        self.selection = self._whole_groups(picked)
         shown = next((i for i in self.items if i.isSelected()), None)
         if shown:
             self.view.ensureVisible(shown, 60, 60)
@@ -944,6 +1397,8 @@ class DesignTab(QWidget):
         for w in (self.b_save, self.b_forms, self.b_prev, self.b_next, self.b_zin, self.b_zout):
             w.setEnabled(has)
         self.b_undo.setEnabled(bool(self._undo))
+        self.b_paste.setEnabled(has and self.clip is not None)
+        self.b_find.setEnabled(has)
         self.b_redo.setEnabled(bool(self._redo))
         if has:
             self.file_label.setText(Path(self.path).name + ("  (modificato)" if self.dirty else ""))

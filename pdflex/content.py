@@ -108,7 +108,8 @@ def paths(page, drawings: list[dict] | None = None) -> tuple[bytes, dict[int, Pa
     out, j = {}, 0
     for d in drawings:
         for k in (j, j + 1):  # j + 1: a path of the stream that MuPDF does not draw (nothing to paint)
-            if k < len(found) and _PAINT[found[k].paint] == d["type"] and _same(found[k].rect, d["rect"]):
+            if k < len(found) and _PAINT[found[k].paint] == d["type"] and (
+                    _same(found[k].rect, d["rect"]) or _same(found[k].rect, _drawn(d))):  # MuPDF's rect can be short
                 out[d["seqno"]] = found[k]
                 j = k + 1
                 break
@@ -156,8 +157,13 @@ def _rewrite(p: Path, m: pymupdf.Matrix | None, style: dict) -> bytes:
     if "fill" in style:
         look.append(_rgb(style["fill"]) + b" rg")
         paint = {b"S": b"B", b"s": b"b"}.get(paint, paint)
+    scale = abs(p.ctm.a * p.ctm.d - p.ctm.b * p.ctm.c) ** 0.5 or 1  # page points -> its own units
     if "width" in style:
-        look.append(_num(style["width"] / (abs(p.ctm.a * p.ctm.d - p.ctm.b * p.ctm.c) ** 0.5 or 1)) + b" w")
+        look.append(_num(style["width"] / scale) + b" w")
+    if "dashes" in style:
+        look.append(b"[" + b" ".join(_num(v / scale) for v in style["dashes"]) + b"] 0 d")
+    if "gs" in style:  # a transparency the page's resources already hold
+        look.append(b"/" + style["gs"].encode() + b" gs")
     body = parts + ([p.clip] if p.clip else []) + [paint]
     return b"\n".join(kept + ([b"q", *look, *body, b"Q"] if look else body))
 
@@ -200,7 +206,45 @@ def edit(page, edits: dict[int, tuple], before: list[dict] | None = None) -> boo
             if k["seqno"] in edits:
                 p, (m, _) = own[k["seqno"]], edits[k["seqno"]]
                 pts = [pt * p.ctm * m for op, nums in p.ops for pt in _points(op, nums)]  # turned: not its box
-                ok = ok and _same(_bbox([(b"l", [v for pt in pts for v in pt])]), d["rect"])
+                box = _bbox([(b"l", [v for pt in pts for v in pt])])
+                ok = ok and (_same(box, d["rect"]) or _same(box, _drawn(d)))
+    if not ok:
+        _write(page, data)
+    return ok
+
+
+def _drawn(d: dict) -> pymupdf.Rect:
+    """The box of the points a path of get_cdrawings goes through."""
+    pts = []
+    for it in d["items"]:
+        if it[0] == "re":
+            pts += it[1]
+        elif it[0] == "qu":
+            pts += [v for t in it[1] for v in t]
+        else:
+            pts += [v for t in it[1:] for v in t]
+    return _bbox([(b"l", pts)])
+
+
+def reshape(page, shapes: dict[int, list], before: list[dict] | None = None) -> bool:
+    """Draw paths again with other points, where they are and with their own look: shapes = {seqno: [(operator,
+    [points on the page])]}, operators "m", "l", "c", "h". False, with the page as it was, as for edit."""
+    before = page.get_cdrawings() if before is None else before
+    data, own = paths(page, before)
+    if not shapes or any(s not in own or own[s].clip for s in shapes):
+        return False
+    pieces, pos, want = [], 0, {}
+    for s in sorted(shapes, key=lambda s: own[s].start):
+        p, back = own[s], ~own[s].ctm
+        body = [b" ".join(_num(v) for t in pts for v in pymupdf.Point(t) * back) + (b" " if pts else b"") + op.encode()
+                for op, pts in shapes[s]]
+        pieces += [data[pos:p.start], b"\n".join(([p.look] if p.look else []) + body + [p.paint])]
+        pos = p.end
+        want[s] = _bbox([(b"l", [v for _, pts in shapes[s] for t in pts for v in t])])
+    _write(page, b"".join(pieces) + data[pos:])
+    after = page.get_cdrawings()
+    ok = len(after) == len(before) and all(  # its points, not its "rect": MuPDF's misses a stroke of a head
+        _same(want[b["seqno"]], _drawn(a)) if b["seqno"] in want else _key(a) == _key(b) for a, b in zip(after, before))
     if not ok:
         _write(page, data)
     return ok
@@ -309,3 +353,28 @@ def splice(page, data: bytes, pos: int, ctm: pymupdf.Matrix, xref: int) -> None:
     plain = b"[] 0 d 0 J 0 j 10 M 0 Tc 0 Tw 100 Tz 0 TL 0 Ts 0 Tr"
     _write(page, data[:pos] + b"\nq\n" + b" ".join(map(_num, fix)) + b" cm " + plain + b"\n" + drawn + b"\nQ\n"
            + data[pos:])
+
+
+def image_draws(page) -> list[tuple[str, pymupdf.Matrix]]:
+    """The XObjects the page's own stream draws ("name Do"), each with the matrix taking the unit square to the
+    page as get_image_info gives it ("transform"). For pictures MuPDF leaves out of that list: under 50 %
+    opacity it does not report them."""
+    data = b"\n".join(page.parent.xref_stream(x) or b"" for x in page.get_contents())
+    ctm, stack, out = page.transformation_matrix, [], []
+    flip = pymupdf.Matrix(1, 0, 0, -1, 0, 1)  # image rows go upward in PDF space
+    try:
+        for m in _OP.finditer(data):
+            tok = m.group(2)
+            if tok == b"q":
+                stack.append(ctm)
+            elif tok == b"Q":
+                ctm = stack.pop() if stack else ctm
+            elif tok == b"cm":
+                ctm = pymupdf.Matrix(*[float(a) for a in m.group(1).split()[-6:]]) * ctm
+            elif tok == b"Do" and m.group(1).split():
+                out.append((m.group(1).split()[-1].lstrip(b"/").decode("latin-1"), flip * ctm))
+            elif tok in (b"BI", b"ID"):
+                break  # an inline image: its data could pass for operators
+    except (ValueError, TypeError, IndexError):
+        pass
+    return out

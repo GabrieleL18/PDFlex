@@ -28,6 +28,23 @@ def _image_info(page) -> list[dict]:
     return [i for i in page.get_image_info(xrefs=True) if not pymupdf.Rect(i["bbox"]).is_empty]
 
 
+def _images(page) -> list[dict]:
+    """The pictures drawn on the page, as get_image_info gives them (bbox, xref, transform): with those it leaves
+    out, drawn under 50 % opacity, found in the page's own stream."""
+    info = _image_info(page)
+    shown = [pymupdf.Rect(b) for t, b in page.get_bboxlog() if "image" in t]
+    missing = [r for r in shown if not any(content._same(r, i["bbox"]) for i in info)]
+    if missing:
+        names = {i[7]: i[0] for i in page.get_images(full=True)}
+        for name, t in content.image_draws(page):
+            r = pymupdf.Rect(0, 0, 1, 1) * t
+            hit = next((k for k, x in enumerate(missing) if content._same(r, x)), None)
+            if names.get(name) and hit is not None:
+                missing.pop(hit)
+                info.append({"bbox": tuple(r), "xref": names[name], "transform": tuple(t)})
+    return info
+
+
 class EditError(Exception):
     """A change that could not be made whole: the caller puts the page back as it was."""
 
@@ -76,11 +93,48 @@ def _full(d: dict) -> dict:
             "items": [conv.get(i[0], tuple)(i) for i in d["items"]]}
 
 
+def _near(a, b) -> bool:
+    return abs(a[0] - b[0]) < 0.05 and abs(a[1] - b[1]) < 0.05
+
+
+def _arrows(items) -> tuple[bool, bool] | None:
+    """A line with arrow heads, as set_arrows draws it: two short strokes meeting at an end, for each head."""
+    if len(items) not in (3, 5) or any(i[0] != "l" for i in items):
+        return None
+    a, b, ends = items[0][1], items[0][2], [False, False]
+    for k in range(1, len(items), 2):
+        tip = items[k][2]
+        if not _near(tip, items[k + 1][1]) or not (_near(tip, a) or _near(tip, b)):
+            return None
+        ends[0 if _near(tip, a) else 1] = True
+    return tuple(ends)
+
+
+def _round_box(items) -> tuple[pymupdf.Rect, float] | None:
+    """A box with round corners, as set_round draws it: four straight sides and four quarter curves."""
+    if len(items) != 8 or "".join(i[0][0] for i in items) not in ("lclclclc", "clclclcl"):
+        return None
+    pts = [p for i in items for p in i[1:]]
+    if not all(abs(i[1].x - i[2].x) < 0.05 or abs(i[1].y - i[2].y) < 0.05 for i in items if i[0] == "l"):
+        return None
+    c = next(i for i in items if i[0] == "c")
+    return pymupdf.Rect(min(p.x for p in pts), min(p.y for p in pts), max(p.x for p in pts), max(p.y for p in pts)), \
+        abs(c[4].x - c[1].x)
+
+
 def _shape(d) -> Obj:
     items, r = d["items"], pymupdf.Rect(d["rect"])
     data = {"drawing": d}
     if len(items) == 1 and items[0][0] == "l":
         return Obj("line", tuple(r), data={**data, "p1": tuple(items[0][1]), "p2": tuple(items[0][2])})
+    heads = _arrows(items)
+    if heads:  # its box from its points: MuPDF's leaves out part of a head
+        pts = [p for i in items for p in i[1:]]
+        r = pymupdf.Rect(min(p.x for p in pts), min(p.y for p in pts), max(p.x for p in pts), max(p.y for p in pts))
+        return Obj("line", tuple(r), data={**data, "p1": tuple(items[0][1]), "p2": tuple(items[0][2]), "arrows": heads})
+    rounded = _round_box(items)
+    if rounded:
+        return Obj("rect", tuple(rounded[0]), data={**data, "round": rounded[1]})
     box = _box(items[0]) if len(items) == 1 else _closed_box(items)
     if box is not None:
         if d.get("fill") is not None and min(box.width, box.height) < THIN:  # a line drawn as a thin box
@@ -193,7 +247,7 @@ def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
         else:
             objs.append(_shape(_full(d)))
     objs += _group_glyphs(glyphs)
-    for info in _image_info(page):
+    for info in _images(page):
         o = Obj("image", tuple(pymupdf.Rect(info["bbox"])), data={"xref": info["xref"], "transform": info["transform"]})
         if not info["xref"]:
             o.state, o.reason = "locked", "Immagine incorporata nel testo della pagina: resta com'è"
@@ -351,16 +405,40 @@ def _turn(m: pymupdf.Matrix) -> float:
     return math.degrees(math.atan2(m.b, m.a))
 
 
-def _put_image(page, xref: int, t: pymupdf.Matrix, overlay: bool = True) -> None:
-    """The picture xref drawn through t (unit square -> page, as get_image_info's "transform"): turned or flipped
-    as t says, not only stretched over a box as insert_image draws it."""
-    page.insert_image(pymupdf.Rect(0, 0, 1, 1) * t, xref=xref, keep_proportion=False, overlay=overlay)
+def _put_image(page, t: pymupdf.Matrix, overlay: bool = True, opacity: float = 1, **source) -> None:
+    """A picture drawn through t (unit square -> page, as get_image_info's "transform"): turned or flipped as t
+    says, not only stretched over a box as insert_image draws it. source: xref=, stream= or pixmap=."""
+    # the transparency first: set after the picture, it would take the picture's entry out of the resources
+    gs = b"/" + page._set_opacity(CA=opacity, ca=opacity).encode() + b" gs " if opacity < 1 else b""
+    page.insert_image(pymupdf.Rect(0, 0, 1, 1) * t, keep_proportion=False, overlay=overlay, **source)
     c = page.get_contents()[-1 if overlay else 0]
     cm = pymupdf.Matrix(1, 0, 0, -1, 0, 1) * t * ~page.transformation_matrix  # PDF space, image rows upward
     data = page.parent.xref_stream(c)
-    new = re.sub(rb"[-+.\d\s]+cm(\s*/[^\s/]+\s+Do)", lambda g: b"\n" + b" ".join(content._num(v) for v in cm)
-                 + b" cm" + g.group(1), data, count=1)
+    new = re.sub(rb"[-+.\d\s]+cm(\s*)(/[^\s/]+\s+Do)", lambda g: b"\n" + b" ".join(content._num(v) for v in cm)
+                 + b" cm" + g.group(1) + gs + g.group(2), data, count=1)
     page.parent.update_stream(c, new)
+
+
+def opacity(page, obj: Obj) -> float:
+    """How opaque obj is drawn, 0 to 1."""
+    if obj.kind == "text":
+        return obj.data["spans"][0].get("alpha", 255) / 255
+    if obj.kind == "image":  # the transparency set just before it is drawn, as _put_image writes it
+        name = next((i[7] for i in page.get_images(full=True) if i[0] == obj.data["xref"]), None)
+        data = b"\n".join(page.parent.xref_stream(x) or b"" for x in page.get_contents())
+        g = re.search(rb"/([^\s/]+)\s+gs\s+/" + re.escape(name.encode()) + rb"\s+Do", data) if name else None
+        if g:
+            typ, val = page.parent.xref_get_key(page.xref, f"Resources/ExtGState/{g.group(1).decode()}/ca")
+            return float(val) if typ == "float" or typ == "int" else 1.0
+        return 1.0
+    d = obj.data.get("drawing") or {}
+    return d.get("fill_opacity") if d.get("fill_opacity") is not None else d.get("stroke_opacity") or 1.0
+
+
+def dash_style(obj: Obj) -> tuple:
+    """A drawing's dashes, as on and off lengths in points (() solid)."""
+    d = (obj.data.get("drawing") or {}).get("dashes") or ""
+    return tuple(float(v) for v in d[d.find("[") + 1:d.find("]")].split()) if "[" in d else ()
 
 
 def _draw_items(shape, items, m: pymupdf.Matrix) -> None:
@@ -369,9 +447,9 @@ def _draw_items(shape, items, m: pymupdf.Matrix) -> None:
         if it[0] == "l":
             shape.draw_line(P(it[1]) * m, P(it[2]) * m)
         elif it[0] == "re" and _straight(m):
-            shape.draw_rect(pymupdf.Rect(it[1]) * m)
+            shape.draw_rect(pymupdf.Rect(it[1]).normalize() * m)  # some PDFs draw boxes with a negative width
         elif it[0] == "re":  # turned: its four corners
-            shape.draw_quad(pymupdf.Rect(it[1]).quad * m)
+            shape.draw_quad(pymupdf.Rect(it[1]).normalize().quad * m)
         elif it[0] == "qu":
             shape.draw_quad(pymupdf.Quad(it[1]) * m)
         elif it[0] == "c":
@@ -382,12 +460,13 @@ def _draw_items(shape, items, m: pymupdf.Matrix) -> None:
 
 def _finish(shape, d: dict, style: dict) -> None:
     cap = d.get("lineCap") or 0
+    dashes = ("[" + " ".join(f"{v:g}" for v in style["dashes"]) + "] 0") if "dashes" in style else d.get("dashes")
     shape.finish(color=style.get("color", d.get("color")), fill=style.get("fill", d.get("fill")),
-                 width=style.get("width", d.get("width")) or 0, dashes=d.get("dashes") or None,
+                 width=style.get("width", d.get("width")) or 0, dashes=dashes or None,
                  lineCap=max(cap) if isinstance(cap, (tuple, list)) else cap, lineJoin=int(d.get("lineJoin") or 0),
                  closePath=bool(d.get("closePath")), even_odd=bool(d.get("even_odd")),
-                 fill_opacity=1 if d.get("fill_opacity") is None else d["fill_opacity"],
-                 stroke_opacity=1 if d.get("stroke_opacity") is None else d["stroke_opacity"])
+                 fill_opacity=style.get("opacity", 1 if d.get("fill_opacity") is None else d["fill_opacity"]),
+                 stroke_opacity=style.get("opacity", 1 if d.get("stroke_opacity") is None else d["stroke_opacity"]))
 
 
 def _own_font(page, o: Obj) -> pymupdf.Font | None:
@@ -417,7 +496,7 @@ def _text_font(page, o: Obj, span: dict, override: str | None, text: str) -> pym
     return pymupdf.Font({"helv": "hebo", "tiro": "tibo", "cour": "cobo"}[base] if "bold" in name else base)
 
 
-def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color, way=(1, 0)) -> None:
+def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color, way=(1, 0), alpha=1.0) -> None:
     """way: the direction it reads in, on the page ((1, 0): left to right)."""
     # TextWriter, not insert_text: insert_text writes the built-in fonts in Latin-1 and loses "€"
     tw = pymupdf.TextWriter(page.rect)
@@ -426,12 +505,13 @@ def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color, 
     dx, dy = way  # TextWriter turns in PDF space, upward: the other way round
     morph = None if abs(dy) < 1e-6 and dx > 0 else (pymupdf.Point(origin), pymupdf.Matrix(dx, -dy, dy, dx, 0, 0))
     if not getattr(font, "from_file", False):
-        tw.write_text(page, color=color, morph=morph)
+        tw.write_text(page, color=color, morph=morph, opacity=alpha if alpha < 1 else -1)
         return
     # a font file goes in whole (Arial: 1 MB): written on a page of its own, cut down to the letters it uses,
     # then shown on this one. Not subset_fonts on the PDF itself: it would cut the fonts of its fields too
     tmp = pymupdf.open()
-    tw.write_text(tmp.new_page(width=page.rect.width, height=page.rect.height), color=color, morph=morph)
+    tw.write_text(tmp.new_page(width=page.rect.width, height=page.rect.height), color=color, morph=morph,
+                  opacity=alpha if alpha < 1 else -1)
     tmp.subset_fonts()
     page.show_pdf_page(page.rect, tmp, 0)
 
@@ -459,7 +539,8 @@ def _text_args(page, o: Obj, m: pymupdf.Matrix, style: dict, text: str | None) -
         last = pymupdf.Rect(o.data["spans"][-1]["bbox"]) * m
         old = max((c - origin).x * way.x + (c - origin).y * way.y for c in last.quad)
         origin += way * ((old - font.text_length(words, fontsize=size)) * k)
-    return origin, words, font, size, style.get("color") or pymupdf.sRGB_to_pdf(s["color"]), tuple(way)
+    return (origin, words, font, size, style.get("color") or pymupdf.sRGB_to_pdf(s["color"]), tuple(way),
+            style.get("opacity", s.get("alpha", 255) / 255))
 
 
 def _clip(o: Obj) -> pymupdf.Rect:
@@ -509,7 +590,13 @@ def _edit_in_place(page, shapes: list[tuple], before: list[dict]) -> bool:
         for d in _drawings(o):
             if m is not None and not _inside(_inked(d) * m, clips.get(d["seqno"], [])):
                 return False
-    return content.edit(page, {d["seqno"]: (m, style) for o, m, style in shapes for d in _drawings(o)}, before)
+    styles = []
+    for _, _, style in shapes:
+        if "opacity" in style:
+            style = {**style, "gs": page._set_opacity(CA=style["opacity"], ca=style["opacity"])}
+        styles.append(style)
+    return content.edit(page, {d["seqno"]: (m, style) for (o, m, _), style in zip(shapes, styles)
+                               for d in _drawings(o)}, before)
 
 
 def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None) -> None:
@@ -539,11 +626,12 @@ def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None
         m = _shape_margin(page, areas["shape"], targets, before)
         areas["shape"] = [a + (-m, -m, m, m) for a in areas["shape"]]
     copied = [o for o, (m, style, text) in zip(objs, new)
-              if o.kind == "text" and m is not None and text is None and not {"color", "fontname"} & style.keys()]
+              if o.kind == "text" and m is not None and text is None and not {"color", "fontname", "opacity"} & style.keys()]
     src, copied = _text_source(page, copied) if copied else (None, [])  # the others are written again
     rewritten = {id(o): _text_args(page, o, m, style, text) for o, (m, style, text) in zip(objs, new)
                  if o.kind == "text" and m is not None and not any(o is c for c in copied)}
-    images_before = len(_image_info(page))
+    images_before = len(_images(page))
+    alpha = {id(o): opacity(page, o) for o in objs if o.kind == "image"}  # read before it is taken off
     words_kept = [w[0] for w in _words(page) if not any(a.intersects(w[1]) for a in areas["text"])]
     collateral = []
     if areas["shape"]:  # what went with the shapes is drawn back as it was: seen, not guessed
@@ -586,7 +674,8 @@ def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None
         elif id(o) in rewritten:
             _write(page, *rewritten[id(o)])
         elif m is not None and o.kind == "image":
-            _put_image(page, o.data["xref"], pymupdf.Matrix(o.data["transform"]) * m)
+            _put_image(page, pymupdf.Matrix(o.data["transform"]) * m, opacity=style.get("opacity", alpha[id(o)]),
+                       xref=o.data["xref"])
     if layer:
         try:
             content.splice(page, data, pos, ctm, mark)
@@ -596,7 +685,7 @@ def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None
     if len(page.get_cdrawings()) != len(before) - gone:
         raise EditError("Con questa modifica sarebbe cambiata anche un'altra forma della pagina.")
     gone = sum(1 for o, (m, _, _) in zip(objs, new) if o.kind == "image" and m is None)
-    if len(_image_info(page)) != images_before - gone:
+    if len(_images(page)) != images_before - gone:
         raise EditError("Con questa modifica sarebbe sparita un'altra immagine che tocca questa.")
     after = [w[0] for w in _words(page)]
     for word in words_kept:
@@ -633,6 +722,10 @@ def move(page, objs: list[Obj], dx: float, dy: float) -> None:
 
 def set_rect(page, obj: Obj, rect: tuple) -> None:
     """New place and size; a line takes its two ends instead: rect = (x1, y1, x2, y2)."""
+    if obj.kind == "line" and "arrows" in obj.data:
+        return _reshape(page, obj, _arrow_items(rect[:2], rect[2:], obj.data["arrows"], obj.data["drawing"].get("width")))
+    if "round" in obj.data:
+        return _reshape(page, obj, _round_items(pymupdf.Rect(rect), obj.data["round"]))
     if obj.kind == "line":
         m = _line_matrix(obj, rect[:2], rect[2:])
     else:
@@ -705,20 +798,28 @@ def delete(page, objs: list[Obj]) -> None:
     _replace(page, objs, [(None, {}, None) for _ in objs])
 
 
-def duplicate(page, objs: list[Obj], dx: float, dy: float) -> None:
+def paste(page, src_page, objs: list[Obj], dx: float, dy: float) -> None:
+    """Objects of src_page (another page, of this PDF or another) drawn on page, moved by dx, dy, on top."""
+    duplicate(page, objs, dx, dy, src_page)
+
+
+def duplicate(page, objs: list[Obj], dx: float, dy: float, src_page=None) -> None:
     """A copy of each object, moved by dx, dy: a shape's copy goes just above it (see content.copy), else on top;
-    text is copied with its own glyphs when it can be, written again otherwise. Nothing on the page is taken off."""
+    text is copied with its own glyphs when it can be, written again otherwise. Nothing on the page is taken off.
+    src_page: the objects are of that page instead (see paste)."""
     for o in objs:
         if o.state == "locked":
             raise EditError(o.reason or "Questo oggetto non si può modificare.")
+    src_page = src_page or page
     m = pymupdf.Matrix(1, 0, 0, 1, dx, dy)
-    before, images_before, words_before = page.get_cdrawings(), len(_image_info(page)), _words(page)
+    before, images_before, words_before = page.get_cdrawings(), len(_images(page)), _words(page)
     paths = [d for o in objs if o.kind not in ("text", "image") for d in _drawings(o)]
     texts = [o for o in objs if o.kind == "text"]
-    src, clean = _text_source(page, texts) if texts else (None, [])
-    written = {id(o): _text_args(page, o, m, {}, None) for o in texts if not any(o is c for c in clean)}
-    clips = _clip_map(page.get_cdrawings(extended=True)) if paths else {}
-    if paths and not (all(_inside(_inked(d) * m, clips.get(d["seqno"], [])) for d in paths)
+    src, clean = _text_source(src_page, texts) if texts else (None, [])
+    written = {id(o): _text_args(src_page, o, m, {}, None) for o in texts if not any(o is c for c in clean)}
+    alpha = {id(o): opacity(src_page, o) for o in objs if o.kind == "image"}
+    clips = _clip_map(page.get_cdrawings(extended=True)) if paths and src_page is page else {}
+    if paths and not (src_page is page and all(_inside(_inked(d) * m, clips.get(d["seqno"], [])) for d in paths)
                       and content.copy(page, [d["seqno"] for d in paths], m, before)):
         shape = page.new_shape()
         for d in sorted(paths, key=lambda d: d["seqno"]):
@@ -730,11 +831,17 @@ def duplicate(page, objs: list[Obj], dx: float, dy: float) -> None:
             _write(page, *written[id(o)])
         elif o.kind == "text":
             page.show_pdf_page(_clip(o) * m, src, 0, clip=_clip(o), keep_proportion=False)
-        elif o.kind == "image":
-            _put_image(page, o.data["xref"], pymupdf.Matrix(o.data["transform"]) * m)
+        elif o.kind == "image" and src_page is page:
+            _put_image(page, pymupdf.Matrix(o.data["transform"]) * m, opacity=alpha[id(o)], xref=o.data["xref"])
+        elif o.kind == "image":  # from another PDF: the picture itself, with its transparency mask
+            sdoc, info = src_page.parent, src_page.parent.extract_image(o.data["xref"])
+            pix = pymupdf.Pixmap(sdoc, o.data["xref"])
+            if info.get("smask"):
+                pix = pymupdf.Pixmap(pix, pymupdf.Pixmap(sdoc, info["smask"]))
+            _put_image(page, pymupdf.Matrix(o.data["transform"]) * m, opacity=alpha[id(o)], pixmap=pix)
     if len(page.get_cdrawings()) != len(before) + len(paths):
         raise EditError("PDFlex non è riuscito a copiare queste forme così come sono.")
-    if len(_image_info(page)) != images_before + sum(o.kind == "image" for o in objs):
+    if len(_images(page)) != images_before + sum(o.kind == "image" for o in objs):
         raise EditError("PDFlex non è riuscito a copiare questa immagine.")
     after = [w for w, _ in _words(page)]
     for w, _ in words_before:
@@ -743,20 +850,115 @@ def duplicate(page, objs: list[Obj], dx: float, dy: float) -> None:
         after.remove(w)
 
 
-def restyle(page, obj: Obj, *, color=None, fill=None, width=None, fontsize=None, fontname=None,
-            anchor: float = 0) -> None:
-    """anchor, for text: what stays in place when it gets wider or narrower (0 left edge, 0.5 middle, 1 right)."""
-    style = {k: v for k, v in (("color", color), ("fill", fill), ("width", width), ("fontsize", fontsize),
-                               ("fontname", fontname)) if v is not None}
-    m = pymupdf.Identity
-    if obj.kind == "text" and "fontsize" in style:
-        k = style.pop("fontsize") / obj.data["spans"][0]["size"]
-        r = pymupdf.Rect(obj.rect)
-        x = r.x0 + r.width * anchor
-        m = pymupdf.Matrix(k, 0, 0, k, x - x * k, r.y0 - r.y0 * k)
-    if obj.kind == "text" and anchor:
-        style["anchor"] = anchor
-    _replace(page, [obj], [(m, style, None)])
+def restyle(page, objs: Obj | list[Obj], *, color=None, fill=None, width=None, fontsize=None, fontname=None,
+            opacity=None, dashes=None, anchor: float = 0) -> None:
+    """A new look for one object or several at once (each takes what fits it: a text no fill, a box no font).
+    anchor, for text: what stays in place when it gets wider or narrower (0 left edge, 0.5 middle, 1 right).
+    opacity 0 to 1; dashes: on and off lengths in points, () solid."""
+    objs = [objs] if isinstance(objs, Obj) else objs
+    given = {k: v for k, v in (("color", color), ("fill", fill), ("width", width), ("fontsize", fontsize),
+                               ("fontname", fontname), ("opacity", opacity), ("dashes", dashes)) if v is not None}
+    new = []
+    for obj in objs:
+        text = obj.kind == "text"
+        style = {k: v for k, v in given.items()
+                 if k in (("color", "fontsize", "fontname", "opacity") if text else
+                          ("opacity",) if obj.kind == "image" else ("color", "fill", "width", "opacity", "dashes"))}
+        m = pymupdf.Identity
+        if text and "fontsize" in style:
+            k = style.pop("fontsize") / obj.data["spans"][0]["size"]
+            r = pymupdf.Rect(obj.rect)
+            x = r.x0 + r.width * anchor
+            m = pymupdf.Matrix(k, 0, 0, k, x - x * k, r.y0 - r.y0 * k)
+        if text and anchor:
+            style["anchor"] = anchor
+        new.append((m, style, None))
+    _replace(page, objs, new)
+
+
+def _arrow_items(a, b, heads: tuple[bool, bool], width: float) -> list:
+    """A line from a to b with an arrow head at the start and / or the end: two short strokes meeting at the tip."""
+    a, b = pymupdf.Point(a), pymupdf.Point(b)
+    ops, size = [("m", [a]), ("l", [b])], max(6.0, 4 * (width or 1))
+    for tip, other, on in ((a, b, heads[0]), (b, a, heads[1])):
+        if on and abs(tip - other) > 0.01:
+            u = (tip - other) / abs(tip - other)
+            back, side = tip - u * size, pymupdf.Point(-u.y, u.x) * size * 0.45
+            ops += [("m", [back + side]), ("l", [tip]), ("l", [back - side])]
+    return ops
+
+
+def _round_items(r: pymupdf.Rect, k: float) -> list:
+    """A box with corners rounded by k (0: square), as four sides and four quarter curves."""
+    P, x0, y0, x1, y1 = pymupdf.Point, r.x0, r.y0, r.x1, r.y1
+    k = max(0.0, min(k, r.width / 2, r.height / 2))
+    if k < 0.05:
+        return [("m", [P(x0, y0)]), ("l", [P(x1, y0)]), ("l", [P(x1, y1)]), ("l", [P(x0, y1)]), ("h", [])]
+    c = k * 0.5523  # the handles of a quarter circle
+    return [("m", [P(x0 + k, y0)]), ("l", [P(x1 - k, y0)]), ("c", [P(x1 - k + c, y0), P(x1, y0 + k - c), P(x1, y0 + k)]),
+            ("l", [P(x1, y1 - k)]), ("c", [P(x1, y1 - k + c), P(x1 - k + c, y1), P(x1 - k, y1)]),
+            ("l", [P(x0 + k, y1)]), ("c", [P(x0 + k - c, y1), P(x0, y1 - k + c), P(x0, y1 - k)]),
+            ("l", [P(x0, y0 + k)]), ("c", [P(x0, y0 + k - c), P(x0 + k - c, y0), P(x0 + k, y0)]), ("h", [])]
+
+
+def _reshape(page, obj: Obj, items: list) -> None:
+    if obj.state == "locked":
+        raise EditError(obj.reason or "Questo oggetto non si può modificare.")
+    if "drawing" not in obj.data or not content.reshape(page, {obj.data["drawing"]["seqno"]: items}):
+        raise EditError("PDFlex non riesce a cambiare la forma di questo oggetto: si può solo spostare.")
+
+
+def set_arrows(page, obj: Obj, start: bool, end: bool) -> None:
+    """Arrow heads on a line's ends."""
+    width = obj.data["drawing"].get("width") or 1
+    _reshape(page, obj, _arrow_items(obj.data["p1"], obj.data["p2"], (start, end), width))
+
+
+def set_round(page, obj: Obj, radius: float) -> None:
+    """Round corners for a box (0: square again)."""
+    _reshape(page, obj, _round_items(pymupdf.Rect(obj.rect), radius))
+
+
+_DISTRIBUTE = {"h": (0, 2), "v": (1, 3)}
+
+
+def distribution(objs: list[Obj], axis: str) -> list[tuple[Obj, float, float]]:
+    """How far each of objs moves to leave the same gap between them, across ("h") or down ("v"): the first and
+    the last stay. Only those that move."""
+    a, b = _DISTRIBUTE[axis]
+    order = sorted(objs, key=lambda o: o.rect[a])
+    if len(order) < 3:
+        return []
+    gap = (order[-1].rect[b] - order[0].rect[a] - sum(o.rect[b] - o.rect[a] for o in order)) / (len(order) - 1)
+    out, at = [], order[0].rect[b] + gap
+    for o in order[1:-1]:
+        d = at - o.rect[a]
+        if abs(d) > 0.05:
+            out.append((o, d, 0) if axis == "h" else (o, 0, d))
+        at += o.rect[b] - o.rect[a] + gap
+    return out
+
+
+def distribute(page, objs: list[Obj], axis: str) -> None:
+    moves = distribution(objs, axis)
+    if moves:
+        _replace(page, [o for o, _, _ in moves], [(pymupdf.Matrix(1, 0, 0, 1, dx, dy), {}, None) for _, dx, dy in moves])
+
+
+def replace_image(page, obj: Obj, data: bytes) -> None:
+    """Another picture in an image's place: in its box (in its own proportions, in the middle), turned as it was."""
+    if obj.state == "locked":
+        raise EditError(obj.reason or "Questo oggetto non si può modificare.")
+    try:
+        pix = pymupdf.Pixmap(data)
+    except (RuntimeError, ValueError):
+        raise EditError("Questa immagine non si apre.") from None
+    t, alpha = pymupdf.Matrix(obj.data["transform"]), opacity(page, obj)
+    w, h = abs(pymupdf.Point(t.a, t.b)), abs(pymupdf.Point(t.c, t.d))  # the box's sides, along the picture's own
+    aspect = pix.width / pix.height
+    sx, sy = (aspect * h / w, 1) if w / h > aspect else (1, w / (aspect * h))
+    _replace(page, [obj], [(None, {}, None)])
+    _put_image(page, pymupdf.Matrix(sx, 0, 0, sy, (1 - sx) / 2, (1 - sy) / 2) * t, opacity=alpha, stream=data)
 
 
 # ---------------------------------------------------------------- new words, new components

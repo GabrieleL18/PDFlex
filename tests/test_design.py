@@ -501,3 +501,107 @@ def test_front_and_back_for_text_image_and_shape():
     design.restack(page, _box(page, (0.6, 0.8, 1)), "back")  # under the white sheet: out of sight
     assert _colour_at(page, (260, 175)) == (0, 255, 0) and _colour_at(page, (110, 160)) == (255, 255, 255)
     assert len(page.get_drawings()) == 5 and "Nascosto" in page.get_text()
+
+
+def test_distribute_evenly():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for x0, w in ((50, 40), (120, 20), (300, 60)):
+        page.draw_rect((x0, 100, x0 + w, 140), color=None, fill=(0, 0, 1))
+    design.distribute(page, design.page_objects(page)[0], "h")
+    r = sorted((pymupdf.Rect(o.rect) for o in design.page_objects(page)[0]), key=lambda r: r.x0)
+    assert r[0].x0 == pytest.approx(50, abs=0.6) and r[2].x1 == pytest.approx(360, abs=0.6)
+    assert r[1].x0 - r[0].x1 == pytest.approx(r[2].x0 - r[1].x1, abs=0.6)
+
+
+def test_opacity_of_shape_text_and_image_stays_when_moved():
+    doc, page = _page()
+    page.insert_image((400, 400, 450, 450), stream=_png())
+    box = _find(page, "rect", y=60)
+    design.restyle(page, box, fill=(0, 0, 0), opacity=0.5)
+    d = _find(page, "rect", y=60).data["drawing"]
+    assert d["fill_opacity"] == pytest.approx(0.5, abs=0.01) and d["stroke_opacity"] == pytest.approx(0.5, abs=0.01)
+    design.restyle(page, _find(page, "text"), opacity=0.4)
+    assert _span(page, "Testo")["alpha"] == pytest.approx(102, abs=2)
+    design.move(page, [_find(page, "text")], 0, 300)
+    assert _span(page, "Testo")["alpha"] == pytest.approx(102, abs=2)
+    design.restyle(page, _find(page, "image"), opacity=0.3)
+    assert design.opacity(page, _find(page, "image")) == pytest.approx(0.3, abs=0.01)
+    design.move(page, [_find(page, "image")], -100, 0)
+    assert design.opacity(page, _find(page, "image")) == pytest.approx(0.3, abs=0.01)
+    _fields_intact(page)
+
+
+def test_dashes_arrows_and_round_corners():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_line((100, 100), (300, 100), width=2)
+    page.draw_rect((100, 200, 300, 300), color=(0, 0, 0), fill=(1, 1, 0))
+    line = _find(page, "line", y=100)
+    design.restyle(page, line, dashes=(6, 3))
+    assert design.dash_style(_find(page, "line", y=100)) == (6, 3)
+    design.set_arrows(page, _find(page, "line", y=100), start=False, end=True)
+    line = _find(page, "line", y=100)
+    assert line.data["arrows"] == (False, True) and line.data["p2"] == pytest.approx((300, 100))
+    design.set_rect(page, line, (100, 100, 400, 100))  # longer: the head stays a head, at the new end
+    line = _find(page, "line", y=100)
+    assert line.data["arrows"] == (False, True) and line.data["p2"] == pytest.approx((400, 100), abs=0.1)
+    assert design.dash_style(line) == (6, 3)
+    design.set_round(page, _find(page, "rect", y=200), 12)
+    box = _find(page, "rect", y=200)
+    assert box.data["round"] == pytest.approx(12, abs=0.1) and box.rect == pytest.approx((100, 200, 300, 300), abs=0.6)
+    assert _colour_at(page, (101, 201)) == (255, 255, 255) and _colour_at(page, (200, 250)) == (255, 255, 0)
+    design.set_rect(page, box, (100, 200, 400, 260))
+    box = _find(page, "rect", y=200)
+    assert box.data["round"] == pytest.approx(12, abs=0.1) and box.rect == pytest.approx((100, 200, 400, 260), abs=0.6)
+    design.set_round(page, box, 0)
+    assert "round" not in _find(page, "rect", y=200).data
+
+
+def test_restyle_many_at_once():
+    doc, page = _page()
+    lines = [o for o in design.page_objects(page)[0] if o.kind == "line"]
+    design.restyle(page, lines, color=(0, 0.5, 0), width=3)
+    for o in [o for o in design.page_objects(page)[0] if o.kind == "line"]:
+        assert o.data["drawing"]["color"] == pytest.approx((0, 0.5, 0), abs=0.01)
+        assert o.data["drawing"]["width"] == pytest.approx(3)
+
+
+def test_paste_on_another_page():
+    doc, page = _page()
+    page.insert_image((400, 400, 450, 450), stream=_png())
+    clip = pymupdf.open()
+    clip.insert_pdf(doc, from_page=0, to_page=0)
+    objs = design.page_objects(clip[0])[0]
+    other = doc.new_page()
+    design.paste(other, clip[0], objs, 0, 0)
+    assert "Testo vicino alla linea" in other.get_text()
+    assert sorted(o.kind for o in design.page_objects(other)[0]) == ["image", "line", "line", "rect", "text"]
+    assert _find(other, "image").rect == pytest.approx((400, 400, 450, 450), abs=0.6)
+
+
+def test_replace_image_keeps_its_box_and_turn():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_image((100, 100, 200, 200), stream=_png())
+    design.rotate(page, [_find(page, "image")], 90)
+    wide = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 20, 10), False)
+    wide.clear_with(30)
+    design.replace_image(page, _find(page, "image"), wide.tobytes("png"))
+    img = _find(page, "image")
+    assert pymupdf.Rect(img.rect).width == pytest.approx(50, abs=0.6)  # turned: its long side up and down
+    assert pymupdf.Rect(img.rect).height == pytest.approx(100, abs=0.6)
+    assert _colour_at(page, (150, 150)) == (30, 30, 30)
+
+
+def test_copy_of_a_box_drawn_backwards_on_another_page():
+    doc = pymupdf.open()
+    src = doc.new_page()
+    src.draw_rect((0, 0, 1, 1), color=None, fill=(1, 1, 1))
+    doc.update_stream(src.get_contents()[0], b"0.2 0.2 0.8 rg 300 700 -100 -2 re f")  # x0 > x1 in the PDF
+    other = pymupdf.open()
+    page = other.new_page()
+    o = next(o for o in design.page_objects(src)[0] if o.kind != "text")
+    design.paste(page, src, [o], 0, 0)
+    copy = next(x for x in design.page_objects(page)[0] if x.kind != "text")
+    assert copy.rect == pytest.approx(o.rect, abs=0.1) and pymupdf.Rect(copy.rect).width == pytest.approx(100, abs=0.1)
