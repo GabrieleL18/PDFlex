@@ -3,7 +3,7 @@ import pymupdf
 
 from pdflex import open_pdf
 from pdflex.batch import batch_fill, match_columns, read_table
-from pdflex.editor import Field, save_with_fields
+from pdflex.fields import Field, save_with_fields
 
 
 def _template(tmp_path, make_pdf):

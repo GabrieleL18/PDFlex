@@ -3,7 +3,7 @@ import pytest
 
 from pdflex import open_pdf
 from pdflex.compare import diff_words, export_report, extract_words
-from pdflex.editor import Field, from_view, load_fields, save_with_fields, suggest_save_path, to_view
+from pdflex.fields import Field, from_view, load_fields, save_with_fields, suggest_save_path, to_view
 
 
 def _rotated(tmp_path, make_pdf):
@@ -170,7 +170,7 @@ def test_edit_loaded_font_options_default(make_pdf, tmp_path):
 
 
 def test_preview_fills_sample_data(make_pdf, tmp_path):
-    from pdflex.editor import build_pdf, fill_sample
+    from pdflex.fields import build_pdf, fill_sample
     src = make_pdf(tmp_path, ["x"])
     fields = [Field("text", 0, (10, 10, 200, 30), "nome"), Field("text", 0, (10, 40, 200, 60), "x", default="Mio"),
               Field("checkbox", 0, (10, 70, 24, 84), "ok"), Field("dropdown", 0, (10, 90, 200, 110), "d", options=["a", "b"]),

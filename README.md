@@ -9,13 +9,15 @@ Programma Windows per creare moduli PDF compilabili, confrontare due versioni di
   - *Per compilazione*: salva una copia con i campi invisibili e vuoti, da far compilare a un altro programma;
   - allineamento di più campi (Ctrl+clic per selezionarli) e griglia magnetica;
   - ordine Tab trascinabile e annulla/ripeti (Ctrl+Z / Ctrl+Y);
-  - anteprima con dati di esempio.
+  - anteprima con dati di esempio;
+  - *Compila*: riempi i campi a mano, con il modulo compilato accanto, e salvane una copia.
 - **Confronta**: mostra le differenze affiancate, con scorrimento sincronizzato. Puoi:
   - ignorare maiuscole e punteggiatura;
   - filtrare per tipo di modifica;
   - esportare in PDF (con l'elenco delle modifiche all'inizio) o in Excel.
   Le scansioni si confrontano solo se è installato [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) con la lingua italiana.
-- **In serie**: modulo PDF + file Excel/CSV, un PDF compilato per ogni riga (le colonne si abbinano ai campi con lo stesso nome).
+- **In serie**: modulo PDF + file Excel/CSV, un PDF compilato per ogni riga (le colonne si abbinano ai campi con lo stesso nome), oppure un solo PDF con tutti i moduli da stampare.
+- **Pagine**: unisci PDF, riordina, ruota, elimina, estrai e dividi le pagine. Nelle *Opzioni* puoi aggiungere numeri di pagina, intestazione e filigrana (BOZZA, COPIA) e ridurre la dimensione del file.
 
 ## Installare
 

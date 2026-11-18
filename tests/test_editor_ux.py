@@ -4,7 +4,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from pdflex import open_pdf
-from pdflex.editor import EditorTab, Field, load_fields, save_with_fields
+from pdflex.editor import EditorTab
+from pdflex.fields import Field, load_fields, save_with_fields
 
 
 @pytest.fixture

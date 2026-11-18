@@ -609,16 +609,19 @@ class CompareTab(QWidget):
         except ValueError as e:
             warn(self, str(e))
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)  # OCR of a scan can take a while
+        # OCR of a scan can take a while: a bar with Annulla, refreshed after every page
+        # (no thread: PyMuPDF keeps Python's lock while it works, the window would freeze all the same)
         try:
             n_old, n = old.page_count, old.page_count + new.page_count
-            with ui.progress(self, "Leggo testo e immagini delle pagine...", 2 * n) as step:
+            with ui.progress(self, "Leggo testo e immagini delle pagine...", 2 * n, cancel=True) as step:
                 old_words = extract_words(old, ocr=True, on_page=step)
                 new_words = extract_words(new, ocr=True, on_page=lambda i: step(n_old + i))
                 images = diff_images(extract_images(old, lambda i: step(n + i)),
                                      extract_images(new, lambda i: step(n + n_old + i)))
-        finally:
-            QApplication.restoreOverrideCursor()
+        except ui.Cancelled:
+            self.reset()
+            self.summary.setText("Confronto annullato")
+            return
         empty = [Path(p).name for p, w in ((old_path, old_words), (new_path, new_words)) if not w]
         if empty:
             info(self, NO_OCR.format(", ".join(empty)))

@@ -544,19 +544,30 @@ def warn(parent, text: str) -> None:
     message(parent, text, "warn")
 
 
+class Cancelled(Exception):
+    """The user pressed Annulla on a progress bar."""
+
+
 @contextmanager
-def progress(parent, text: str, total: int):
+def progress(parent, text: str, total: int, cancel: bool = False):
     """Bar for slow work on long documents, shown only if it lasts more than half a second.
 
-    Yields set_value(done); on a modal dialog that also keeps the window painted. total=0: a moving bar."""
-    d = QProgressDialog(text, "", 0, total, parent)
-    d.setCancelButton(None)
+    Yields set_value(done); on a modal dialog that also keeps the window painted. total=0: a moving bar.
+    cancel=True adds an Annulla button: set_value then raises Cancelled once it is pressed."""
+    d = QProgressDialog(text, "Annulla", 0, total, parent)
+    if not cancel:
+        d.setCancelButton(None)
     d.setWindowTitle("PDFlex")
     d.setWindowModality(Qt.WindowModal)
     d.setMinimumDuration(500)
     d.setMinimumWidth(360)
+
+    def step(value):
+        d.setValue(value)
+        if d.wasCanceled():
+            raise Cancelled
     try:
-        yield d.setValue
+        yield step if cancel else d.setValue
     finally:
         d.reset()  # also stops the timer that would pop it up later
         d.deleteLater()

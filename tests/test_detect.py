@@ -2,7 +2,7 @@ import pymupdf
 
 from pdflex import open_pdf
 from pdflex.detect import detect_fields
-from pdflex.editor import Field
+from pdflex.fields import Field
 
 
 def _form(tmp_path):
@@ -87,7 +87,7 @@ def test_tax_form_white_boxes_rows_and_comb(tmp_path):
 
 
 def test_comb_field_round_trip(tmp_path, make_pdf):
-    from pdflex.editor import load_fields, save_with_fields
+    from pdflex.fields import load_fields, save_with_fields
     out = tmp_path / "cf.pdf"
     save_with_fields(make_pdf(tmp_path, ["x"]), [Field("text", 0, (10, 10, 240, 28), "cf", comb=16)], out)
     w = next(open_pdf(out)[0].widgets())

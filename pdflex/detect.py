@@ -6,7 +6,7 @@ import re
 
 import pymupdf
 
-from pdflex.editor import Field, clean_value
+from pdflex.fields import Field, clean_value
 
 _KIND_WORDS = [  # (kind, fmt, label pattern)
     ("date", "", r"\bdata\b|\bdate\b|\bnat[oa] il\b"),

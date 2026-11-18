@@ -2,7 +2,7 @@ import pymupdf
 import pytest
 
 from pdflex import open_pdf
-from pdflex.editor import Field, align_rects, load_fields, save_with_fields, snap
+from pdflex.fields import Field, align_rects, load_fields, save_with_fields, snap
 
 
 def _js(doc):

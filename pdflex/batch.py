@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pymupdf
 
-from pdflex import open_pdf
-from pdflex.editor import clean_value
+from pdflex import open_pdf, write_atomic
+from pdflex.fields import clean_value
 
 TRUE_WORDS = {"1", "x", "s", "si", "sì", "yes", "y", "true", "vero", "ok"}
 
@@ -59,7 +59,8 @@ def match_columns(field_names: list[str], headers: list[str]) -> dict[str, str]:
     return {n: by_key[_key(n)] for n in field_names if _key(n) in by_key}
 
 
-def _fill(doc, row: dict, mapping: dict) -> None:
+def fill_form(doc, row: dict, mapping: dict) -> None:
+    """Field values from row[mapping[field name]]; check boxes from words like "sì", "x", "1"."""
     for page in doc:
         for w in page.widgets():
             col = mapping.get(w.field_name)
@@ -83,6 +84,25 @@ def _file_name(row, name_col, i, stem) -> str:
     return name or f"{stem}_{i:03}"
 
 
+def merged_fill(template: str | Path, rows: list[dict], mapping: dict[str, str], out_path: str | Path,
+                progress=None) -> int:
+    """All the filled forms one after the other in a single PDF, ready to print; returns how many.
+
+    The fields become text: the same field name on every copy would otherwise share one value."""
+    data = open_pdf(template).tobytes()
+    out = pymupdf.open()
+    for i, row in enumerate(rows, 1):
+        doc = pymupdf.open("pdf", data)
+        fill_form(doc, row, mapping)
+        doc.bake()
+        out.insert_pdf(doc)
+        doc.close()
+        if progress and not progress(i, len(rows)):
+            return 0  # stopped: no half-made file
+    write_atomic(out_path, out.tobytes(garbage=3, deflate=True))
+    return len(rows)
+
+
 def batch_fill(template: str | Path, rows: list[dict], mapping: dict[str, str], out_dir: str | Path,
                name_col: str | None = None, flatten: bool = False, progress=None) -> list[Path]:
     """One filled PDF per row. flatten=True turns fields into plain text (no longer editable)."""
@@ -93,7 +113,7 @@ def batch_fill(template: str | Path, rows: list[dict], mapping: dict[str, str], 
     made, used = [], set()
     for i, row in enumerate(rows, 1):
         doc = pymupdf.open("pdf", data)
-        _fill(doc, row, mapping)
+        fill_form(doc, row, mapping)
         if flatten:
             doc.bake()
         base = _file_name(row, name_col, i, template.stem)
@@ -114,7 +134,7 @@ def batch_fill(template: str | Path, rows: list[dict], mapping: dict[str, str], 
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QProgressDialog,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressDialog,
     QVBoxLayout, QWidget,
 )
 
@@ -156,6 +176,10 @@ class BatchTab(QWidget):
         self.match.setWordWrap(True)
         self.name_col = QComboBox()
         self.flatten = ui.Toggle("Rendi i PDF non modificabili (i campi diventano testo)")
+        self.merge = ui.Toggle("Un solo PDF con tutti i moduli, uno dopo l'altro (da stampare)")
+        self.merge.setToolTip("I campi diventano testo: nello stesso PDF due campi con lo stesso nome "
+                              "avrebbero lo stesso valore")
+        self.merge.toggled.connect(self._update)
         self.b_run = button("Crea i PDF", "batch", "Primary")
         self.b_run.clicked.connect(self.ask_run)
         name_row = QHBoxLayout()
@@ -168,6 +192,7 @@ class BatchTab(QWidget):
         pl.setSpacing(10)
         pl.addWidget(self.match)
         pl.addLayout(name_row)
+        pl.addWidget(self.merge)
         pl.addWidget(self.flatten)
         pl.addWidget(self.b_run, alignment=Qt.AlignRight)
 
@@ -225,12 +250,19 @@ class BatchTab(QWidget):
                 text = ("Nessuna colonna ha il nome di un campo. Rinomina le colonne come i campi: "
                         + ", ".join(self.field_names[:12]))
             self.match.setText(text)
-        self.b_run.setText(f"Crea {len(self.rows)} PDF" if ready else "Crea i PDF")
+        merge = self.merge.isChecked()
+        self.b_run.setText("Crea il PDF" if merge else f"Crea {len(self.rows)} PDF" if ready else "Crea i PDF")
         self.b_run.setEnabled(ready)
-        self.name_col.setEnabled(bool(self.headers))
+        self.name_col.setEnabled(bool(self.headers) and not merge)
+        self.flatten.setEnabled(not merge)
 
     def ask_run(self):
-        out = QFileDialog.getExistingDirectory(self, "Cartella dove salvare i PDF", str(Path(self.template).parent))
+        t = Path(self.template)
+        if self.merge.isChecked():
+            out, _ = QFileDialog.getSaveFileName(self, "Salva il PDF con tutti i moduli",
+                                                 str(t.with_name(t.stem + "_tutti.pdf")), "PDF (*.pdf)")
+        else:
+            out = QFileDialog.getExistingDirectory(self, "Cartella dove salvare i PDF", str(t.parent))
         if not out:
             return
         try:
@@ -238,9 +270,14 @@ class BatchTab(QWidget):
         except (ValueError, OSError, RuntimeError) as e:
             warn(self, f"Creazione non riuscita: {e}")
             return
-        info(self, f"Creati {len(made)} PDF in {out}")
+        if self.merge.isChecked():
+            if made:
+                info(self, f"Salvato {out}: {len(self.rows)} moduli compilati, uno dopo l'altro.")
+        else:
+            info(self, f"Creati {len(made)} PDF in {out}")
 
-    def run(self, out_dir: str) -> list[Path]:
+    def run(self, out: str) -> list[Path]:
+        """Make the PDFs into the folder `out`, or the single merged file `out`; returns the files made."""
         dlg = QProgressDialog("Creo i PDF...", "Ferma", 0, len(self.rows), self)
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(400)
@@ -250,7 +287,9 @@ class BatchTab(QWidget):
             QApplication.processEvents()
             return not dlg.wasCanceled()
         try:
-            return batch_fill(self.template, self.rows, self.mapping, out_dir, self.name_col.currentData(),
+            if self.merge.isChecked():
+                return [Path(out)] if merged_fill(self.template, self.rows, self.mapping, out, progress) else []
+            return batch_fill(self.template, self.rows, self.mapping, out, self.name_col.currentData(),
                               self.flatten.isChecked(), progress)
         finally:
             dlg.close()

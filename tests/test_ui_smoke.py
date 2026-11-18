@@ -1,6 +1,7 @@
 import pytest
 from pdflex import open_pdf
-from pdflex.editor import EditorTab, load_fields
+from pdflex.editor import EditorTab
+from pdflex.fields import load_fields
 
 
 def test_editor_add_and_save(qapp, make_pdf, tmp_path):
@@ -107,7 +108,7 @@ def test_compare_options_filter_excel(qapp, make_pdf, tmp_path):
 
 def test_batch_tab(qapp, make_pdf, tmp_path):
     from pdflex.batch import BatchTab
-    from pdflex.editor import Field, save_with_fields
+    from pdflex.fields import Field, save_with_fields
     tpl = tmp_path / "modulo.pdf"
     save_with_fields(make_pdf(tmp_path, ["Modulo"]), [Field("text", 0, (10, 10, 200, 30), "nome")], tpl)
     data = tmp_path / "dati.csv"
@@ -214,7 +215,7 @@ def test_blocks_saved_and_reused_in_another_form(qapp, make_pdf, tmp_path):
 def test_hand_signature_drawn_and_placed(qapp, make_pdf, tmp_path):
     from PySide6.QtCore import QPointF
     from PySide6.QtGui import QPainterPath
-    from pdflex.editor import SignatureDialog
+    from pdflex.signature import SignatureDialog
     tab = EditorTab()
     src = make_pdf(tmp_path, ["contratto"])
     tab.open(str(src))

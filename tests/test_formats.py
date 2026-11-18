@@ -2,7 +2,7 @@ import pymupdf
 import pytest
 
 from pdflex import open_pdf
-from pdflex.editor import Field, load_fields, sample_value, save_with_fields
+from pdflex.fields import Field, load_fields, sample_value, save_with_fields
 
 ALL = ["", "number|0|0", "number|3|1", "amount|2|1", "percent|1|1", "date|dd/mm/yy", "date|dd/mm/yyyy HH:MM",
        "time|HH:MM", "cap", "cf", "phone", "email"]

@@ -2,7 +2,7 @@ import pymupdf
 import pytest
 
 from pdflex import open_pdf
-from pdflex.editor import Field, clean_value, load_fields, save_with_fields
+from pdflex.fields import Field, clean_value, load_fields, save_with_fields
 
 
 def all_fields():

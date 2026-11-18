@@ -1,5 +1,6 @@
 """Merge PDFs, reorder / rotate / delete pages, split into single pages."""
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,55 @@ def _docs(refs):
     return cache
 
 
+@dataclass
+class Extras:
+    """What is added while saving: written on every page as the reader sees it, rotated pages too."""
+    numbers: bool = False  # "Pagina 1 di 5" at the bottom
+    header: str = ""  # a line at the top
+    watermark: str = ""  # big, light, across the page (BOZZA, COPIA)
+    compress: bool = False  # pictures resampled to 150 dpi and recompressed
+
+    def count(self) -> int:
+        return sum(map(bool, (self.numbers, self.header, self.watermark, self.compress)))
+
+
+def _write(page, text: str, center: tuple, size: float, color=(0.25, 0.25, 0.25), opacity=1.0, angle=0) -> None:
+    """text centred on `center` (as seen on screen), turned by `angle` degrees (counter-clockwise)."""
+    half = pymupdf.get_text_length(text, "helv", size) / 2
+    a = math.radians(angle)
+    # baseline start: half the width back along the text's direction, a third of the size down
+    x = center[0] - half * math.cos(a) + size / 3 * math.sin(a)
+    y = center[1] + half * math.sin(a) + size / 3 * math.cos(a)
+    start = pymupdf.Point(x, y) * page.derotation_matrix
+    page.insert_text(start, text, fontsize=size, fontname="helv", color=color, fill_opacity=opacity,
+                     rotate=page.rotation, morph=(start, pymupdf.Matrix(angle)) if angle else None)
+
+
+def add_extras(doc: pymupdf.Document, extras: Extras) -> None:
+    n = doc.page_count
+    for page in doc:
+        r = page.rect  # as shown, after rotation
+        if extras.watermark:
+            size = min(0.6 * math.hypot(r.width, r.height) / pymupdf.get_text_length(extras.watermark, "helv", 1),
+                       r.height / 4)
+            angle = math.degrees(math.atan2(r.height, r.width))
+            _write(page, extras.watermark, (r.width / 2, r.height / 2), size, (0.5, 0.5, 0.5), 0.18, angle)
+        if extras.header:
+            _write(page, extras.header, (r.width / 2, 24), 9)
+        if extras.numbers:
+            _write(page, f"Pagina {page.number + 1} di {n}", (r.width / 2, r.height - 20), 9)
+
+
+def _bytes(doc: pymupdf.Document, extras: Extras | None) -> bytes:
+    if extras:
+        add_extras(doc, extras)
+        if extras.compress:
+            doc.rewrite_images(dpi_threshold=200, dpi_target=150, quality=70)
+            doc.subset_fonts()  # only the letters in use
+            return doc.tobytes(garbage=4, deflate=True, use_objstms=1)
+    return doc.tobytes(garbage=3, deflate=True)
+
+
 def _build(refs) -> pymupdf.Document:
     cache, out = _docs(refs), pymupdf.open()
     for r in refs:
@@ -32,18 +82,18 @@ def _build(refs) -> pymupdf.Document:
     return out
 
 
-def assemble(refs: list[PageRef], out_path) -> None:
+def assemble(refs: list[PageRef], out_path, extras: Extras | None = None) -> None:
     # bytes first, file last: saving over one of the source PDFs can't leave it half written
-    write_atomic(out_path, _build(refs).tobytes(garbage=3, deflate=True))
+    write_atomic(out_path, _bytes(_build(refs), extras))
 
 
-def split(refs: list[PageRef], out_dir, stem: str) -> list[Path]:
+def split(refs: list[PageRef], out_dir, stem: str, extras: Extras | None = None) -> list[Path]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     made = []
     for n, r in enumerate(refs, 1):
         path = out_dir / f"{stem}_p{n}.pdf"
-        assemble([r], path)
+        assemble([r], path, extras)
         made.append(path)
     return made
 
@@ -53,9 +103,8 @@ def split(refs: list[PageRef], out_dir, stem: str) -> list[Path]:
 from PySide6.QtCore import QSize, Qt, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QFileDialog, QFrame, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QSizePolicy,
-    QSlider,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView,
+    QListWidget, QListWidgetItem, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from pdflex import ui  # noqa: E402
@@ -176,6 +225,7 @@ class PagesTab(QWidget):
         self.b_right = button("", "rotate-right", "Ghost", "Ruota a destra")
         self.b_del = button("Elimina", "trash", "Danger", "Togli le pagine selezionate (Canc)")
         self.b_view = button("Anteprima", "eye", tip="Il PDF come verrà salvato, pagina per pagina")
+        self.b_extras = button("Opzioni", "page", tip="Numeri di pagina, intestazione, filigrana e dimensione del file")
         self.b_split = button("Dividi", "batch", tip="Salva ogni pagina in un PDF a sé")
         self.b_extract = button("Estrai selezionate", "export", tip="Salva solo le pagine selezionate")
         self.b_save = button("Salva PDF", "save", "Primary")
@@ -189,6 +239,8 @@ class PagesTab(QWidget):
         self.b_right.clicked.connect(lambda: self.rotate(90))
         self.b_del.clicked.connect(self.delete_selected)
         self.b_view.clicked.connect(self.preview)
+        self.b_extras.clicked.connect(self.ask_extras)
+        self.extras = Extras()
         self.b_split.clicked.connect(self.ask_split)
         self.b_extract.clicked.connect(lambda: self.ask_save(selected=True))
         self.b_save.clicked.connect(lambda: self.ask_save())
@@ -209,7 +261,8 @@ class PagesTab(QWidget):
         bl.addWidget(QLabel("Miniature", objectName="Muted"))
         bl.addWidget(self.size)
         bl.addSpacing(8)
-        for w in (self.b_left, self.b_right, self.b_del, self.b_view, self.b_split, self.b_extract, self.b_save):
+        for w in (self.b_left, self.b_right, self.b_del, self.b_extras, self.b_view, self.b_split, self.b_extract,
+                  self.b_save):
             bl.addWidget(w)
 
         self.grid = PageGrid()
@@ -338,9 +391,46 @@ class PagesTab(QWidget):
         ref = item.data(Qt.UserRole)
         ui.show_doc(self, _build([ref]), f"{Path(ref.path).name}, pagina {ref.index + 1}")
 
+    def ask_extras(self):
+        """What to add while saving; kept until PDFlex is closed."""
+        e = self.extras
+        d = QDialog(self)
+        d.setWindowTitle("Opzioni di salvataggio")
+        d.setMinimumWidth(420)
+        form = QFormLayout(d)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        numbers = ui.Toggle("Numeri di pagina in basso (Pagina 1 di 5)")
+        numbers.setChecked(e.numbers)
+        header = QLineEdit(e.header, placeholderText="Nessuna")
+        mark = QLineEdit(e.watermark, placeholderText="Nessuna, es. BOZZA o COPIA")
+        compress = ui.Toggle("Riduci la dimensione del file")
+        compress.setChecked(e.compress)
+        compress.setToolTip("Le immagini oltre 200 dpi scendono a 150 e vengono ricompresse: "
+                            "a schermo e in stampa non cambia quasi nulla")
+        note = QLabel("Valgono per Salva, Estrai, Dividi e Anteprima.", objectName="Muted")
+        ok, cancel = button("OK", None, "Primary"), button("Annulla")
+        ok.clicked.connect(d.accept)
+        cancel.clicked.connect(d.reject)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        form.addRow(numbers)
+        form.addRow("Intestazione in alto", header)
+        form.addRow("Filigrana", mark)
+        form.addRow(compress)
+        form.addRow(note)
+        form.addRow(row)
+        if d.exec():
+            self.extras = Extras(numbers.isChecked(), header.text().strip(), mark.text().strip(), compress.isChecked())
+            self._buttons()
+        d.deleteLater()
+
     def preview(self):
         if self.grid.count():
-            ui.show_doc(self, _build(self.refs()), "Anteprima del PDF da salvare",
+            doc = _build(self.refs())
+            add_extras(doc, self.extras)
+            ui.show_doc(self, doc, "Anteprima del PDF da salvare",
                         f"{self.grid.count()} pagine nell'ordine attuale. Ctrl+rotellina per ingrandire.")
 
     def _buttons(self):
@@ -350,6 +440,8 @@ class PagesTab(QWidget):
             w.setEnabled(has)
         for w in (self.b_left, self.b_right, self.b_del, self.b_extract):
             w.setEnabled(sel)
+        n = self.extras.count()
+        self.b_extras.setText(f"Opzioni ({n})" if n else "Opzioni")
         self.b_undo.setEnabled(bool(self._undo))
         self.b_redo.setEnabled(bool(self._redo))
 
@@ -358,7 +450,7 @@ class PagesTab(QWidget):
         if selected:  # keep the order on screen
             order = {id(r): n for n, r in enumerate(self.refs())}
             refs.sort(key=lambda r: order[id(r)])
-        assemble(refs, path)
+        assemble(refs, path, self.extras)
 
     def ask_save(self, selected: bool = False):
         first = Path(self.refs()[0].path)
@@ -376,5 +468,5 @@ class PagesTab(QWidget):
         first = Path(self.refs()[0].path)
         out = QFileDialog.getExistingDirectory(self, "Cartella per le pagine singole", str(first.parent))
         if out:
-            made = split(self.refs(), out, first.stem)
+            made = split(self.refs(), out, first.stem, self.extras)
             info(self, f"Creati {len(made)} PDF in {out}")
