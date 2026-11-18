@@ -248,7 +248,7 @@ def test_compare_marks_rows_and_page_view(qapp, make_pdf, tmp_path):
     QTest.qWait(300)
     ticks = tab.bar.ticks  # the one scrollbar between the two documents
     assert len(ticks) == len(tab.changes) == 1 and 0.6 < ticks[0][0] < 0.85  # page 5 of 6
-    assert not tab.old_view.verticalScrollBar().isVisible() and not tab.new_view.verticalScrollBar().isVisible()
+    assert tab.old_view.verticalScrollBar().isVisible() and tab.new_view.verticalScrollBar().isVisible()  # each its own too
     # a click on the tick selects the change, dragging the bar scrolls both documents
     tab.list.setCurrentRow(-1)
     tab.current = -1

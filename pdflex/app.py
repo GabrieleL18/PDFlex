@@ -1,5 +1,6 @@
 import base64
 import ctypes
+import faulthandler
 import os
 import sys
 import traceback
@@ -143,6 +144,11 @@ def main() -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     setup(app)
     sys.excepthook = _show_error
+    try:  # a hard crash (the window just vanishes) still leaves where it happened in the log
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        faulthandler.enable(open(LOG, "a", encoding="utf-8"))  # kept open for the whole run on purpose
+    except OSError:
+        pass
     w = MainWindow(next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), None))
     w.show()
     sys.exit(app.exec())

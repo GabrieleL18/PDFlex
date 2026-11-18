@@ -189,3 +189,14 @@ def test_export_refuses_the_file_being_edited(tab, monkeypatch):
     monkeypatch.setattr(editor.QFileDialog, "getSaveFileName", lambda *a, **k: (tab.path, ""))
     monkeypatch.setattr(editor, "warn", lambda parent, text: warned.append(text))
     assert tab.ask_export() is False and "altro nome" in warned[0]
+
+
+def test_page_thumbnails_jump_and_count_fields(tab):
+    assert tab.thumbs.isVisible() and tab.thumbs.count() == 2 and tab.thumbs.currentRow() == 0
+    tab.add_field("text", 1, (10, 10, 100, 30))
+    tab.thumbs.setCurrentRow(1)  # a click on the second thumbnail
+    assert tab.page_no == 1 and tab.thumbs.item(1).text() == "2  ·  1 campo"
+    tab.b_next.click() if tab.b_next.isEnabled() else tab.b_prev.click()
+    assert tab.page_no == 0 and tab.thumbs.currentRow() == 0  # the strip follows the page shown
+    tab.b_pages.click()
+    assert not tab.thumbs.isVisible()

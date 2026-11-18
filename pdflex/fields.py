@@ -469,8 +469,8 @@ def _set_radio_state(doc, xref, old, new, checked, was_checked):
 def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Document:
     """The form with these fields. blank: for a program that fills it in later, fields empty and invisible."""
     _check_names(fields)
-    if blank:
-        fields = [dataclasses.replace(f, default="") if f.kind != "button" else f for f in fields]
+    if blank:  # push buttons go too: the program that fills it in has no use for "Popola test"
+        fields = [dataclasses.replace(f, default="") for f in fields if f.kind != "button"]
     doc = open_pdf(src_path)
     keep = {f.xref for f in fields if f.xref}
     for page in doc:

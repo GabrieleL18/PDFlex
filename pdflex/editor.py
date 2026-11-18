@@ -1,12 +1,13 @@
 """Moduli tab: draw, move and edit form fields on the pages of a PDF."""
 import base64
 import copy
+from collections import Counter
 from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QFontMetricsF, QIntValidator, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
+    QBrush, QColor, QFont, QFontMetricsF, QIcon, QIntValidator, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -37,6 +38,7 @@ KIND_LABELS = {"text": "Testo", "multiline": "Testo lungo", "checkbox": "Casella
 KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B", "radio": "#7A4FD1",
                "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633",
                "button": "#4A5568"}
+THUMB_W = 110  # px, width of a page thumbnail
 HANDLE = 10  # px, resize grip in the bottom-right corner
 PAGE_MARGIN = 24
 TAG_H = 20  # name tag of the selected field
@@ -381,6 +383,9 @@ class EditorTab(QWidget):
         self.b_preview.clicked.connect(self.preview)
         self.file_label = QLabel("", objectName="Muted")
         self.file_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never forces the window wider
+        self.b_pages = button("", "page", "Ghost", "Mostra o nascondi le miniature delle pagine")
+        self.b_pages.setCheckable(True)
+        self.b_pages.setChecked(True)
         self.b_prev = button("", "prev", "Ghost", "Pagina precedente")
         self.b_next = button("", "next", "Ghost", "Pagina successiva")
         self.page_label = QLabel("")
@@ -406,7 +411,7 @@ class EditorTab(QWidget):
         for w in (self.b_list, self.b_preview, self.b_fill):
             bl.addWidget(w)
         bl.addSpacing(12)
-        for w in (self.b_prev, self.page_label, self.b_next, self.b_zout, self.zoom_label, self.b_zin):
+        for w in (self.b_pages, self.b_prev, self.page_label, self.b_next, self.b_zout, self.zoom_label, self.b_zin):
             bl.addWidget(w)
 
         self.scene = QGraphicsScene(self)
@@ -429,12 +434,29 @@ class EditorTab(QWidget):
         self.stack.addWidget(empty)
         self.stack.addWidget(self.view)
 
+        # page thumbnails: see the whole document and jump to a page (shown or hidden from the bar)
+        self.thumbs = QListWidget(objectName="Thumbs")
+        self.thumbs.setViewMode(QListWidget.IconMode)
+        self.thumbs.setFlow(QListWidget.TopToBottom)
+        self.thumbs.setWrapping(False)
+        self.thumbs.setMovement(QListWidget.Static)
+        self.thumbs.setIconSize(QSize(THUMB_W, round(THUMB_W * 1.42)))
+        self.thumbs.setSpacing(4)
+        self.thumbs.setFixedWidth(THUMB_W + 40)
+        self.thumbs.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.thumbs.currentRowChanged.connect(self.go_page)
+        self.b_pages.toggled.connect(lambda on: self.thumbs.setVisible(on and self.doc is not None))
+
         center = QWidget()
         cl = QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
         cl.addWidget(bar)
-        cl.addWidget(self.stack, 1)
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.addWidget(self.thumbs)
+        body.addWidget(self.stack, 1)
+        cl.addLayout(body, 1)
 
         # field list (toggled from the bar)
         self.list_panel = QFrame(objectName="PanelRight")
@@ -701,7 +723,19 @@ class EditorTab(QWidget):
         self._redo.clear()
         self.title_changed.emit(Path(path).name)
         add_recent(path)
+        self._fill_thumbs()
         self.fit_width()
+
+    def _fill_thumbs(self):
+        # ponytail: every page rendered on open (~10 ms each); render only the visible ones if 500-page PDFs get slow
+        self.thumbs.blockSignals(True)
+        self.thumbs.clear()
+        for page in self.doc or []:
+            pix = render_page(page, THUMB_W / page.rect.width, dpr=self.devicePixelRatioF())
+            ic = QIcon(pix)
+            ic.addPixmap(pix, QIcon.Selected)  # else Qt washes the current page over in the selection colour
+            self.thumbs.addItem(QListWidgetItem(ic, str(page.number + 1)))
+        self.thumbs.blockSignals(False)
 
     def set_stacked(self, on: bool):
         """Field list above the properties (on) or beside them; remembered for next time."""
@@ -1151,7 +1185,7 @@ class EditorTab(QWidget):
             self.set_zoom(avail / self.doc[self.page_no].rect.width)
 
     def go_page(self, n):
-        if self.doc and 0 <= n < self.doc.page_count:
+        if self.doc and 0 <= n < self.doc.page_count and n != self.page_no:
             self.page_no = n
             self._select(None)
             self.refresh()
@@ -1167,10 +1201,19 @@ class EditorTab(QWidget):
             w.setEnabled(has)
         for w in (self.b_close, self.zoom_label):
             w.setVisible(has)
+        self.thumbs.setVisible(has and self.b_pages.isChecked())
         if not has:
             self.file_label.setText("")
             self.page_label.setText("")
+            self.thumbs.clear()
             self._fill_recent()
+        else:
+            counts = Counter(f.page for f in self.fields)
+            self.thumbs.blockSignals(True)
+            for i in range(self.thumbs.count()):
+                self.thumbs.item(i).setText(f"{i + 1}" + (f"  ·  {counts[i]} camp{'o' if counts[i] == 1 else 'i'}" if counts[i] else ""))
+            self.thumbs.setCurrentRow(self.page_no)
+            self.thumbs.blockSignals(False)
         self._fill_blocks()
         self.b_undo.setEnabled(bool(self._undo))
         self.b_redo.setEnabled(bool(self._redo))

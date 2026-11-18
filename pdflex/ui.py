@@ -119,6 +119,10 @@ QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11
 QLabel#Muted {{ color: {muted}; }}
 #DropZone {{ border: 2px dashed {border_strong}; border-radius: 16px; background: {surface}; }}
 #DropZone:hover, #DropZone[hot="true"] {{ border-color: {accent}; background: {hot_bg}; }}
+QListWidget#Thumbs {{ border: none; border-right: 1px solid {line}; background: {desk}; outline: none; color: {muted}; }}
+QListWidget#Thumbs::item {{ padding: 4px; border-radius: 6px; border: 2px solid transparent; }}
+QListWidget#Thumbs::item:selected {{ background: {accent_soft}; border-color: {accent}; color: {ink}; }}
+QListWidget#Thumbs::item:hover:!selected {{ background: {row_hover}; }}
 QListWidget#Changes {{ border: none; background: {surface}; outline: none; }}
 QListWidget#Changes::item {{ padding: 8px 6px; border-radius: 8px; margin: 1px 6px; }}
 QListWidget#Changes::item:selected {{ background: {accent_soft}; color: {ink}; }}
@@ -131,6 +135,10 @@ QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: {handle}; border-radius: 4px; min-height: 30px; }}
 QScrollBar#Marks:vertical {{ width: 16px; background: {hover}; }}
 QScrollBar#Marks::handle:vertical {{ background: {marks_handle}; }}
+QScrollBar#Changes:vertical {{ width: 22px; margin: 0; background: {hover};
+    border-left: 1px solid {border}; border-right: 1px solid {border}; }}
+QScrollBar#Changes::handle:vertical {{ background: {accent_soft}; border: 1px solid {accent_soft_border};
+    border-radius: 4px; margin: 0 1px; min-height: 24px; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: {handle}; border-radius: 4px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background: none; border: none; width: 0; height: 0; }}

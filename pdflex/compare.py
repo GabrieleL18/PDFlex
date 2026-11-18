@@ -408,8 +408,9 @@ class ChangeBar(ui.MarkBar):
         super().__init__()
         self.ticks: list[tuple[float, str, int, str]] = []  # (0..1 down the document, colour, change, label)
         self.current = -1
+        self.setObjectName("Changes")
         self.setMouseTracking(True)
-        self.setFixedWidth(18)
+        self.setFixedWidth(22)
 
     def _y(self, frac: float) -> float:
         return 3 + frac * (self.height() - 6)
@@ -427,7 +428,7 @@ class ChangeBar(ui.MarkBar):
             p.fillRect(QRectF(2, self._y(frac) - h / 2, self.width() - 4, h), QColor(color))
         cur = next((t for t in self.ticks if t[2] == self.current), None)
         if cur:  # the change shown now: ringed
-            p.setPen(QPen(QColor(ui.ACCENT), 1.5))
+            p.setPen(QPen(QColor(ui.color("accent")), 1.5))
             p.drawRect(QRectF(0.75, self._y(cur[0]) - 4, self.width() - 1.5, 8))
 
     def mousePressEvent(self, e):
@@ -526,17 +527,13 @@ class CompareTab(QWidget):
         self.new_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.new_view, self.old_view))
         self.old_view.scaled.connect(self._zoom_to)
         self.new_view.scaled.connect(self._zoom_to)
-        # one scrollbar in the middle, for both documents (each keeps its own only when they scroll apart)
+        # the changes' bar in the middle (a click on a tick selects it); each document keeps its own scrollbar too
         self.bar = ChangeBar()
         own = self.old_view.verticalScrollBar()
-        self.old_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.new_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         own.rangeChanged.connect(self._bar_range)
         own.valueChanged.connect(self._bar_follow)
         self.bar.valueChanged.connect(own.setValue)
         self.bar.picked.connect(self.go_to)
-        self.sync.toggled.connect(lambda on: self.new_view.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff if on else Qt.ScrollBarAsNeeded))
         self.old_label, self.new_label = QLabel(), QLabel()
         self.list = QListWidget(objectName="Changes")
         self.list.setItemDelegate(ui.HtmlDelegate(self.list))
@@ -552,7 +549,7 @@ class CompareTab(QWidget):
             label.setObjectName("Column")
             label.setStyleSheet(f"border-bottom: 3px solid {color};")
             v.addWidget(label)
-            v.addWidget(view)
+            v.addWidget(view, 1)  # the view takes the height, not the label (the bar's one is empty)
             return w
 
         side = QFrame(objectName="Panel")
@@ -591,7 +588,7 @@ class CompareTab(QWidget):
         split.addWidget(column(QLabel(), self.bar, ui.color("line")))
         split.addWidget(column(self.new_label, self.new_view, ui.GREEN))
         split.addWidget(side)
-        split.setSizes([520, 18, 520, 300])
+        split.setSizes([520, 22, 520, 300])
         split.setChildrenCollapsible(False)
 
         self.stack = QStackedWidget()

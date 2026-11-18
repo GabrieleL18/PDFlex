@@ -160,3 +160,5 @@ def test_buttons_of_another_program_kept(make_pdf, tmp_path):
     fields[0].rect = (20, 10, 90, 28)  # moved: its own script stays
     save_with_fields(src, fields, tmp_path / "out.pdf")
     assert open_pdf(tmp_path / "out.pdf")[0].first_widget.script == "this.print();"
+    save_with_fields(src, fields, tmp_path / "per_compilare.pdf", blank=True)  # "Per compilazione": no buttons
+    assert not list(open_pdf(tmp_path / "per_compilare.pdf")[0].widgets())
