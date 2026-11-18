@@ -3,8 +3,10 @@
 Only what is touched changes: the object is taken off the page with a redaction limited to its own kind
 (lines leave text alone, text leaves lines alone), whatever went with it is drawn back as it was, and the
 object is drawn again where it goes. Fields and buttons are annotations: redactions never touch them."""
+import os
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pymupdf
 
@@ -112,8 +114,8 @@ def _group_glyphs(glyphs: list[dict]) -> list[Obj]:
         r = pymupdf.Rect(group[0]["rect"])
         for d in group[1:]:
             r |= d["rect"]
-        objs.append(Obj("shape", tuple(r), "move", "Testo disegnato come forme: si sposta, non si modifica",
-                        {"drawings": group}))
+        objs.append(Obj("shape", tuple(r), "move", "Testo disegnato come forme: si sposta e si ridimensiona, "
+                        "le parole non si cambiano", {"drawings": group}))
     return objs
 
 
@@ -227,6 +229,47 @@ def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
 
 _BASE14 = {"": "helv", "TiRo": "tiro", "Cour": "cour"}  # fields.FONTS keys -> PyMuPDF's built-in fonts
 
+# fonts for text: family -> (regular, bold, italic, bold italic). The first three every PDF reader has; the
+# others are Windows's own, put in the PDF with only the letters used (a missing file: the regular one instead)
+_BUILT_IN = {"Helvetica": ("helv", "hebo", "heit", "hebi"), "Times": ("tiro", "tibo", "tiit", "tibi"),
+             "Courier": ("cour", "cobo", "coit", "cobi")}
+_WINDOWS = {
+    "Arial": ("arial", "arialbd", "ariali", "arialbi"), "Calibri": ("calibri", "calibrib", "calibrii", "calibriz"),
+    "Cambria": ("cambria", "cambriab", "cambriai", "cambriaz"),
+    "Consolas": ("consola", "consolab", "consolai", "consolaz"), "Garamond": ("gara", "garabd", "garait", "gara"),
+    "Georgia": ("georgia", "georgiab", "georgiai", "georgiaz"),
+    "Segoe UI": ("segoeui", "segoeuib", "segoeuii", "segoeuiz"),
+    "Tahoma": ("tahoma", "tahomabd", "tahoma", "tahomabd"), "Times New Roman": ("times", "timesbd", "timesi", "timesbi"),
+    "Trebuchet MS": ("trebuc", "trebucbd", "trebucit", "trebucbi"),
+    "Verdana": ("verdana", "verdanab", "verdanai", "verdanaz"),
+}
+
+
+def _font_file(name: str) -> str | None:
+    folder = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    return next((str(f) for f in (folder / f"{name}.ttf", folder / f"{name.upper()}.TTF") if f.exists()), None)
+
+
+FONTS = {**_BUILT_IN, **{fam: tuple(_font_file(f) or _font_file(v[0]) for f in v)
+                         for fam, v in _WINDOWS.items() if _font_file(v[0])}}
+
+
+def font_spec(family: str, bold: bool = False, italic: bool = False) -> str:
+    """What restyle(fontname=...) takes for this family and style."""
+    return FONTS[family][bold + 2 * italic]
+
+
+def font_style(page, obj: Obj) -> tuple[str | None, bool, bool]:
+    """A text's family among FONTS (None: one of its own), and whether it is bold, italic."""
+    span = obj.data["spans"][0]
+    name = span["font"].split("+")[-1].lower().replace(" ", "").replace("-", "")
+    bold = bool(span["flags"] & 16) or "bold" in name
+    italic = bool(span["flags"] & 2) or "italic" in name or "oblique" in name
+    for alias, fam in (("nimbussans", "helvetica"), ("nimbusroman", "times"), ("nimbusmono", "courier")):
+        name = name.replace(alias, fam)  # the built-in three, as PyMuPDF writes them (URW's look-alikes)
+    family = next((f for f in sorted(FONTS, key=len, reverse=True) if f.lower().replace(" ", "") in name), None)
+    return family, bold, italic
+
 
 def _drawings(o: Obj) -> list[dict]:
     return o.data.get("drawings") or ([o.data["drawing"]] if "drawing" in o.data else [])
@@ -328,7 +371,13 @@ def _own_font(page, o: Obj) -> pymupdf.Font | None:
 def _text_font(page, o: Obj, span: dict, override: str | None, text: str) -> pymupdf.Font:
     """The font new words are written with: the text's own one when it can write them, else the closest built-in."""
     if override is not None:
-        return pymupdf.Font(_BASE14.get(override, "helv"))
+        if override in _BASE14:
+            return pymupdf.Font(_BASE14[override])
+        if override.lower().endswith((".ttf", ".otf")):
+            font = pymupdf.Font(fontfile=override)
+            font.from_file = True  # _write puts in only the letters it uses
+            return font
+        return pymupdf.Font(override)
     font = _own_font(page, o)
     if font is not None:
         missing = missing_letters(page, o, text)
@@ -345,7 +394,15 @@ def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color) 
     tw = pymupdf.TextWriter(page.rect)
     for i, line in enumerate(text.split("\n")):
         tw.append(pymupdf.Point(origin) + (0, i * fontsize * 1.2), line, font=font, fontsize=fontsize)
-    tw.write_text(page, color=color)
+    if not getattr(font, "from_file", False):
+        tw.write_text(page, color=color)
+        return
+    # a font file goes in whole (Arial: 1 MB): written on a page of its own, cut down to the letters it uses,
+    # then shown on this one. Not subset_fonts on the PDF itself: it would cut the fonts of its fields too
+    tmp = pymupdf.open()
+    tw.write_text(tmp.new_page(width=page.rect.width, height=page.rect.height), color=color)
+    tmp.subset_fonts()
+    page.show_pdf_page(page.rect, tmp, 0)
 
 
 def _text_args(page, o: Obj, m: pymupdf.Matrix, style: dict, text: str | None) -> tuple:
@@ -528,6 +585,44 @@ def set_rect(page, obj: Obj, rect: tuple) -> None:
 
 def delete(page, objs: list[Obj]) -> None:
     _replace(page, objs, [(None, {}, None) for _ in objs])
+
+
+def duplicate(page, objs: list[Obj], dx: float, dy: float) -> None:
+    """A copy of each object, moved by dx, dy: a shape's copy goes just above it (see content.copy), else on top;
+    text is copied with its own glyphs when it can be, written again otherwise. Nothing on the page is taken off."""
+    for o in objs:
+        if o.state == "locked":
+            raise EditError(o.reason or "Questo oggetto non si può modificare.")
+    m = pymupdf.Matrix(1, 0, 0, 1, dx, dy)
+    before, images_before, words_before = page.get_cdrawings(), len(_image_info(page)), _words(page)
+    paths = [d for o in objs if o.kind not in ("text", "image") for d in _drawings(o)]
+    texts = [o for o in objs if o.kind == "text"]
+    src, clean = _text_source(page, texts) if texts else (None, [])
+    written = {id(o): _text_args(page, o, m, {}, None) for o in texts if not any(o is c for c in clean)}
+    clips = _clip_map(page.get_cdrawings(extended=True)) if paths else {}
+    if paths and not (all(_inside(_inked(d) * m, clips.get(d["seqno"], [])) for d in paths)
+                      and content.copy(page, [d["seqno"] for d in paths], m, before)):
+        shape = page.new_shape()
+        for d in sorted(paths, key=lambda d: d["seqno"]):
+            _draw_items(shape, d["items"], m)
+            _finish(shape, d, {})
+        shape.commit()
+    for o in objs:
+        if id(o) in written:
+            _write(page, *written[id(o)])
+        elif o.kind == "text":
+            page.show_pdf_page(_clip(o) * m, src, 0, clip=_clip(o), keep_proportion=False)
+        elif o.kind == "image":
+            page.insert_image(pymupdf.Rect(o.rect) * m, xref=o.data["xref"], keep_proportion=False)
+    if len(page.get_cdrawings()) != len(before) + len(paths):
+        raise EditError("PDFlex non è riuscito a copiare queste forme così come sono.")
+    if len(_image_info(page)) != images_before + sum(o.kind == "image" for o in objs):
+        raise EditError("PDFlex non è riuscito a copiare questa immagine.")
+    after = [w for w, _ in _words(page)]
+    for w, _ in words_before:
+        if w not in after:
+            raise EditError(f'Con questa copia sarebbe sparita la parola "{w}".')
+        after.remove(w)
 
 
 def restyle(page, obj: Obj, *, color=None, fill=None, width=None, fontsize=None, fontname=None) -> None:

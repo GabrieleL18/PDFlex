@@ -8,7 +8,7 @@ import pymupdf
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QColorDialog, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
+    QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -21,8 +21,37 @@ KINDS = {"line": "Linea", "rect": "Rettangolo", "shape": "Forma", "image": "Imma
 TOOLS = [("select", "Seleziona e sposta"), ("text", "Testo"), ("line", "Linea"), ("rect", "Rettangolo"),
          ("image", "Immagine")]
 HANDLE = 10  # px
+# a box's handles, as fractions of its width and height: corners and middles of the sides, clockwise from top left
+SPOTS = [(0, 0), (0.5, 0), (1, 0), (1, 0.5), (1, 1), (0.5, 1), (0, 1), (0, 0.5)]
+CURSORS = [Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor] * 2
 UNDO_MAX = 30  # copies of the document kept for Annulla
+AS_SHAPES = ": testo disegnato come forme, si sposta e si ridimensiona ma le parole non si cambiano"
+GLYPHS = {"line": "line", "rect": "rect", "shape": "rect", "image": "image", "text": "text"}
+COPY_OFFSET = 10  # pt: where a copy goes, right and down from the original
 HELVETICA = "Il carattere di questo testo non ha le lettere: {}. Uso Helvetica per questo testo?"
+
+
+def _kept(o: design.Obj, r: tuple) -> bool:
+    """o is the object that was at r before the change: same box, or a text starting where it did (another font
+    or size makes it wider or taller)."""
+    if all(abs(a - b) < 1.5 for a, b in zip(o.rect, r)):
+        return True
+    a, b = o.rect, r
+    return o.kind == "text" and abs(a[0] - b[0]) < 1.5 and (
+        b[1] <= (a[1] + a[3]) / 2 <= b[3] or a[1] <= (b[1] + b[3]) / 2 <= a[3])  # either one's middle in the other
+
+
+def _label(o: design.Obj) -> str:
+    """A row of the list of objects: what it is, and enough to tell it from the others."""
+    if o.kind == "text":
+        words = "".join(s["text"] for s in o.data["spans"]).strip()
+        text = f'Testo "{words[:40]}{"…" if len(words) > 40 else ""}"'
+    elif o.state == "move":
+        text = "Testo disegnato come forme"
+    else:
+        r = pymupdf.Rect(o.rect)
+        text = f"{KINDS[o.kind]}  {r.width:.0f} × {r.height:.0f} pt"
+    return ("🔒 " if o.state == "locked" else "") + text
 
 
 def _hex(rgb) -> str:
@@ -31,7 +60,7 @@ def _hex(rgb) -> str:
 
 class ObjItem(QGraphicsRectItem):
     """An invisible box over an object of the page: hover shows it, a click selects it, a drag moves it,
-    the handle (the end points, for a line) resizes it."""
+    the handles (on every corner and side; the two ends, for a line) resize it."""
 
     def __init__(self, obj: design.Obj, zoom: float, tab, rotation: pymupdf.Matrix = pymupdf.Identity,
                  big: bool = False):
@@ -53,18 +82,18 @@ class ObjItem(QGraphicsRectItem):
         else:
             self.setFlags(QGraphicsItem.ItemIsSelectable | (QGraphicsItem.GraphicsItemFlag(0) if big
                                                             else QGraphicsItem.ItemIsMovable))
-            self.setToolTip(KINDS[obj.kind] + ("" if obj.state == "edit" else ": testo disegnato come forme, "
-                                                                            "si sposta ma non si modifica"))
+            self.setToolTip(KINDS[obj.kind] + ("" if obj.state == "edit" else AS_SHAPES))
             if not big:
                 self.setCursor(Qt.SizeAllCursor)
 
     def handles(self) -> list[QPointF]:
-        """Local points the user can drag to resize: a line's ends, a box's bottom-right corner."""
-        if self.obj.state != "edit" or self.obj.kind == "text":
+        """Local points the user can drag to resize: a line's ends, a box's corners and sides."""
+        if self.obj.state == "locked" or self.obj.kind == "text":
             return []  # text grows from its size in the properties, not stretched
         if self.obj.kind == "line":
             return [QPointF(*self.obj.data[k]) * self.zoom - self.pos() for k in ("p1", "p2")]
-        return [self.rect().bottomRight()]
+        r = self.rect()
+        return [QPointF(r.left() + fx * r.width(), r.top() + fy * r.height()) for fx, fy in SPOTS]
 
     def paint(self, p, option, widget=None):
         p.setRenderHint(QPainter.Antialiasing)
@@ -104,9 +133,16 @@ class ObjItem(QGraphicsRectItem):
                 return i
         return None
 
+    def hoverMoveEvent(self, e):
+        i = self._handle_at(e.pos()) if self.isSelected() else None
+        if i is not None:
+            self.setCursor(Qt.CrossCursor if self.obj.kind == "line" else CURSORS[i])
+        elif self.obj.state != "locked":
+            self.setCursor(Qt.SizeAllCursor)
+
     def mousePressEvent(self, e):
         self.grab = self._handle_at(e.pos()) if self.isSelected() else None
-        self.start = self.pos()
+        self.start, self.start_rect = self.pos(), QRectF(self.rect())
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -116,8 +152,17 @@ class ObjItem(QGraphicsRectItem):
         if self.obj.kind == "line":  # the band shows the line from the other end to the mouse
             other = self.handles()[1 - self.grab]
             self.setRect(QRectF(other, e.pos()).normalized())
-        else:
-            self.setRect(0, 0, max(e.pos().x(), 4), max(e.pos().y(), 4))
+            return
+        r, (fx, fy), x, y = QRectF(self.start_rect), SPOTS[self.grab], e.pos().x(), e.pos().y()
+        if fx == 0:  # only the sides this handle is on move; the box never turns inside out
+            r.setLeft(min(x, r.right() - 4))
+        elif fx == 1:
+            r.setRight(max(x, r.left() + 4))
+        if fy == 0:
+            r.setTop(min(y, r.bottom() - 4))
+        elif fy == 1:
+            r.setBottom(max(y, r.top() + 4))
+        self.setRect(r)
 
     def mouseReleaseEvent(self, e):
         super().mouseReleaseEvent(e)
@@ -241,7 +286,14 @@ class DesignTab(QWidget):
             self.mode_buttons[mode] = b
         self.mode_buttons["select"].setChecked(True)
         pl.addWidget(tools)
-        pl.addStretch()
+        pl.addSpacing(10)
+        pl.addWidget(QLabel("Oggetti della pagina", objectName="H2"))
+        self.layers = QListWidget(objectName="Layers")  # every object, top to bottom: also the small or hidden ones
+        self.layers.setSelectionMode(QListWidget.ExtendedSelection)
+        self.layers.setIconSize(QSize(16, 16))
+        self.layers.itemSelectionChanged.connect(self._layers_picked)
+        self.rows: list[design.Obj] = []
+        pl.addWidget(self.layers, 1)
         keys = QLabel("Trascina sul vuoto o Ctrl+clic: più oggetti (quelli tutti dentro il riquadro, "
                       "anche uno sfondo grande)\nFrecce: sposta di 1 pt, Maiusc+frecce di 10\n"
                       "Maiusc mentre disegni: linea dritta\nCanc elimina\nCtrl+Z annulla, Ctrl+Y ripete",
@@ -349,6 +401,17 @@ class DesignTab(QWidget):
         self.p_size = QLineEdit()
         self.p_size.setValidator(QDoubleValidator(1, 400, 1, self.p_size))
         self.p_size.editingFinished.connect(self._size_edited)
+        self.p_font = QComboBox()
+        self.p_font.addItems(list(design.FONTS))
+        self.p_font.setPlaceholderText("Font del PDF")  # shown when the text's own font is none of these
+        self.p_font.activated.connect(self._font_edited)
+        self.p_bold = button("Grassetto", None, tip="Grassetto")
+        self.p_italic = button("Corsivo", None, tip="Corsivo")
+        self.p_looks = QHBoxLayout()
+        for b in (self.p_bold, self.p_italic):
+            b.setCheckable(True)
+            b.clicked.connect(self._font_edited)
+            self.p_looks.addWidget(b)
         self.p_width = QLineEdit()
         self.p_width.setValidator(QDoubleValidator(0, 100, 1, self.p_width))
         self.p_width.editingFinished.connect(self._width_edited)
@@ -358,13 +421,20 @@ class DesignTab(QWidget):
         self.p_fill.clicked.connect(lambda: self._pick("fill"))
         self.form.addRow("Testo", self.p_text)
         self.form.addRow("Dimensione (pt)", self.p_size)
+        self.form.addRow("Font", self.p_font)
+        self.form.addRow("Stile", self.p_looks)
         self.form.addRow("Spessore (pt)", self.p_width)
         self.form.addRow("Colore", self.p_color)
         self.form.addRow("Riempimento", self.p_fill)
         pr.addWidget(self.props)
+        self.b_dup = button("Duplica", "copy", tip="Una copia accanto all'originale (Ctrl+D)")
+        self.b_dup.clicked.connect(self.duplicate_selected)
         self.b_del = button("Elimina", "trash", "Danger")
         self.b_del.clicked.connect(self.delete_selected)
-        pr.addWidget(self.b_del)
+        acts = QHBoxLayout()
+        acts.addWidget(self.b_dup)
+        acts.addWidget(self.b_del)
+        pr.addLayout(acts)
         pr.addStretch()
         side = QScrollArea(objectName="PanelRight")
         side.setWidget(props)
@@ -383,6 +453,7 @@ class DesignTab(QWidget):
         root.addWidget(main)
 
         QShortcut(QKeySequence.Delete, self.view, self.delete_selected)
+        QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
         QShortcut(QKeySequence.Undo, self, self.undo)
@@ -491,8 +562,7 @@ class DesignTab(QWidget):
     def _load_page(self, keep: list[tuple] = ()):
         """Read the page's objects again; keep: rects (PDF points) of objects to select again afterwards."""
         self.objects, warnings = design.page_objects(self.doc[self.page_no]) if self.doc else ([], [])
-        self.selection = [o for o in self.objects if o.state != "locked" and any(
-            all(abs(a - b) < 1.5 for a, b in zip(o.rect, r)) for r in keep)]
+        self.selection = [o for o in self.objects if o.state != "locked" and any(_kept(o, r) for r in keep)]
         self.banner.setText(f"Pagina {self.page_no + 1}: " + " ".join(warnings) if warnings else "")
         self.banner.setVisible(bool(warnings))
         self.refresh()
@@ -551,6 +621,13 @@ class DesignTab(QWidget):
     def resize_object(self, obj: design.Obj, rect: tuple) -> None:
         box = pymupdf.Rect(rect).normalize() if obj.kind == "line" else pymupdf.Rect(rect)
         self._edit(design.set_rect, obj, rect, keep=[tuple(box)])
+
+    def duplicate_selected(self) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
+        objs = [o for o in self.selection if o.state != "locked"]
+        d = COPY_OFFSET
+        if objs:  # the copies are selected afterwards: they are where the originals are, moved by d
+            self._edit(design.duplicate, objs, d, d, keep=[tuple(pymupdf.Rect(o.rect) + (d, d, d, d)) for o in objs])
 
     def delete_selected(self) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
@@ -633,6 +710,14 @@ class DesignTab(QWidget):
         if o and o.kind == "text" and abs(size - o.data["spans"][0]["size"]) > 0.05:
             self._restyle(fontsize=size)
 
+    def _font_edited(self):
+        o = self.selection[0] if len(self.selection) == 1 else None
+        if not o or o.kind != "text":
+            return
+        family = self.p_font.currentText() if self.p_font.currentIndex() >= 0 else None
+        family = family or design.font_style(self.doc[self.page_no], o)[0] or "Helvetica"
+        self._restyle(fontname=design.font_spec(family, self.p_bold.isChecked(), self.p_italic.isChecked()))
+
     def _width_edited(self):
         try:
             width = float(self.p_width.text().replace(",", "."))
@@ -655,14 +740,14 @@ class DesignTab(QWidget):
         editable = one is not None and one.state == "edit"
         self.props.setVisible(editable)
         self.b_del.setVisible(bool(self.selection))
+        self.b_dup.setVisible(bool(self.selection))
         if not self.selection:
             self.kind_label.setText("Seleziona un oggetto sulla pagina, o scegli uno strumento per aggiungerne uno.")
             return
         if not one:
             self.kind_label.setText(f"{len(self.selection)} oggetti selezionati: trascinali o usa le frecce.")
             return
-        self.kind_label.setText(KINDS[one.kind] + ("" if editable else
-                                                   ": testo disegnato come forme, si sposta ma non si modifica"))
+        self.kind_label.setText(KINDS[one.kind] + ("" if editable else AS_SHAPES))
         if not editable:
             return
         line = one.kind == "line"
@@ -676,6 +761,8 @@ class DesignTab(QWidget):
         drawing = one.data.get("drawing", {})
         self.form.setRowVisible(self.p_text, text)
         self.form.setRowVisible(self.p_size, text)
+        self.form.setRowVisible(self.p_font, text)
+        self.form.setRowVisible(self.p_looks, text)
         self.form.setRowVisible(self.p_width, "drawing" in one.data and drawing.get("color") is not None)
         self.form.setRowVisible(self.p_color, text or "drawing" in one.data)
         self.form.setRowVisible(self.p_fill, one.kind in ("rect", "shape") and "drawing" in one.data)
@@ -684,6 +771,10 @@ class DesignTab(QWidget):
         if text:
             self.p_text.setText("".join(s["text"] for s in one.data["spans"]).replace("\xa0", " "))
             self.p_size.setText(f"{one.data['spans'][0]['size']:.1f}")
+            family, bold, italic = design.font_style(self.doc[self.page_no], one)
+            self.p_font.setCurrentIndex(self.p_font.findText(family) if family else -1)
+            self.p_bold.setChecked(bold)
+            self.p_italic.setChecked(italic)
             self._swatch(self.p_color, _hex(pymupdf.sRGB_to_pdf(one.data["spans"][0]["color"])))
         else:
             self.p_width.setText(f"{drawing.get('width') or 0:.1f}")
@@ -698,6 +789,45 @@ class DesignTab(QWidget):
     # ---- drawing the page
     def _selection_changed(self):
         self.selection = [i.obj for i in self.items if i.isSelected()]
+        self._mark_layers()
+        self._show_props()
+
+    def _fill_layers(self):
+        self.layers.blockSignals(True)
+        self.layers.clear()
+        self.rows = sorted(self.objects, key=lambda o: (round(o.rect[1]), o.rect[0]))  # as they are read
+        for o in self.rows:
+            it = QListWidgetItem(ui.icon(GLYPHS[o.kind]), _label(o))
+            if o.state == "locked":
+                it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
+                it.setToolTip(f"🔒 {o.reason}")
+            self.layers.addItem(it)
+        self.layers.blockSignals(False)
+        self._mark_layers()
+
+    def _mark_layers(self):
+        """The list shows the selection made on the page."""
+        self.layers.blockSignals(True)
+        first = None
+        for i, o in enumerate(self.rows):
+            on = any(o is s for s in self.selection)
+            self.layers.item(i).setSelected(on)
+            first = i if on and first is None else first
+        if first is not None:
+            self.layers.scrollToItem(self.layers.item(first))
+        self.layers.blockSignals(False)
+
+    def _layers_picked(self):
+        """Objects picked in the list: selected on the page, and shown."""
+        picked = [self.rows[self.layers.row(i)] for i in self.layers.selectedItems()]
+        self.scene.blockSignals(True)
+        for item in self.items:
+            item.setSelected(any(item.obj is o for o in picked))
+        self.scene.blockSignals(False)
+        self.selection = picked
+        shown = next((i for i in self.items if i.isSelected()), None)
+        if shown:
+            self.view.ensureVisible(shown, 60, 60)
         self._show_props()
 
     def refresh(self):
@@ -737,4 +867,5 @@ class DesignTab(QWidget):
             self.file_label.setText("")
             self.page_label.setText("")
         self.scene.blockSignals(False)
+        self._fill_layers()
         self._show_props()

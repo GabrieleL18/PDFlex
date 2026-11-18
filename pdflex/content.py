@@ -5,7 +5,7 @@ under everything, it vanished under a white sheet drawn first; put on top, it wo
 place it keeps its place, its clip, its colour space and its transparency. Only paths drawn by the page's own
 stream qualify (not those inside a form XObject); every change is checked against what MuPDF then draws."""
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pymupdf
 
@@ -201,6 +201,30 @@ def edit(page, edits: dict[int, tuple], before: list[dict] | None = None) -> boo
                 p, (m, _) = own[k["seqno"]], edits[k["seqno"]]
                 pts = [pt * p.ctm * m for op, nums in p.ops for pt in _points(op, nums)]  # turned: not its box
                 ok = ok and _same(_bbox([(b"l", [v for pt in pts for v in pt])]), d["rect"])
+    if not ok:
+        _write(page, data)
+    return ok
+
+
+def copy(page, seqnos: list[int], m: pymupdf.Matrix, before: list[dict] | None = None) -> bool:
+    """A copy of each path through m, drawn right after it: just above it, under what the page draws next.
+    False, with the page as it was, as for edit."""
+    before = page.get_cdrawings() if before is None else before
+    data, own = paths(page, before)
+    if not seqnos or any(s not in own for s in seqnos):
+        return False
+    pieces, pos = [], 0
+    for s in sorted(seqnos, key=lambda s: own[s].start):
+        p = own[s]  # the copy is no clip: it would cut what comes after
+        pieces += [data[pos:p.end], b"\n", _rewrite(replace(p, clip=b""), m, {})]
+        pos = p.end
+    _write(page, b"".join(pieces) + data[pos:])
+    after, want = page.get_cdrawings(), []
+    for d in before:
+        want.append((d["type"], pymupdf.Rect(d["rect"])))
+        if d["seqno"] in seqnos:
+            want.append((d["type"], pymupdf.Rect(d["rect"]) * m))
+    ok = len(after) == len(want) and all(d["type"] == t and _same(r, d["rect"]) for d, (t, r) in zip(after, want))
     if not ok:
         _write(page, data)
     return ok

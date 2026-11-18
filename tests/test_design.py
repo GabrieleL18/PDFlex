@@ -1,3 +1,5 @@
+import os
+
 import pymupdf
 import pytest
 
@@ -329,3 +331,54 @@ def test_shape_inside_a_form_still_moves():
     page.show_pdf_page(page.rect, src, 0)
     design.move(page, [_find(page, "rect", y=100)], 0, 50)
     assert _find(page, "rect", y=150) and _colour_at(page, (150, 175)) == (0, 0, 255)
+
+
+def test_duplicate_draws_the_copy_just_above_the_original():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+    page.draw_rect((100, 100, 200, 150), color=None, fill=(0, 0, 1))
+    page.draw_line((150, 130), (150, 220), color=(1, 0, 0), width=3)
+    design.duplicate(page, [_find(page, "rect", y=100)], 10, 10)
+    assert [d["fill"] or d["color"] for d in page.get_drawings()] == [(1, 1, 1), (0, 0, 1), (0, 0, 1), (1, 0, 0)]
+    assert _find(page, "rect", y=110).rect == pytest.approx((110, 110, 210, 160), abs=0.6)
+    assert _colour_at(page, (150, 155)) == (255, 0, 0)  # the line drawn after the box stays on top of the copy
+
+
+def test_duplicate_text_image_and_shape_together():
+    doc, page = _page()
+    page.insert_image((400, 400, 450, 450), stream=_png())
+    objs = design.page_objects(page)[0]
+    picked = [o for o in objs if o.kind in ("text", "image") or (o.kind == "line" and abs(o.data["p1"][1] - 104) < 1)]
+    design.duplicate(page, picked, 0, 200)
+    assert [w[4] for w in page.get_text("words")].count("Testo") == 2
+    assert len([o for o in design.page_objects(page)[0] if o.kind == "image"]) == 2
+    assert _find(page, "line", y=304) and _find(page, "line", y=104)
+    _fields_intact(page)
+
+
+def _span(page, word):
+    return next(s for b in page.get_text("dict")["blocks"] for line in b.get("lines", []) for s in line["spans"]
+                if word in s["text"])
+
+
+def test_font_family_bold_and_italic():
+    doc, page = _page()
+    text = _find(page, "text")
+    assert design.font_style(page, text) == ("Helvetica", False, False)
+    design.restyle(page, text, fontname=design.font_spec("Times", bold=True, italic=True))
+    assert design.font_style(page, _find(page, "text")) == ("Times", True, True)
+    assert "Testo vicino alla linea" in page.get_text()
+    _fields_intact(page)
+
+
+@pytest.mark.skipif(not os.path.exists("C:/Windows/Fonts/arial.ttf"), reason="Windows fonts")
+def test_windows_font_goes_in_small_and_the_text_moves_again():
+    doc, page = _page()
+    design.restyle(page, _find(page, "text"), fontname=design.font_spec("Arial"))
+    assert design.font_style(page, _find(page, "text"))[0] == "Arial"
+    assert len(doc.tobytes(garbage=3, deflate=True)) < 150_000  # only its letters, not the whole 1 MB font
+    design.move(page, [_find(page, "text")], 0, 300)
+    words = page.get_text("words")
+    assert [round(w[3]) for w in words if w[4] == "Testo"] == [round(_word_rect(page, "Testo").y1)]
+    assert _word_rect(page, "Testo").y0 > 350

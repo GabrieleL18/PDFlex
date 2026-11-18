@@ -178,3 +178,78 @@ def test_arrow_presses_make_one_change(qapp, tmp_path):
     assert _line_y(tab) == 107 and len(tab._undo) == 1
     tab.undo()
     assert _line_y(tab) == 104
+
+
+def _drag(v, start, end):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    QTest.mousePress(v.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(v.viewport(), QPoint((start.x() + end.x()) // 2, (start.y() + end.y()) // 2))
+    QTest.mouseMove(v.viewport(), end)
+    QTest.mouseRelease(v.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+
+
+def test_a_box_grows_from_every_corner_and_side(qapp, tmp_path):
+    doc = pymupdf.open()
+    doc.new_page().draw_rect((100, 100, 200, 160), color=(0, 0, 1), width=1)
+    path = tmp_path / "box.pdf"
+    doc.save(path)
+    tab = DesignTab()
+    tab.resize(1300, 900)
+    tab.show()
+    tab.open(str(path))
+    qapp.processEvents()
+    box = lambda: next(o for o in tab.objects if o.kind == "rect")
+    v, z = tab.view, tab.zoom
+    at = lambda x, y: v.mapFromScene(x * z, y * z)
+    tab.select([box()])
+    _drag(v, at(100, 100), at(80, 90))  # top-left corner
+    assert box().rect == pytest.approx((80, 90, 200, 160), abs=1)
+    tab.select([box()])
+    _drag(v, at(80, 125), at(60, 140))  # middle of the left side: only that side moves
+    assert box().rect == pytest.approx((60, 90, 200, 160), abs=1)
+    tab.select([box()])
+    _drag(v, at(130, 160), at(150, 180))  # middle of the bottom side
+    assert box().rect == pytest.approx((60, 90, 200, 180), abs=1)
+
+
+def test_object_list_and_page_select_together(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    rows = [tab.layers.item(i).text() for i in range(tab.layers.count())]
+    assert len(rows) == 2 and any("Testo vicino" in r for r in rows) and any(r.startswith("Linea") for r in rows)
+    line_row = next(i for i, r in enumerate(rows) if r.startswith("Linea"))
+    tab.layers.item(line_row).setSelected(True)  # picked in the list: selected on the page
+    assert [o.kind for o in tab.selection] == ["line"]
+    assert [i.obj.kind for i in tab.items if i.isSelected()] == ["line"]
+    tab.select([o for o in tab.objects if o.kind == "text"])  # picked on the page: selected in the list
+    assert [tab.layers.row(i) for i in tab.layers.selectedItems()] == [1 - line_row]
+
+
+def test_ctrl_d_duplicates_and_selects_the_copy(qapp, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    tab = _tab(tmp_path)
+    tab.show()
+    tab.activateWindow()
+    QTest.qWaitForWindowActive(tab)
+    tab.select([o for o in tab.objects if o.kind == "line"])
+    QTest.keyClick(tab.view, Qt.Key_D, Qt.ControlModifier)
+    lines = sorted(round(o.data["p1"][1]) for o in tab.objects if o.kind == "line")
+    assert lines == [104, 114] and [round(o.data["p1"][1]) for o in tab.selection] == [114]
+    tab.undo()
+    assert [o.kind for o in tab.objects].count("line") == 1
+
+
+def test_text_font_bold_and_italic_from_the_properties(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    tab.select([o for o in tab.objects if o.kind == "text"])
+    assert tab.p_font.currentText() == "Helvetica" and not tab.p_bold.isChecked()
+    tab.p_font.setCurrentIndex(tab.p_font.findText("Times"))
+    tab.p_font.activated.emit(tab.p_font.currentIndex())
+    tab.p_bold.click()
+    text = next(o for o in tab.objects if o.kind == "text")
+    assert design.font_style(tab.doc[0], text) == ("Times", True, False)
+    assert tab.p_font.currentText() == "Times" and tab.p_bold.isChecked()  # still selected, shown as it is now
+    tab.p_size.setText("40")
+    tab.p_size.editingFinished.emit()
+    assert len(tab.selection) == 1  # bigger, taller: still the one selected

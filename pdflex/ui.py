@@ -133,6 +133,10 @@ QListWidget#Changes {{ border: none; background: {surface}; outline: none; }}
 QListWidget#Changes::item {{ padding: 8px 6px; border-radius: 8px; margin: 1px 6px; }}
 QListWidget#Changes::item:selected {{ background: {accent_soft}; color: {ink}; }}
 QListWidget#Changes::item:hover:!selected {{ background: {row_hover}; }}
+QListWidget#Layers {{ border: 1px solid {line}; border-radius: 8px; background: {surface}; outline: none; }}
+QListWidget#Layers::item {{ padding: 3px 4px; border-radius: 5px; margin: 0 3px; }}
+QListWidget#Layers::item:selected {{ background: {accent_soft}; color: {ink}; }}
+QListWidget#Layers::item:hover:!selected {{ background: {row_hover}; }}
 QSplitter::handle {{ background: {line}; }}
 QSplitter::handle:horizontal {{ width: 4px; }}
 QSplitter::handle:vertical {{ height: 4px; }}
