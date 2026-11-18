@@ -62,7 +62,7 @@ def match_columns(field_names: list[str], headers: list[str]) -> dict[str, str]:
 def fill_form(doc, row: dict, mapping: dict) -> None:
     """Field values from row[mapping[field name]]; check boxes from words like "sì", "x", "1"."""
     for page in doc:
-        for w in page.widgets():
+        for w in list(page.widgets()):  # never change a widget while the page is still walking them
             col = mapping.get(w.field_name)
             if col is None:
                 continue

@@ -789,12 +789,14 @@ class EditorTab(QWidget):
         return True
 
     def export(self, path: str) -> None:
-        save_with_fields(self.path, self.fields, path, blank=True)
+        with ui.progress(self, "Preparo la copia per la compilazione...", len(self.fields)) as step:
+            save_with_fields(self.path, self.fields, path, blank=True, step=step)
 
     def save(self, path: str) -> None:
         self.doc.close()  # Windows will not replace a file that is still open
         try:
-            save_with_fields(self.path, self.fields, path)
+            with ui.progress(self, "Salvo il modulo...", len(self.fields)) as step:
+                save_with_fields(self.path, self.fields, path, step=step)
         except Exception:
             self.doc = open_pdf(self.path)
             raise
@@ -812,11 +814,12 @@ class EditorTab(QWidget):
             return
         self._props_edited()
         try:
-            doc = build_pdf(self.path, self.fields)
+            with ui.progress(self, "Preparo l'anteprima...", len(self.fields)) as step:
+                doc = build_pdf(self.path, self.fields, step=step)
+                fill_sample(doc)
         except ValueError as e:
             warn(self, str(e))
             return
-        fill_sample(doc)
         ui.show_doc(self, doc, "Anteprima con dati di esempio",
                     "Così vedrà il modulo chi lo compila. Valori iniziali e caselle sono come li hai impostati; "
                     "i campi vuoti hanno dati di esempio, che non vengono salvati.")
@@ -827,7 +830,8 @@ class EditorTab(QWidget):
             return
         self._props_edited()
         try:
-            doc = build_pdf(self.path, self.fields)
+            with ui.progress(self, "Preparo il modulo da compilare...", len(self.fields)) as step:
+                doc = build_pdf(self.path, self.fields, step=step)
         except ValueError as e:
             warn(self, str(e))
             return

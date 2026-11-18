@@ -119,6 +119,11 @@ QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11
 QLabel#Muted {{ color: {muted}; }}
 #DropZone {{ border: 2px dashed {border_strong}; border-radius: 16px; background: {surface}; }}
 #DropZone:hover, #DropZone[hot="true"] {{ border-color: {accent}; background: {hot_bg}; }}
+QMenu {{ background: {surface}; color: {ink}; border: 1px solid {border}; padding: 4px; }}
+QMenu::item {{ padding: 6px 20px 6px 8px; border-radius: 6px; }}
+QMenu::item:selected {{ background: {accent_soft}; color: {ink}; }}
+QMenu::item:disabled {{ color: {disabled}; }}
+QMenu::separator {{ height: 1px; background: {line}; margin: 4px 6px; }}
 QListWidget#Thumbs {{ border: none; border-right: 1px solid {line}; background: {desk}; outline: none; color: {muted}; }}
 QListWidget#Thumbs::item {{ padding: 4px; border-radius: 6px; border: 2px solid transparent; }}
 QListWidget#Thumbs::item:selected {{ background: {accent_soft}; border-color: {accent}; color: {ink}; }}

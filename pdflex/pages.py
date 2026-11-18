@@ -101,10 +101,10 @@ def split(refs: list[PageRef], out_dir, stem: str, extras: Extras | None = None)
 # ---------------------------------------------------------------- UI
 
 from PySide6.QtCore import QSize, Qt, Signal  # noqa: E402
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut, QTransform  # noqa: E402
+from PySide6.QtGui import QColor, QDrag, QIcon, QKeySequence, QPainter, QPen, QShortcut, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QListView,
-    QListWidget, QListWidgetItem, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem, QMenu, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from pdflex import ui  # noqa: E402
@@ -162,9 +162,17 @@ class PageGrid(QListWidget):
             item.setSelected(True)
 
     def startDrag(self, actions):
+        """Our own drag: Qt's, on Windows, takes the drop for a "move" and deletes the dragged pages
+        after dropEvent has already moved them. Here nothing happens after the drop."""
+        items = self.selectedItems()
+        if not items:
+            return
         self.dragging = True
         try:
-            QAbstractItemView.startDrag(self, actions)  # skip icon mode's own drag, which draws stray copies
+            drag = QDrag(self)
+            drag.setMimeData(self.mimeData(items))
+            drag.setPixmap(items[0].icon().pixmap(self.iconSize() * 0.6))
+            drag.exec(Qt.MoveAction)
         finally:
             self.dragging = False
             self.marker = None
@@ -274,6 +282,8 @@ class PagesTab(QWidget):
         self.grid.about_to_move.connect(self._push)
         self.grid.files_dropped.connect(self.add_files)
         self.grid.itemDoubleClicked.connect(self.show_page)
+        self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.grid.customContextMenuRequested.connect(self._menu)
         drop = ui.DropZone("Unisci, riordina o dividi PDF", "Trascina qui uno o più PDF o clicca per sceglierli", "batch")
         drop.picked.connect(lambda p: self.add_files([p]))
         empty = QWidget(objectName="Desk")
@@ -390,6 +400,44 @@ class PagesTab(QWidget):
             self.grid.takeItem(self.grid.row(item))
         self._buttons()
 
+    def _menu(self, pos):
+        item = self.grid.itemAt(pos)
+        if item:
+            self.page_menu(item).exec(self.grid.viewport().mapToGlobal(pos))
+
+    def page_menu(self, item) -> QMenu:
+        """Right click on a page: move it, look at it, delete it (the selection, if the page is in it)."""
+        if not item.isSelected():
+            self.grid.clearSelection()
+            item.setSelected(True)
+        rows = sorted(self.grid.row(i) for i in self.grid.selectedItems())
+        last = self.grid.count() - 1
+        m = QMenu(self)
+        for text, glyph, step, ok in (("Sposta indietro", "prev", -1, rows[0] > 0),
+                                      ("Sposta avanti", "next", 1, rows[-1] < last),
+                                      ("Sposta all'inizio", None, -last, rows[0] > 0),
+                                      ("Sposta alla fine", None, last, rows[-1] < last)):
+            a = m.addAction(ui.icon(glyph, ui.color("ink")) if glyph else QIcon(), text, lambda s=step: self.shift(s))
+            a.setEnabled(ok)
+        m.addSeparator()
+        m.addAction(ui.icon("eye", ui.color("ink")), "Vedi la pagina", lambda: self.show_page(item))
+        m.addAction(ui.icon("trash", ui.color("danger")), "Elimina", self.delete_selected)
+        m.aboutToHide.connect(m.deleteLater)
+        return m
+
+    def shift(self, step: int):
+        """The selected pages, together, `step` places earlier (negative) or later; stops at either end."""
+        rows = sorted(self.grid.row(i) for i in self.grid.selectedItems())
+        if not rows:
+            return
+        first = max(0, min(rows[0] + step, self.grid.count() - len(rows)))
+        if first == rows[0] and rows == list(range(rows[0], rows[0] + len(rows))):
+            return  # already there
+        self._push()
+        self.grid.move_selected(first if first < rows[0] else first + len(rows))
+        self.grid.scrollToItem(self.grid.selectedItems()[0])
+        self._buttons()
+
     def show_page(self, item):
         ref = item.data(Qt.UserRole)
         ui.show_doc(self, _build([ref]), f"{Path(ref.path).name}, pagina {ref.index + 1}")
@@ -431,8 +479,9 @@ class PagesTab(QWidget):
 
     def preview(self):
         if self.grid.count():
-            doc = _build(self.refs())
-            add_extras(doc, self.extras)
+            with ui.progress(self, "Preparo l'anteprima...", 0):  # a moving bar: compression can take a while
+                doc = _build(self.refs())
+                add_extras(doc, self.extras)
             ui.show_doc(self, doc, "Anteprima del PDF da salvare",
                         f"{self.grid.count()} pagine nell'ordine attuale. Ctrl+rotellina per ingrandire.")
 

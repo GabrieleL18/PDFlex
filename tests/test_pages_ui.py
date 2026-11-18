@@ -96,3 +96,31 @@ def test_ctrl_z_belongs_to_the_tab_on_screen(qapp, make_pdf, tmp_path):
     QTest.qWaitForWindowActive(w)
     QTest.keyClick(w.pages.grid, Qt.Key_Z, Qt.ControlModifier)
     assert w.pages.grid.count() == 0 and len(w.editor.fields) == 1
+
+
+def test_right_click_moves_shows_and_deletes(qapp, make_pdf, tmp_path):
+    from pdflex.pages import PagesTab
+    tab = PagesTab()
+    tab.resize(1000, 600)
+    tab.show()
+    tab.add_files([str(make_pdf(tmp_path, ["a", "b", "c", "d"]))])
+    g = tab.grid
+    order = lambda: [r.index for r in tab.refs()]
+    menu = tab.page_menu(g.item(1))  # right click on page 2: it alone is selected
+    shown = {a.text(): a for a in menu.actions() if a.text()}
+    assert [i.text() for i in g.selectedItems()] == [g.item(1).text()]
+    assert set(shown) == {"Sposta indietro", "Sposta avanti", "Sposta all'inizio", "Sposta alla fine",
+                          "Vedi la pagina", "Elimina"}
+    shown["Sposta avanti"].trigger()
+    assert order() == [0, 2, 1, 3]
+    shown["Sposta indietro"].trigger()
+    shown["Sposta indietro"].trigger()
+    assert order() == [1, 0, 2, 3]
+    tab.shift(-5)  # already first: nothing, not even an undo step
+    shown["Sposta alla fine"].trigger()
+    assert order() == [0, 2, 3, 1]
+    tab.undo()
+    assert order() == [1, 0, 2, 3]
+    delete = next(a for a in tab.page_menu(g.item(1)).actions() if a.text() == "Elimina")  # undo rebuilt the grid
+    delete.trigger()
+    assert order() == [1, 2, 3]

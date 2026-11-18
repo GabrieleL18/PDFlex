@@ -466,8 +466,55 @@ def _set_radio_state(doc, xref, old, new, checked, was_checked):
         doc.xref_set_key(parent, "V", "/Off")
 
 
-def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Document:
-    """The form with these fields. blank: for a program that fills it in later, fields empty and invisible."""
+class _FieldsArray:
+    """ponytail: PyMuPDF 2.1 looks for each new widget's name through the whole /AcroForm/Fields array
+    (O(n²): 80 s for 4,700 fields). While widgets are added the array is kept empty and its entries gathered
+    here; a radio button, which must find its group, and changes to existing fields see the whole array. Drop when PyMuPDF stops scanning."""
+
+    def __init__(self, doc):
+        self.doc, self.items, self.ok = doc, [], True
+
+    def _slot(self):
+        cat = self.doc.pdf_catalog()
+        t, v = self.doc.xref_get_key(cat, "AcroForm")
+        return (int(v.split()[0]), "Fields") if t == "xref" else (cat, "AcroForm/Fields")
+
+    def _take(self) -> list[str]:
+        if not self.ok:
+            return []
+        xref, key = self._slot()
+        t, v = self.doc.xref_get_key(xref, key)
+        if t == "xref":
+            v = self.doc.xref_object(int(v.split()[0]), compressed=True)
+        elif t != "array":
+            return []
+        refs = re.findall(r"\d+ \d+ R", v)
+        if re.sub(r"\d+ \d+ R|[\s\[\]]", "", v):  # something else than references: leave it all alone
+            self.ok = False
+            return []
+        self.doc.xref_set_key(xref, key, "[]")
+        return refs
+
+    def add(self, page, widget):
+        if widget.field_type == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
+            self.put_back()
+        elif not self.items:
+            self.items = self._take()
+        annot = page.add_widget(widget)
+        self.items += self._take()
+        return annot
+
+    def put_back(self):
+        if self.ok and self.items:
+            xref, key = self._slot()
+            have = self._take()  # anything added since
+            self.doc.xref_set_key(xref, key, "[" + " ".join(self.items + have) + "]")
+            self.items = []
+
+
+def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> pymupdf.Document:
+    """The form with these fields. blank: for a program that fills it in later, fields empty and invisible.
+    step(n): called as fields are placed, n of len(fields), for a progress bar."""
     _check_names(fields)
     if blank:  # push buttons go too: the program that fills it in has no use for "Popola test"
         fields = [dataclasses.replace(f, default="") for f in fields if f.kind != "button"]
@@ -480,12 +527,16 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Doc
                 page.delete_widget(w)
     placed = {}  # id(field) -> widget xref, for the tab order
     order = []
-    for f in fields:
+    array = _FieldsArray(doc)
+    for n, f in enumerate(fields):
+        if step and n % 25 == 0:
+            step(n)
         order.append(f)
         if f.xref:
             placed[id(f)] = f.xref
             if f == f.orig:
                 continue
+            array.put_back()  # existing fields are changed with the whole array in place, as PyMuPDF expects
             _update_widget(doc, f)
             if f.kind == "radio" and (f.value != f.orig.value or f.default != f.orig.default):
                 _set_radio_state(doc, f.xref, f.orig.value, clean_value(f.value), f.default == "1",
@@ -495,7 +546,7 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Doc
             doc[f.page].insert_image(pymupdf.Rect(f.rect), stream=base64.b64decode(f.image), keep_proportion=True)
             continue
         page = doc[f.page]
-        annot = page.add_widget(_new_widget(f))
+        annot = array.add(page, _new_widget(f))
         placed[id(f)] = annot.xref
         if f.align:  # PyMuPDF has no setting for it: written into the field, then the look redrawn
             _set_inherited(doc, dataclasses.replace(f, xref=annot.xref, parent=_xref_ref(doc, annot.xref, "Parent")),
@@ -505,6 +556,7 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Doc
             # ponytail: PyMuPDF 2.1 names every new radio "on" state /None, so all buttons in a group
             # act as one. Rename the state to the button's value; drop when PyMuPDF fixes it.
             _set_radio_state(doc, annot.xref, "None", clean_value(f.value), f.default == "1", False)
+    array.put_back()
     _apply_tab_order(doc, [(f.page, placed[id(f)]) for f in order if id(f) in placed])
     if blank:
         _hide_fields(doc)
@@ -609,7 +661,7 @@ def fill_sample(doc: pymupdf.Document) -> None:
     Check boxes and choices stay as they start (their initial value): ticking them all
     made the preview contradict what was set in "Selezionata all'apertura"."""
     for page in doc:
-        for w in page.widgets():
+        for w in list(page.widgets()):  # never change a widget while the page is still walking them
             t = w.field_type
             if t == pymupdf.PDF_WIDGET_TYPE_TEXT and not w.field_value:
                 multiline = bool(w.field_flags & pymupdf.PDF_TX_FIELD_IS_MULTILINE)
@@ -659,8 +711,9 @@ def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dic
     return out
 
 
-def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | Path, blank: bool = False) -> None:
-    doc = build_pdf(src_path, fields, blank)
+def save_with_fields(src_path: str | Path, fields: list[Field], out_path: str | Path, blank: bool = False,
+                     step=None) -> None:
+    doc = build_pdf(src_path, fields, blank, step)
     data = doc.tobytes(garbage=3, deflate=True)
     doc.close()
     write_atomic(out_path, data)  # the original is untouched until the new file is complete
