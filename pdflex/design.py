@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
+from . import content
+
 THIN = 2.0  # pt: a filled box thinner than this is a line
 GLYPH = 18.0  # pt: filled shapes up to this size, side by side, are letters drawn as shapes
 GLYPH_GAP = 6.0  # pt between two letters of the same word / line
@@ -39,8 +41,8 @@ def _box(item) -> pymupdf.Rect | None:
     """The rectangle a path item draws, if it is one: 're', an axis-aligned 'qu'."""
     if item[0] == "re":
         return pymupdf.Rect(item[1])
-    if item[0] == "qu" and item[1].is_rectangular:
-        return item[1].rect
+    if item[0] == "qu" and pymupdf.Quad(item[1]).is_rectangular:
+        return pymupdf.Quad(item[1]).rect
     return None
 
 
@@ -54,6 +56,20 @@ def _closed_box(items) -> pymupdf.Rect | None:
     if not all(abs(a.x - b.x) < 0.5 or abs(a.y - b.y) < 0.5 for a, b in zip(pts, pts[1:])):
         return None
     return pymupdf.Rect(min(p.x for p in pts), min(p.y for p in pts), max(p.x for p in pts), max(p.y for p in pts))
+
+
+_STYLE = ("fill", "color", "width", "dashes", "lineCap", "lineJoin", "closePath", "even_odd", "fill_opacity",
+          "stroke_opacity")
+
+
+def _full(d: dict) -> dict:
+    """A path of get_cdrawings (plain tuples, 5 times faster to read) as get_drawings gives it: points and
+    rectangles, every style key. Only for the paths that become objects of their own: not for every letter."""
+    P = pymupdf.Point
+    conv = {"l": lambda i: (i[0], P(i[1]), P(i[2])), "re": lambda i: (i[0], pymupdf.Rect(i[1]), *i[2:]),
+            "qu": lambda i: (i[0], pymupdf.Quad(i[1])), "c": lambda i: (i[0], *map(P, i[1:5]))}
+    return {**{k: None for k in _STYLE}, **d, "rect": pymupdf.Rect(d["rect"]),
+            "items": [conv.get(i[0], tuple)(i) for i in d["items"]]}
 
 
 def _shape(d) -> Obj:
@@ -82,11 +98,11 @@ def _glyph(d) -> bool:
 def _group_glyphs(glyphs: list[dict]) -> list[Obj]:
     """Letters drawn as shapes, joined into words / lines: one object each, moved as a whole."""
     out: list[list[dict]] = []
-    for d in sorted(glyphs, key=lambda d: (round(pymupdf.Rect(d["rect"]).y1), d["rect"][0])):
-        r = pymupdf.Rect(d["rect"])
+    for d in sorted(glyphs, key=lambda d: (round(d["rect"][3]), d["rect"][0])):
+        x0, y0, _, y1 = d["rect"]
         for group in out:
-            last = pymupdf.Rect(group[-1]["rect"])
-            if abs((last.y0 + last.y1) / 2 - (r.y0 + r.y1) / 2) <= 3 and -1 <= r.x0 - last.x1 <= GLYPH_GAP:
+            lx0, ly0, lx1, ly1 = group[-1]["rect"]  # plain numbers: hundreds of letters times their groups
+            if abs((ly0 + ly1) / 2 - (y0 + y1) / 2) <= 3 and -1 <= x0 - lx1 <= GLYPH_GAP:
                 group.append(d)
                 break
         else:
@@ -101,15 +117,39 @@ def _group_glyphs(glyphs: list[dict]) -> list[Obj]:
     return objs
 
 
-def _inside_clip(d, clips: list[pymupdf.Rect]) -> bool:
-    r = pymupdf.Rect(d["rect"])
+def _inside(r: pymupdf.Rect, clips: list[pymupdf.Rect]) -> bool:
     return all(c.contains(r) or (r.is_empty and c.contains(r.tl) and c.contains(r.br)) for c in clips)
 
 
+def _clip_map(drawings: list[dict]) -> dict[int, list[pymupdf.Rect]]:
+    """The clips each path is drawn under, by sequence number (drawings: page.get_cdrawings(extended=True))."""
+    out, clips = {}, {}  # level -> scissor of the clip open at that level
+    for d in drawings:
+        level = d.get("level", 0)
+        for k in [k for k in clips if k >= level]:
+            del clips[k]
+        if d["type"] == "clip":
+            clips[level] = pymupdf.Rect(d["scissor"])
+        elif d["type"] != "group":
+            out[d["seqno"]] = list(clips.values())
+    return out
+
+
 def _annot_rects(page) -> list[pymupdf.Rect]:
-    return [pymupdf.Rect(a.rect) for a in page.annots()] + [pymupdf.Rect(w.rect) for w in page.widgets()]
+    """Where the fields, buttons and notes are. Read from their /Rect: loading 490 fields as widgets takes 0.5 s."""
+    doc, m, out = page.parent, page.transformation_matrix, []
+    for xref, kind, _ in page.annot_xrefs():
+        if kind in (pymupdf.PDF_ANNOT_LINK, pymupdf.PDF_ANNOT_POPUP):
+            continue
+        typ, val = doc.xref_get_key(xref, "Rect")
+        if typ == "array":
+            out.append((pymupdf.Rect([float(v) for v in val.strip("[]").split()]) * m).normalize())
+    return out
 
 
+# Only page_objects reads the paths in full (get_drawings): everywhere else the raw form (get_cdrawings, plain
+# tuples) is enough and 5 times faster, which on a page of hundreds of paths is the difference between a move
+# that keeps up with the arrows and one that takes seconds.
 def _key(d: dict) -> tuple:
     return (d["type"], *(round(v, 1) for v in d["rect"]), d.get("fill"), d.get("color"))
 
@@ -123,38 +163,31 @@ def _stuck(page) -> set[tuple]:
     sp.add_redact_annot(sp.rect)
     sp.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
                         text=pymupdf.PDF_REDACT_TEXT_NONE)
-    return {_key(d) for d in sp.get_drawings()}
+    return {_key(d) for d in sp.get_cdrawings()}
 
 
 def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
     """The page's objects in drawing order, and the lines for the warning banner."""
     objs, glyphs, locked = [], [], 0
-    clips: dict[int, pymupdf.Rect] = {}  # level -> scissor of the clip open at that level
-    drawings = page.get_drawings(extended=True)
-    stuck = _stuck(page) if any(d["type"] not in ("clip", "group") for d in drawings) else set()
-    for d in drawings:
-        level = d.get("level", 0)
-        for k in [k for k in clips if k >= level]:
-            del clips[k]
-        if d["type"] == "clip":
-            clips[level] = pymupdf.Rect(d["scissor"])
-            continue
-        if d["type"] == "group":
-            continue
-        if not _inside_clip(d, list(clips.values())):
-            o = _shape(d)
+    clips = _clip_map(page.get_cdrawings(extended=True))  # extended mode for the clips only: it splits a filled
+    plain = page.get_cdrawings()  # and stroked path in two, where plain mode gives one ("fs": one object)
+    own = content.paths(page, plain)[1]  # changed where they are drawn: the redaction is not needed for them
+    stuck = _stuck(page) if any(d["seqno"] not in own for d in plain) else set()
+    for d in plain:
+        if not _inside(pymupdf.Rect(d["rect"]), clips.get(d["seqno"], [])):
+            o = _shape(_full(d))
             o.state, o.reason = "locked", "Ritagliato: resta com'è"
             objs.append(o)
             locked += 1
-        elif _key(d) in stuck:
-            o = _shape(d)
+        elif _key(d) in stuck and d["seqno"] not in own:
+            o = _shape(_full(d))
             o.state, o.reason = "locked", "PDFlex non riesce a staccarlo dalla pagina: resta com'è"
             objs.append(o)
             locked += 1
         elif _glyph(d):
-            glyphs.append(d)
+            glyphs.append(d)  # as they are: a letter is only moved, its points stay plain numbers
         else:
-            objs.append(_shape(d))
+            objs.append(_shape(_full(d)))
     objs += _group_glyphs(glyphs)
     for info in _image_info(page):
         o = Obj("image", tuple(pymupdf.Rect(info["bbox"])), data={"xref": info["xref"], "transform": info["transform"]})
@@ -217,7 +250,8 @@ def _inked(d: dict) -> pymupdf.Rect:
     return pymupdf.Rect(d["rect"]) + (-hw, -hw, hw, hw)
 
 
-MARGINS = (0.5, 1.5, 3, 6)  # pt around a shape, tried in turn until the redaction takes it
+MARGINS = (0.5, 1.5, 3, 6, 12, 25, 50)  # pt around a shape, tried in turn until the redaction takes it
+# (MuPDF wants up to 25 pt for a path inside nested forms)
 
 
 def _redact_shapes(page, areas: list[pymupdf.Rect]) -> None:
@@ -232,16 +266,24 @@ def _removed(before: list[dict], after: list[dict]) -> Counter:
     return Counter(map(_key, before)) - Counter(map(_key, after))
 
 
-def _shape_margin(page, areas: list[pymupdf.Rect], targets: Counter) -> float:
+def _shape_margin(page, areas: list[pymupdf.Rect], targets: Counter, before: list[dict]) -> float:
     """How much room the redaction needs around these shapes to take them all: MuPDF measures a path its own
-    way (curve handles, sharp corners), so it is tried on a copy of the page rather than guessed."""
-    before = page.get_drawings()
+    way (curve handles, sharp corners), so it is tried on a copy of the page rather than guessed. A margin
+    that cuts a neighbouring path only in part (leaving pieces of it) is no good either."""
+    taken = cut = False
     for m in MARGINS:
         src = pymupdf.open()
         src.insert_pdf(page.parent, from_page=page.number, to_page=page.number, annots=False)
         _redact_shapes(src[0], [a + (-m, -m, m, m) for a in areas])
-        if not targets - _removed(before, src[0].get_drawings()):
-            return m
+        after = src[0].get_cdrawings()
+        if not targets - _removed(before, after):
+            taken = True
+            if not Counter(map(_key, after)) - Counter(map(_key, before)):  # no piece of a path left behind
+                return m
+            cut = True
+    if taken and cut:
+        raise EditError("Questa forma è intrecciata con un'altra grande forma della pagina: PDFlex non riesce a "
+                        "modificarla da sola, e resta com'è.")
     raise EditError("PDFlex non riesce a staccare questa forma dalla pagina: resta com'è.")
 
 
@@ -253,15 +295,16 @@ def _mapping(old: pymupdf.Rect, new: pymupdf.Rect) -> pymupdf.Matrix:
 
 
 def _draw_items(shape, items, m: pymupdf.Matrix) -> None:
+    P = pymupdf.Point  # the raw form gives plain tuples
     for it in items:
         if it[0] == "l":
-            shape.draw_line(it[1] * m, it[2] * m)
+            shape.draw_line(P(it[1]) * m, P(it[2]) * m)
         elif it[0] == "re":
             shape.draw_rect(pymupdf.Rect(it[1]) * m)
         elif it[0] == "qu":
-            shape.draw_quad(it[1] * m)
+            shape.draw_quad(pymupdf.Quad(it[1]) * m)
         elif it[0] == "c":
-            shape.draw_bezier(it[1] * m, it[2] * m, it[3] * m, it[4] * m)
+            shape.draw_bezier(P(it[1]) * m, P(it[2]) * m, P(it[3]) * m, P(it[4]) * m)
         else:
             raise EditError("Una forma contiene un tratto che PDFlex non sa ridisegnare.")
 
@@ -344,7 +387,7 @@ def _text_source(page, keep: list[Obj]) -> tuple[pymupdf.Document, list[Obj]]:
         sp.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                             text=pymupdf.PDF_REDACT_TEXT_REMOVE)
     # what the copy could not shed (images in nested forms, bits of other lines) would show twice
-    left = [pymupdf.Rect(i["bbox"]) for i in _image_info(sp)] + [d["rect"] for d in sp.get_drawings()]
+    left = [pymupdf.Rect(i["bbox"]) for i in _image_info(sp)] + [pymupdf.Rect(d["rect"]) for d in sp.get_cdrawings()]
     copy_words, page_words = _words(sp), _words(page)
     clean = [o for o in keep if not any(r.intersects(_clip(o)) for r in left)
              and sorted(w for w, r in copy_words if r.intersects(_clip(o)))
@@ -360,6 +403,17 @@ def _words(page) -> list[tuple]:
     return [(w[4], pymupdf.Rect(w[:4])) for w in page.get_text("words")]
 
 
+def _edit_in_place(page, shapes: list[tuple], before: list[dict]) -> bool:
+    """Shapes changed right where the page draws them (see content.py): their place among the other drawings
+    stays. Not when one would leave its clip: there it would be cut, drawn again it is whole."""
+    clips = _clip_map(page.get_cdrawings(extended=True))
+    for o, m, _ in shapes:
+        for d in _drawings(o):
+            if m is not None and not _inside(_inked(d) * m, clips.get(d["seqno"], [])):
+                return False
+    return content.edit(page, {d["seqno"]: (m, style) for o, m, style in shapes for d in _drawings(o)}, before)
+
+
 def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
     """Take objs off the page and draw each again through its matrix (None: deleted), with its style overrides
     and, for text, new words: new[i] = (matrix, style, text). What the redactions took with them is drawn back
@@ -367,13 +421,17 @@ def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
     for o in objs:
         if o.state == "locked":
             raise EditError(o.reason or "Questo oggetto non si può modificare.")
-    before = page.get_drawings()
+    before = page.get_cdrawings()
     targets = Counter(_key(d) for o in objs for d in _drawings(o))
+    shapes = [(o, m, style) for o, (m, style, _) in zip(objs, new) if o.kind not in ("text", "image")]
+    in_place = bool(shapes) and _edit_in_place(page, shapes, before)  # else taken off and drawn again
     areas = {"shape": [], "text": [], "image": []}
     for o in objs:
+        if in_place and o.kind not in ("text", "image"):
+            continue
         areas["text" if o.kind == "text" else "image" if o.kind == "image" else "shape"].append(_area(o))
     if areas["shape"]:
-        m = _shape_margin(page, areas["shape"], targets)
+        m = _shape_margin(page, areas["shape"], targets, before)
         areas["shape"] = [a + (-m, -m, m, m) for a in areas["shape"]]
     copied = [o for o, (m, style, text) in zip(objs, new)
               if o.kind == "text" and m is not None and text is None and not {"color", "fontname"} & style.keys()]
@@ -385,9 +443,10 @@ def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
     collateral = []
     if areas["shape"]:  # what went with the shapes is drawn back as it was: seen, not guessed
         _redact_shapes(page, areas["shape"])
-        extra = _removed(before, page.get_drawings()) - targets
+        extra = _removed(before, page.get_cdrawings()) - targets
+        own = {t["seqno"] for o in objs for t in _drawings(o)}
         for d in before:
-            if extra[_key(d)] > 0 and not any(d is t for o in objs for t in _drawings(o)):
+            if extra[_key(d)] > 0 and d["seqno"] not in own:
                 extra[_key(d)] -= 1
                 collateral.append(d)
     for kind in ("text", "image"):
@@ -399,10 +458,11 @@ def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
             images=pymupdf.PDF_REDACT_IMAGE_REMOVE if kind == "image" else pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
             text=pymupdf.PDF_REDACT_TEXT_REMOVE if kind == "text" else pymupdf.PDF_REDACT_TEXT_NONE)
-    # shapes go back underneath everything, in their original order: a moved background never covers the text
+    # shapes not changed in place go back underneath everything, in their original order: a moved background
+    # never covers the text (but a sheet drawn before them covers them: in place is tried first)
     redraw = [(d, pymupdf.Identity, {}) for d in collateral]
     for o, (m, style, _) in zip(objs, new):
-        if m is not None:
+        if m is not None and not (in_place and o.kind not in ("text", "image")):
             redraw += [(d, m, style) for d in _drawings(o)]
     redraw.sort(key=lambda t: t[0]["seqno"])
     if redraw:
@@ -419,7 +479,7 @@ def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
         elif m is not None and o.kind == "image":
             page.insert_image(pymupdf.Rect(o.rect) * m, xref=o.data["xref"], keep_proportion=False)
     gone = sum(len(_drawings(o)) for o, (m, _, _) in zip(objs, new) if m is None)
-    if len(page.get_drawings()) != len(before) - gone:
+    if len(page.get_cdrawings()) != len(before) - gone:
         raise EditError("Con questa modifica sarebbe cambiata anche un'altra forma della pagina.")
     gone = sum(1 for o, (m, _, _) in zip(objs, new) if o.kind == "image" and m is None)
     if len(_image_info(page)) != images_before - gone:

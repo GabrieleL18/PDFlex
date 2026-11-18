@@ -117,3 +117,64 @@ def test_text_change_asks_for_helvetica_when_letters_are_missing(qapp, tmp_path,
     tab.select([o for o in tab.objects if o.kind == "text"])
     tab.set_text("Totale €")
     assert "Totale €" in tab.doc[0].get_text()
+
+
+def test_undo_goes_back_to_the_page_it_changed(qapp, tmp_path):
+    doc = pymupdf.open()
+    for y in (100, 200):
+        doc.new_page().draw_line((72, y), (300, y))
+    path = tmp_path / "two.pdf"
+    doc.save(path)
+    tab = DesignTab()
+    tab.open(str(path))
+    tab.select(tab.objects)
+    tab.move_selected(0, 30)
+    tab.go_page(1)
+    tab.undo()
+    assert tab.page_no == 0 and _line_y(tab) == 100
+    tab.go_page(1)
+    tab.redo()
+    assert tab.page_no == 0 and _line_y(tab) == 130
+
+
+def test_drag_on_a_page_size_background_draws_the_selection_box(qapp, tmp_path):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(page.rect + (10, 10, -10, -10), color=None, fill=(0.9, 0.9, 1))  # the background
+    page.draw_line((100, 300), (200, 300))
+    path = tmp_path / "bg.pdf"
+    doc.save(path)
+    tab = DesignTab()
+    tab.resize(1300, 900)
+    tab.show()
+    tab.open(str(path))
+    qapp.processEvents()
+    v, z = tab.view, tab.zoom
+    start = v.mapFromScene(80 * z, 280 * z)
+    end = v.mapFromScene(220 * z, 320 * z)
+    QTest.mousePress(v.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(v.viewport(), QPoint((start.x() + end.x()) // 2, (start.y() + end.y()) // 2))
+    QTest.mouseMove(v.viewport(), end)
+    QTest.mouseRelease(v.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+    assert [o.kind for o in tab.selection] == ["line"]
+    assert next(o for o in tab.objects if o.kind == "rect").rect[1] == pytest.approx(10)  # not moved
+
+
+def test_arrow_presses_make_one_change(qapp, tmp_path):
+    # each change of a big page takes a moment: held down, the arrow would queue them up. The selection moves on
+    # screen at once, and the page changes once, when the presses stop.
+    from PySide6.QtTest import QTest
+    from PySide6.QtCore import Qt
+    tab = _tab(tmp_path)
+    tab.select([o for o in tab.objects if o.kind == "line"])
+    item = next(i for i in tab.items if i.isSelected())
+    y = item.pos().y()
+    for _ in range(3):
+        QTest.keyClick(tab.view, Qt.Key_Down)
+    assert _line_y(tab) == 104 and item.pos().y() - y == pytest.approx(3 * tab.zoom)  # shown, not made yet
+    QTest.qWait(600)
+    assert _line_y(tab) == 107 and len(tab._undo) == 1
+    tab.undo()
+    assert _line_y(tab) == 104

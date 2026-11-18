@@ -248,3 +248,84 @@ def test_add_components_on_top():
     assert kinds.count("rect") >= 2 and "image" in kinds and "Nuovo" in page.get_text()
     assert _dark(page, _word_rect(page, "Nuovo"))  # on top of the yellow box, not under it
     _fields_intact(page)
+
+
+def test_filled_and_stroked_box_is_one_object_and_moves(monkeypatch):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect((100, 100, 200, 150), color=(0, 0, 0), fill=(1, 1, 0), width=1.4)
+    real = page.get_cdrawings
+
+    def split(extended=False):  # as in the TFR PDF: extended mode gives the fill and the stroke apart
+        if not extended:
+            return real()
+        (fs,) = real()
+        return [{**fs, "type": "f", "color": None, "level": 0}, {**fs, "type": "s", "fill": None, "seqno": 99,
+                                                                   "level": 0}]
+    monkeypatch.setattr(page, "get_cdrawings", split)
+    boxes = [o for o in design.page_objects(page)[0] if o.kind == "rect"]
+    assert len(boxes) == 1 and boxes[0].data["drawing"]["type"] == "fs"
+    monkeypatch.undo()
+    design.move(page, boxes, 0, 20)
+    moved = _find(page, "rect")
+    assert moved.rect[1] == pytest.approx(120, abs=1) and moved.data["drawing"]["fill"] == pytest.approx((1, 1, 0))
+
+
+def test_a_move_never_reads_the_page_drawings_the_slow_way(monkeypatch):
+    # PyMuPDF's get_drawings turns every point into an object: on a busta paga (772 paths, 490 fields) each call
+    # cost 0.4 s, and a move made 8 of them. The raw form (get_cdrawings) is read instead, and converted only for
+    # the paths that become objects.
+    doc, page = _page()
+    calls = []
+    real = pymupdf.Page.get_drawings
+    monkeypatch.setattr(pymupdf.Page, "get_drawings", lambda self, *a, **k: calls.append(1) or real(self, *a, **k))
+    objs, _ = design.page_objects(page)
+    design.move(page, [o for o in objs if o.kind == "rect"], 10, 0)
+    assert calls == []
+    assert _find(page, "rect").rect[0] == pytest.approx(70, abs=0.6) and _find(page, "line", y=140)
+    _fields_intact(page)
+
+
+def _colour_at(page, point) -> tuple:
+    pix = page.get_pixmap(clip=pymupdf.Rect(point, point) + (-0.5, -0.5, 0.5, 0.5), dpi=144, annots=False)
+    return pix.pixel(pix.width // 2, pix.height // 2)
+
+
+def test_moved_shape_keeps_its_place_among_the_drawings():
+    # As in the busta paga: a white sheet drawn first, a band on it, a line drawn after the band. The band moved
+    # used to go back under everything, the white sheet too: it vanished. It stays between the two instead.
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+    page.draw_rect((100, 100, 200, 150), color=None, fill=(0, 0, 1))
+    page.draw_line((150, 160), (150, 220), color=(1, 0, 0), width=3)
+    band = _find(page, "rect", y=100)
+    design.move(page, [band], 0, 50)
+    assert _colour_at(page, (120, 175)) == (0, 0, 255)  # the band shows at its new place
+    assert _colour_at(page, (150, 175)) == (255, 0, 0)  # and the line drawn after it is still on top
+    assert _colour_at(page, (120, 125)) == (255, 255, 255)  # nothing left where it was
+    assert [d["fill"] or d["color"] for d in page.get_drawings()] == [(1, 1, 1), (0, 0, 1), (1, 0, 0)]
+
+
+def test_restyle_and_delete_where_it_is_drawn():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+    page.draw_rect((100, 100, 200, 150), color=(0, 0, 0), fill=None, width=1)
+    design.restyle(page, _find(page, "rect", y=100), fill=(0, 1, 0), width=4)
+    box = _find(page, "rect", y=100)
+    assert box.data["drawing"]["fill"] == pytest.approx((0, 1, 0)) and box.data["drawing"]["width"] == pytest.approx(4)
+    assert _colour_at(page, (150, 125)) == (0, 255, 0)
+    design.delete(page, [box])
+    assert len(page.get_drawings()) == 1 and _colour_at(page, (150, 125)) == (255, 255, 255)
+
+
+def test_shape_inside_a_form_still_moves():
+    # paths inside a form XObject (here: a page shown on another) cannot be edited where they are: the old way
+    src = pymupdf.open()
+    src.new_page().draw_rect((100, 100, 200, 150), color=None, fill=(0, 0, 1))
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.show_pdf_page(page.rect, src, 0)
+    design.move(page, [_find(page, "rect", y=100)], 0, 50)
+    assert _find(page, "rect", y=150) and _colour_at(page, (150, 175)) == (0, 0, 255)

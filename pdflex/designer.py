@@ -5,7 +5,7 @@ and never touched, so they are all still there in the saved file."""
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup, QColorDialog, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
@@ -41,18 +41,22 @@ class ObjItem(QGraphicsRectItem):
         self.setPos(r.x0, r.y0)
         self.obj, self.tab, self.zoom, self.grab = obj, tab, zoom, None
         self.hover = False
-        self.setAcceptHoverEvents(True)
+        # a background as big as the page lets clicks through: a drag "on the empty page" draws the selection
+        # box instead of moving it; it is selected with a box drawn all around it
+        self.setAcceptHoverEvents(not big)
+        if big:
+            self.setAcceptedMouseButtons(Qt.NoButton)
         if obj.state == "locked":
             self.setToolTip(f"🔒 {obj.reason}")
-            self.setCursor(Qt.ForbiddenCursor)
+            if not big:
+                self.setCursor(Qt.ForbiddenCursor)
         else:
-            # a background as big as the page would move with every drag "on the empty page":
-            # it is selected with a click and moved with the arrows or the properties instead
             self.setFlags(QGraphicsItem.ItemIsSelectable | (QGraphicsItem.GraphicsItemFlag(0) if big
                                                             else QGraphicsItem.ItemIsMovable))
             self.setToolTip(KINDS[obj.kind] + ("" if obj.state == "edit" else ": testo disegnato come forme, "
                                                                             "si sposta ma non si modifica"))
-            self.setCursor(Qt.SizeAllCursor)
+            if not big:
+                self.setCursor(Qt.SizeAllCursor)
 
     def handles(self) -> list[QPointF]:
         """Local points the user can drag to resize: a line's ends, a box's bottom-right corner."""
@@ -122,10 +126,10 @@ class ObjItem(QGraphicsRectItem):
             if self.obj.kind == "line":
                 ends = [self.handles()[i] if i != self.grab else e.pos() for i in (0, 1)]
                 a, b = (pt + self.pos() for pt in ends)
-                self.tab.resize(self.obj, (a.x() / z, a.y() / z, b.x() / z, b.y() / z))
+                self.tab.resize_object(self.obj, (a.x() / z, a.y() / z, b.x() / z, b.y() / z))
             else:
                 r = self.rect().translated(self.pos())
-                self.tab.resize(self.obj, (r.left() / z, r.top() / z, r.right() / z, r.bottom() / z))
+                self.tab.resize_object(self.obj, (r.left() / z, r.top() / z, r.right() / z, r.bottom() / z))
         elif self.pos() != self.start:
             d = self.pos() - self.start
             self.tab.move_selected(d.x() / z, d.y() / z)
@@ -138,13 +142,29 @@ class PageView(QGraphicsView):
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setRubberBandSelectionMode(Qt.ContainsItemShape)  # what is all inside the box, not the background
+        # arrows: the selection moves on screen at once, the page changes once the presses stop (a change of a
+        # big page takes a moment: held down, the arrow would queue them up)
+        self.nudge = [0, 0]
+        self.nudge_timer = QTimer(self, singleShot=True, interval=350, timeout=self.flush_nudge)
 
     def keyPressEvent(self, e):
         d = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}.get(e.key())
-        if d is None or not self.tab.selection:
+        items = [i for i in self.tab.items if i.isSelected() and i.obj.state != "locked"]
+        if d is None or not items:
             return super().keyPressEvent(e)
         step = 10 if e.modifiers() & Qt.ShiftModifier else 1
-        self.tab.move_selected(d[0] * step, d[1] * step)
+        self.nudge = [self.nudge[0] + d[0] * step, self.nudge[1] + d[1] * step]
+        for i in items:
+            i.moveBy(d[0] * step * self.tab.zoom, d[1] * step * self.tab.zoom)
+        self.nudge_timer.start()
+
+    def flush_nudge(self):
+        """Make the move the arrows showed: before any other change, too."""
+        self.nudge_timer.stop()
+        (dx, dy), self.nudge = self.nudge, [0, 0]
+        if dx or dy:
+            self.tab.move_selected(dx, dy)
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier and self.tab.doc:
@@ -153,6 +173,7 @@ class PageView(QGraphicsView):
             super().wheelEvent(e)
 
     def mousePressEvent(self, e):
+        self.flush_nudge()  # before the press reaches the boxes: they are made again by the change
         if self.tab.mode == "select" or e.button() != Qt.LeftButton or not self.tab.doc:
             return super().mousePressEvent(e)
         self.start = self.mapToScene(e.position().toPoint())
@@ -185,8 +206,8 @@ class DesignTab(QWidget):
         self.selection: list[design.Obj] = []
         self.items: list[ObjItem] = []
         self.dirty = False
-        self._undo: list[bytes] = []
-        self._redo: list[bytes] = []
+        self._undo: list[tuple[int, bytes]] = []  # (page changed, the document before)
+        self._redo: list[tuple[int, bytes]] = []
         self.setAcceptDrops(True)
 
         # left: tools
@@ -221,7 +242,8 @@ class DesignTab(QWidget):
         self.mode_buttons["select"].setChecked(True)
         pl.addWidget(tools)
         pl.addStretch()
-        keys = QLabel("Trascina sul vuoto o Ctrl+clic: più oggetti\nFrecce: sposta di 1 pt, Maiusc+frecce di 10\n"
+        keys = QLabel("Trascina sul vuoto o Ctrl+clic: più oggetti (quelli tutti dentro il riquadro, "
+                      "anche uno sfondo grande)\nFrecce: sposta di 1 pt, Maiusc+frecce di 10\n"
                       "Maiusc mentre disegni: linea dritta\nCanc elimina\nCtrl+Z annulla, Ctrl+Y ripete",
                       objectName="Muted")
         keys.setWordWrap(True)
@@ -391,6 +413,7 @@ class DesignTab(QWidget):
             self.open(path)
 
     def open(self, path: str) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         if not self.confirm_discard():
             return
         try:
@@ -424,6 +447,7 @@ class DesignTab(QWidget):
         return True
 
     def save(self, path: str) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         write_atomic(path, self.doc.tobytes(garbage=3, deflate=True))
         self.path, self.dirty = path, False
         self.refresh()
@@ -447,6 +471,7 @@ class DesignTab(QWidget):
         return ic
 
     def go_page(self, n: int) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         if self.doc and 0 <= n < self.doc.page_count and n != self.page_no:
             self.page_no = n
             self.selection = []
@@ -487,7 +512,7 @@ class DesignTab(QWidget):
             ui.warn(self, str(e))
             self._load_page()
             return False
-        self._undo = (self._undo + [snapshot])[-UNDO_MAX:]
+        self._undo = (self._undo + [(self.page_no, snapshot)])[-UNDO_MAX:]
         self._redo.clear()
         self.dirty = True
         self.thumbs.item(self.page_no).setIcon(self._thumb(self.doc[self.page_no]))
@@ -498,38 +523,43 @@ class DesignTab(QWidget):
         self.doc.close()
         self.doc = pymupdf.open("pdf", data)
 
+    def _step(self, src: list, dst: list):
+        """Annulla / Ripeti: back to the copy on top of src, on the page it changed (only that thumbnail is new)."""
+        self.view.flush_nudge()
+        if not src:
+            return
+        page_no, data = src.pop()
+        dst.append((page_no, self.doc.tobytes()))
+        self._restore(data)
+        self.dirty, self.page_no = True, page_no
+        self.thumbs.item(page_no).setIcon(self._thumb(self.doc[page_no]))
+        self._load_page()
+
     def undo(self):
-        if self._undo:
-            self._redo.append(self.doc.tobytes())
-            self._restore(self._undo.pop())
-            self.dirty = True
-            self._fill_thumbs()
-            self._load_page()
+        self._step(self._undo, self._redo)
 
     def redo(self):
-        if self._redo:
-            self._undo.append(self.doc.tobytes())
-            self._restore(self._redo.pop())
-            self.dirty = True
-            self._fill_thumbs()
-            self._load_page()
+        self._step(self._redo, self._undo)
 
     def move_selected(self, dx: float, dy: float) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         objs = [o for o in self.selection if o.state != "locked"]
         if objs:
             self._edit(design.move, objs, dx, dy,
                        keep=[tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o in objs])
 
-    def resize(self, obj: design.Obj, rect: tuple) -> None:
+    def resize_object(self, obj: design.Obj, rect: tuple) -> None:
         box = pymupdf.Rect(rect).normalize() if obj.kind == "line" else pymupdf.Rect(rect)
         self._edit(design.set_rect, obj, rect, keep=[tuple(box)])
 
     def delete_selected(self) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         objs = [o for o in self.selection if o.state != "locked"]
         if objs:
             self._edit(design.delete, objs)
 
     def _restyle(self, **style):
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         o = self.selection[0]
         if o.kind == "text" and "fontname" not in style and set(style) & {"color"}:
             words = "".join(s["text"] for s in o.data["spans"])
@@ -541,6 +571,7 @@ class DesignTab(QWidget):
         self._edit(lambda page: design.restyle(page, o, **style), keep=[o.rect])
 
     def set_text(self, text: str) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         o = self.selection[0] if len(self.selection) == 1 else None
         if not o or o.kind != "text" or not text or text == "".join(s["text"] for s in o.data["spans"]):
             return
@@ -587,7 +618,7 @@ class DesignTab(QWidget):
         o = self.selection[0]
         if o.kind == "line":
             if (v[0], v[1], v[2], v[3]) != (*o.data["p1"], *o.data["p2"]):
-                self.resize(o, tuple(v))
+                self.resize_object(o, tuple(v))
         else:
             r = (v[0], v[1], v[0] + v[2], v[1] + v[3])
             if any(abs(a - b) > 0.05 for a, b in zip(r, o.rect)):
