@@ -31,9 +31,20 @@ COPY_OFFSET = 10  # pt: where a copy goes, right and down from the original
 HELVETICA = "Il carattere di questo testo non ha le lettere: {}. Uso Helvetica per questo testo?"
 
 
+def _muted(text: str) -> QLabel:
+    label = QLabel(text, objectName="Muted")
+    label.setWordWrap(True)  # a long one would widen the panel past its edge
+    return label
+
+
 def _kept(o: design.Obj, r: tuple) -> bool:
     """o is the object that was at r before the change: same box, or a text starting where it did (another font
-    or size makes it wider or taller)."""
+    or size makes it wider or taller). r = (x0, y0, x1, y1, kind): turned, o of that kind fits in r around the
+    same middle (its own box is smaller than the turned old box)."""
+    if len(r) == 5:
+        box, mid = pymupdf.Rect(r[:4]), pymupdf.Rect(o.rect)
+        return (o.kind == r[4] and abs(box.x0 + box.x1 - mid.x0 - mid.x1) < 3 and abs(box.y0 + box.y1 - mid.y0 - mid.y1) < 3
+                and (box + (-1.5, -1.5, 1.5, 1.5)).contains(mid))
     if all(abs(a - b) < 1.5 for a, b in zip(o.rect, r)):
         return True
     a, b = o.rect, r
@@ -423,10 +434,69 @@ class DesignTab(QWidget):
         self.form.addRow("Dimensione (pt)", self.p_size)
         self.form.addRow("Font", self.p_font)
         self.form.addRow("Stile", self.p_looks)
+        self.p_anchor = QHBoxLayout()
+        self.anchor = 0.0  # what stays in place when a text gets wider or narrower: 0 left edge, 0.5 middle, 1 right
+        anchors = QButtonGroup(self)
+        for k, glyph, tip in ((0.0, "text-left", "A sinistra"), (0.5, "text-center", "Al centro"),
+                              (1.0, "text-right", "A destra")):
+            b = button("", glyph, "Ghost", tip + ": quando cambi parole, font o dimensione resta fermo questo lato")
+            b.setCheckable(True)
+            b.setChecked(k == 0)
+            b.clicked.connect(lambda _=False, k=k: setattr(self, "anchor", k))
+            anchors.addButton(b)
+            self.p_anchor.addWidget(b)
+        self.p_anchor.addStretch()
+        self.form.addRow("Allineamento", self.p_anchor)
         self.form.addRow("Spessore (pt)", self.p_width)
         self.form.addRow("Colore", self.p_color)
         self.form.addRow("Riempimento", self.p_fill)
         pr.addWidget(self.props)
+        # arrangement: for one object or more
+        self.arrange = QWidget()
+        al = QVBoxLayout(self.arrange)
+        al.setContentsMargins(0, 8, 0, 0)
+        al.addWidget(_muted("Allinea"))
+        aligns = QHBoxLayout()
+        for how, tip in (("left", "A sinistra"), ("hcenter", "Al centro"), ("right", "A destra"),
+                         ("top", "In alto"), ("vcenter", "In mezzo"), ("bottom", "In basso")):
+            b = button("", "align-" + how, "Ghost", tip + " (un oggetto solo: rispetto alla pagina)")
+            b.clicked.connect(lambda _=False, how=how: self.align_selected(how))
+            aligns.addWidget(b)
+        aligns.addStretch()
+        al.addLayout(aligns)
+        al.addWidget(_muted("Ruota (gradi, in senso orario)"))
+        turns = QHBoxLayout()
+        self.p_turn = QLineEdit()
+        self.p_turn.setValidator(QDoubleValidator(-360, 360, 1, self.p_turn))
+        self.p_turn.setPlaceholderText("es. 15")
+        self.p_turn.setMaximumWidth(64)
+        self.p_turn.returnPressed.connect(self._turn_edited)
+        b_turn = button("Ruota", None, tip="Ruota della quantità scritta (negativa: in senso antiorario)")
+        b_turn.clicked.connect(self._turn_edited)
+        b_left = button("", "rotate-left", "Ghost", "Ruota di 90° in senso antiorario")
+        b_right = button("", "rotate-right", "Ghost", "Ruota di 90° in senso orario")
+        b_left.clicked.connect(lambda: self.rotate_selected(-90))
+        b_right.clicked.connect(lambda: self.rotate_selected(90))
+        for w in (self.p_turn, b_turn, b_left, b_right):
+            turns.addWidget(w)
+        turns.addStretch()
+        al.addLayout(turns)
+        self.layers_box = QWidget()
+        ll = QVBoxLayout(self.layers_box)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(_muted("Sopra o sotto gli altri"))
+        for row in ((("front", "Primo piano", "In primo piano: sopra a tutto"),
+                     ("forward", "Avanti", "Porta avanti: sopra all'oggetto che gli sta sopra")),
+                    (("backward", "Indietro", "Porta indietro: sotto all'oggetto che gli sta sotto"),
+                     ("back", "In fondo", "Sotto a tutto (anche allo sfondo bianco, se la pagina ne ha uno)"))):
+            line = QHBoxLayout()
+            for where, text, tip in row:
+                b = button(text, None, tip=tip)
+                b.clicked.connect(lambda _=False, where=where: self.restack_selected(where))
+                line.addWidget(b)
+            ll.addLayout(line)
+        al.addWidget(self.layers_box)
+        pr.addWidget(self.arrange)
         self.b_dup = button("Duplica", "copy", tip="Una copia accanto all'originale (Ctrl+D)")
         self.b_dup.clicked.connect(self.duplicate_selected)
         self.b_del = button("Elimina", "trash", "Danger")
@@ -629,6 +699,35 @@ class DesignTab(QWidget):
         if objs:  # the copies are selected afterwards: they are where the originals are, moved by d
             self._edit(design.duplicate, objs, d, d, keep=[tuple(pymupdf.Rect(o.rect) + (d, d, d, d)) for o in objs])
 
+    def align_selected(self, how: str) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
+        objs = [o for o in self.selection if o.state != "locked"]
+        moves = design.alignment(self.doc[self.page_no], objs, how) if objs else []
+        if moves:
+            moved = {id(o) for o, _, _ in moves}
+            keep = [tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o, dx, dy in moves]
+            self._edit(design.align, objs, how, keep=keep + [o.rect for o in objs if id(o) not in moved])
+
+    def rotate_selected(self, degrees: float) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
+        objs = [o for o in self.selection if o.state != "locked"]
+        if objs and degrees % 360:
+            m = design.turning(objs, degrees)
+            self._edit(design.rotate, objs, degrees, keep=[(*(pymupdf.Rect(o.rect) * m), o.kind) for o in objs])
+
+    def _turn_edited(self):
+        try:
+            degrees = float(self.p_turn.text().replace(",", "."))
+        except ValueError:
+            return
+        self.rotate_selected(degrees)
+
+    def restack_selected(self, where: str) -> None:
+        self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
+        if len(self.selection) == 1 and self.selection[0].state != "locked":
+            o = self.selection[0]
+            self._edit(design.restack, o, where, keep=[o.rect])
+
     def delete_selected(self) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         objs = [o for o in self.selection if o.state != "locked"]
@@ -655,7 +754,8 @@ class DesignTab(QWidget):
         missing = design.missing_letters(self.doc[self.page_no], o, text)
         if missing and ui.message(self, HELVETICA.format(missing), "ask", ["Usa Helvetica", "Annulla"]) != 0:
             return self.refresh()
-        self._edit(lambda page: design.set_text(page, o, text, fallback=bool(missing)), keep=[o.rect])
+        self._edit(lambda page: design.set_text(page, o, text, fallback=bool(missing), anchor=self.anchor),
+                   keep=[o.rect])
 
     def drawn(self, rect: tuple, straight: bool = False) -> None:
         """A component drawn on the page in the current mode (rect in PDF points, as dragged)."""
@@ -708,7 +808,7 @@ class DesignTab(QWidget):
             return
         o = self.selection[0] if len(self.selection) == 1 else None
         if o and o.kind == "text" and abs(size - o.data["spans"][0]["size"]) > 0.05:
-            self._restyle(fontsize=size)
+            self._restyle(fontsize=size, anchor=self.anchor)
 
     def _font_edited(self):
         o = self.selection[0] if len(self.selection) == 1 else None
@@ -716,7 +816,8 @@ class DesignTab(QWidget):
             return
         family = self.p_font.currentText() if self.p_font.currentIndex() >= 0 else None
         family = family or design.font_style(self.doc[self.page_no], o)[0] or "Helvetica"
-        self._restyle(fontname=design.font_spec(family, self.p_bold.isChecked(), self.p_italic.isChecked()))
+        self._restyle(fontname=design.font_spec(family, self.p_bold.isChecked(), self.p_italic.isChecked()),
+                      anchor=self.anchor)
 
     def _width_edited(self):
         try:
@@ -741,6 +842,8 @@ class DesignTab(QWidget):
         self.props.setVisible(editable)
         self.b_del.setVisible(bool(self.selection))
         self.b_dup.setVisible(bool(self.selection))
+        self.arrange.setVisible(bool(self.selection) and all(o.state != "locked" for o in self.selection))
+        self.layers_box.setVisible(len(self.selection) == 1)
         if not self.selection:
             self.kind_label.setText("Seleziona un oggetto sulla pagina, o scegli uno strumento per aggiungerne uno.")
             return
@@ -763,6 +866,7 @@ class DesignTab(QWidget):
         self.form.setRowVisible(self.p_size, text)
         self.form.setRowVisible(self.p_font, text)
         self.form.setRowVisible(self.p_looks, text)
+        self.form.setRowVisible(self.p_anchor, text)
         self.form.setRowVisible(self.p_width, "drawing" in one.data and drawing.get("color") is not None)
         self.form.setRowVisible(self.p_color, text or "drawing" in one.data)
         self.form.setRowVisible(self.p_fill, one.kind in ("rect", "shape") and "drawing" in one.data)

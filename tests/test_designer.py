@@ -253,3 +253,23 @@ def test_text_font_bold_and_italic_from_the_properties(qapp, tmp_path):
     tab.p_size.setText("40")
     tab.p_size.editingFinished.emit()
     assert len(tab.selection) == 1  # bigger, taller: still the one selected
+
+
+def test_rotate_align_and_stack_keep_the_selection(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    tab.select([o for o in tab.objects if o.kind == "text"])
+    assert tab.arrange.isVisibleTo(tab) and tab.layers_box.isVisibleTo(tab)
+    tab.p_turn.setText("30")
+    tab._turn_edited()
+    assert len(tab.selection) == 1 and tab.selection[0].kind == "text"
+    assert tab.selection[0].data["dir"] == pytest.approx((0.866, 0.5), abs=0.01)
+    tab.rotate_selected(-30)
+    tab.select(tab.objects)
+    assert not tab.layers_box.isVisibleTo(tab)  # one at a time
+    tab.align_selected("left")
+    assert len(tab.selection) == 2
+    assert tab.selection[0].rect[0] == pytest.approx(tab.selection[1].rect[0], abs=0.6)
+    line = next(o for o in tab.objects if o.kind == "line")
+    tab.select([line])
+    tab.restack_selected("front")
+    assert tab.selection and tab.selection[0].kind == "line"

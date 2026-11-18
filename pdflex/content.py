@@ -228,3 +228,84 @@ def copy(page, seqnos: list[int], m: pymupdf.Matrix, before: list[dict] | None =
     if not ok:
         _write(page, data)
     return ok
+
+
+# ---------------------------------------------------------------- drawing something elsewhere among the rest
+
+def place(page, where: str, k: int = 0) -> tuple[bytes, int, pymupdf.Matrix]:
+    """The page's stream, and where in it something comes "after" the k-th thing MuPDF draws (k: its sequence
+    number), "before" it, at the "front" (the end) or at the "back" (the start); with the CTM there. Never
+    inside a text object or a clip: moved out of them to the nearest place outside, so it shows whole."""
+    data = b"\n".join(page.parent.xref_stream(x) or b"" for x in page.get_contents())
+    ops = list(_OP.finditer(data))
+    if where == "back" or not ops:
+        return data, 0 if where == "back" else len(data), page.transformation_matrix
+    i = len(ops)
+    if where in ("after", "before"):  # the operator that draws it: the shortest start of the stream that does
+        lo, hi = 0, len(ops) - 1
+        try:
+            while lo < hi:
+                mid = (lo + hi) // 2
+                _write(page, data[:ops[mid].end()])
+                lo, hi = (lo, mid) if len(page.get_bboxlog()) > k else (mid + 1, hi)
+        finally:
+            _write(page, data)
+        i = lo + 1 if where == "after" else lo
+    ctm, levels, top_clip, bt, path = page.transformation_matrix, [], False, None, None  # levels: [ctm, start, clipped]
+
+    def step(m):
+        nonlocal ctm, top_clip, bt, path
+        tok = m.group(2)
+        if tok in _BUILD and path is None:
+            path = m.start(1)
+        elif tok in _PAINT or tok == b"n":
+            path = None
+        if tok == b"q":
+            levels.append([ctm, m.start(1), False])
+        elif tok == b"Q" and levels:
+            ctm = levels.pop()[0]
+        elif tok == b"cm":
+            ctm = pymupdf.Matrix(*[float(a) for a in m.group(1).split()[-6:]]) * ctm
+        elif tok in (b"W", b"W*"):
+            if levels:
+                levels[-1][2] = True
+            else:
+                top_clip = True  # the whole rest of the page is clipped: nothing to step out of
+        elif tok == b"BT":
+            bt = m.start(1)
+        elif tok == b"ET":
+            bt = None
+
+    for m in ops[:i]:
+        step(m)
+    clipped = next((n for n, lv in enumerate(levels) if lv[2]), None)
+    if where == "before":
+        if clipped is not None:
+            return data, levels[clipped][1], levels[clipped][0]
+        return data, bt if bt is not None else path if path is not None else ops[i].start(1), ctm
+    pos = ops[i - 1].end()
+    for m in ops[i:]:
+        if bt is None and not any(lv[2] for lv in levels):
+            break
+        step(m)
+        pos = m.end()
+    return data, pos, ctm
+
+
+def isolate(page, data: bytes) -> int:
+    """The page's stream as one, before what is to go elsewhere is drawn on top of it: see splice."""
+    _write(page, b"q\n" + data + b"\nQ")  # wrapped already: PyMuPDF adds nothing before it
+    return page.get_contents()[0]
+
+
+def splice(page, data: bytes, pos: int, ctm: pymupdf.Matrix, xref: int) -> None:
+    """Move what was drawn on top since isolate to pos in data (from place), drawn there as it was on top:
+    its own coordinates and a plain state (dashes, joins, text spacing as they start)."""
+    conts = page.get_contents()
+    if not conts or conts[0] != xref:
+        raise ValueError("the page's stream changed under the drawing")
+    drawn = b"\n".join(page.parent.xref_stream(x) or b"" for x in conts[1:])
+    fix = page.transformation_matrix * ~ctm
+    plain = b"[] 0 d 0 J 0 j 10 M 0 Tc 0 Tw 100 Tz 0 TL 0 Ts 0 Tr"
+    _write(page, data[:pos] + b"\nq\n" + b" ".join(map(_num, fix)) + b" cm " + plain + b"\n" + drawn + b"\nQ\n"
+           + data[pos:])

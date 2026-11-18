@@ -84,7 +84,7 @@ def test_clipped_shape_locked():
     doc.update_stream(xref, b"q 50 50 100 100 re W n 0 0 1 RG 20 20 200 200 re S Q")
     objs, warnings = design.page_objects(page)
     assert [o.state for o in objs] == ["locked"] and objs[0].reason
-    assert warnings == ["1 oggetti restano come sono (sfumature, ritagli, testo ruotato o forme che PDFlex non riesce a staccare dalla pagina)."]
+    assert warnings == ["1 oggetti restano come sono (sfumature, ritagli o forme che PDFlex non riesce a staccare dalla pagina)."]
 
 
 # ---------------------------------------------------------------- Task 2: changes made in place
@@ -382,3 +382,122 @@ def test_windows_font_goes_in_small_and_the_text_moves_again():
     words = page.get_text("words")
     assert [round(w[3]) for w in words if w[4] == "Testo"] == [round(_word_rect(page, "Testo").y1)]
     assert _word_rect(page, "Testo").y0 > 350
+
+
+def test_align_objects_to_each_other_and_one_to_the_page():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect((100, 100, 200, 150), color=None, fill=(0, 0, 1))
+    page.draw_rect((150, 200, 300, 220), color=None, fill=(1, 0, 0))
+    page.insert_text((60, 300), "Importo")
+    objs = design.page_objects(page)[0]
+    design.align(page, objs, "right")
+    objs = design.page_objects(page)[0]
+    assert all(o.rect[2] == pytest.approx(300, abs=0.6) for o in objs)
+    design.align(page, objs, "top")
+    assert all(o.rect[1] == pytest.approx(100, abs=0.6) for o in design.page_objects(page)[0])
+    box = _find(page, "rect", y=100)
+    design.align(page, [box], "hcenter")  # alone: to the middle of the page
+    box = _find(page, "rect", y=100)
+    assert (box.rect[0] + box.rect[2]) / 2 == pytest.approx(page.rect.width / 2, abs=0.6)
+
+
+def test_text_anchor_keeps_its_right_edge_when_the_words_change():
+    doc, page = _page()
+    right = _find(page, "text").rect[2]
+    design.set_text(page, _find(page, "text"), "Corto", anchor=1)
+    assert _find(page, "text").rect[2] == pytest.approx(right, abs=1)
+    middle = (_find(page, "text").rect[0] + _find(page, "text").rect[2]) / 2
+    design.restyle(page, _find(page, "text"), fontsize=22, anchor=0.5)
+    r = _find(page, "text").rect
+    assert (r[0] + r[2]) / 2 == pytest.approx(middle, abs=1)
+    design.restyle(page, _find(page, "text"), fontname=design.font_spec("Courier"), anchor=0.5)
+    r = _find(page, "text").rect
+    assert (r[0] + r[2]) / 2 == pytest.approx(middle, abs=1.5)
+
+
+def test_rotate_a_box_where_it_is_drawn():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+    page.draw_rect((100, 100, 200, 150), color=None, fill=(0, 0, 1))
+    page.draw_line((150, 60), (150, 200), color=(1, 0, 0), width=3)
+    design.rotate(page, [_find(page, "rect", y=100)], 90)
+    box = next(o for o in design.page_objects(page)[0] if o.data.get("drawing", {}).get("fill") == (0, 0, 1))
+    assert box.rect == pytest.approx((125, 75, 175, 175), abs=0.6)
+    assert [d["fill"] or d["color"] for d in page.get_drawings()] == [(1, 1, 1), (0, 0, 1), (1, 0, 0)]
+    design.rotate(page, [box], 30)
+    assert _colour_at(page, (140, 125)) == (0, 0, 255) and _colour_at(page, (127, 80)) == (255, 255, 255)
+
+
+def _line_dir(page, word):
+    return next(line["dir"] for b in page.get_text("dict")["blocks"] for line in b.get("lines", [])
+                if any(word in s["text"] for s in line["spans"]))
+
+
+def test_rotated_text_stays_editable():
+    doc, page = _page()
+    design.rotate(page, [_find(page, "text")], 90)  # clockwise: it reads down the page
+    assert _line_dir(page, "Testo") == pytest.approx((0, 1), abs=0.01)
+    text = _find(page, "text")
+    assert text.state == "edit"
+    design.set_text(page, text, "Ruotato")
+    assert _line_dir(page, "Ruotato") == pytest.approx((0, 1), abs=0.01)
+    design.rotate(page, [_find(page, "text")], -45)
+    assert _line_dir(page, "Ruotato") == pytest.approx((0.7071, 0.7071), abs=0.01)
+    design.move(page, [_find(page, "text")], 20, 0)
+    assert _line_dir(page, "Ruotato") == pytest.approx((0.7071, 0.7071), abs=0.01)
+    _fields_intact(page)
+
+
+def test_rotated_image_keeps_its_turn_when_moved():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_image((100, 100, 200, 150), stream=_png(), keep_proportion=False)
+    design.rotate(page, [_find(page, "image")], 90)
+    assert _find(page, "image").rect == pytest.approx((125, 75, 175, 175), abs=0.6)
+    design.move(page, [_find(page, "image")], 100, 0)
+    assert _find(page, "image").rect == pytest.approx((225, 75, 275, 175), abs=0.6)
+    design.rotate(page, [_find(page, "image")], 45)
+    r = pymupdf.Rect(_find(page, "image").rect)
+    assert r.width == pytest.approx(r.height, abs=0.6) and r.width == pytest.approx(150 / 2 ** 0.5, abs=1)
+
+
+def _three_boxes():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+    page.draw_rect((100, 100, 200, 150), color=None, fill=(0, 0, 1))  # blue, under
+    page.draw_rect((150, 120, 250, 170), color=None, fill=(1, 0, 0))  # red, over blue
+    page.draw_rect((180, 130, 280, 180), color=None, fill=(0, 1, 0))  # green, on top
+    return doc, page
+
+
+def _box(page, colour):
+    return next(o for o in design.page_objects(page)[0] if o.data.get("drawing", {}).get("fill") == pytest.approx(colour))
+
+
+def test_one_step_forward_and_backward():
+    doc, page = _three_boxes()
+    design.restack(page, _box(page, (0, 0, 1)), "forward")  # blue over red, still under green
+    assert _colour_at(page, (160, 130)) == (0, 0, 255) and _colour_at(page, (190, 140)) == (0, 255, 0)
+    design.restack(page, _box(page, (0, 1, 0)), "backward")  # green under blue now (its neighbour below)
+    assert _colour_at(page, (190, 140)) == (0, 0, 255) and _colour_at(page, (220, 160)) == (0, 255, 0)
+    with pytest.raises(design.EditError):
+        design.restack(page, _box(page, (0, 0, 1)), "forward")  # nothing it touches is above it any more
+    assert len(page.get_drawings()) == 4
+
+
+def test_front_and_back_for_text_image_and_shape():
+    doc, page = _three_boxes()
+    page.insert_text((110, 140), "Nascosto")
+    page.insert_image((230, 140, 270, 175), stream=_png())  # grey, under the green box drawn next
+    page.draw_rect((105, 128, 275, 178), color=None, fill=(0.6, 0.8, 1))  # covers both
+    assert not _dark(page, _word_rect(page, "Nascosto"))
+    design.restack(page, _find(page, "text"), "front")
+    assert _dark(page, _word_rect(page, "Nascosto"))
+    design.restack(page, _find(page, "image"), "front")
+    assert _colour_at(page, (250, 160)) == (200, 200, 200)
+    design.restack(page, _box(page, (0.6, 0.8, 1)), "back")  # under the white sheet: out of sight
+    assert _colour_at(page, (260, 175)) == (0, 255, 0) and _colour_at(page, (110, 160)) == (255, 255, 255)
+    assert len(page.get_drawings()) == 5 and "Nascosto" in page.get_text()

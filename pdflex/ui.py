@@ -209,6 +209,15 @@ _ICONS = {
     "rect": '<rect x="4" y="6" width="16" height="12" rx="1.5"/>',
     "image": '<rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 3.5 3 3-2.5 4.5 4"/>',
     "refresh": '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15"/>',
+    "align-left": '<path d="M4 4v16"/><rect x="7" y="6" width="11" height="4" rx="1"/><rect x="7" y="14" width="7" height="4" rx="1"/>',
+    "align-hcenter": '<path d="M12 4v16"/><rect x="6" y="6" width="12" height="4" rx="1"/><rect x="8" y="14" width="8" height="4" rx="1"/>',
+    "align-right": '<path d="M20 4v16"/><rect x="6" y="6" width="11" height="4" rx="1"/><rect x="10" y="14" width="7" height="4" rx="1"/>',
+    "align-top": '<path d="M4 4h16"/><rect x="6" y="7" width="4" height="11" rx="1"/><rect x="14" y="7" width="4" height="7" rx="1"/>',
+    "align-vcenter": '<path d="M4 12h16"/><rect x="6" y="6" width="4" height="12" rx="1"/><rect x="14" y="8" width="4" height="8" rx="1"/>',
+    "align-bottom": '<path d="M4 20h16"/><rect x="6" y="6" width="4" height="11" rx="1"/><rect x="14" y="10" width="4" height="7" rx="1"/>',
+    "text-left": '<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>',
+    "text-center": '<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>',
+    "text-right": '<path d="M4 6h16M10 10h10M4 14h16M10 18h10"/>',
 }
 
 APP_ICON_SVG = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">

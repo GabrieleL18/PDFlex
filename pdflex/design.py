@@ -3,7 +3,9 @@
 Only what is touched changes: the object is taken off the page with a redaction limited to its own kind
 (lines leave text alone, text leaves lines alone), whatever went with it is drawn back as it was, and the
 object is drawn again where it goes. Fields and buttons are annotations: redactions never touch them."""
+import math
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -206,17 +208,14 @@ def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
             if not spans or any(w.contains(r) or w.intersects(r) and (w & r).get_area() > r.get_area() / 2
                                 for w in widgets):
                 continue  # empty, or the text of a field / button
-            o = Obj("text", tuple(r), data={"spans": spans, "font_xref": fonts.get(spans[0]["font"])})
-            if abs(line["dir"][1]) > 0.01:
-                o.state, o.reason = "locked", "Testo ruotato: resta com'è"
-                locked += 1
-            objs.append(o)
+            objs.append(Obj("text", tuple(r), data={"spans": spans, "font_xref": fonts.get(spans[0]["font"]),
+                                                    "dir": tuple(line["dir"])}))
     warnings = []
     if glyphs:
         warnings.append("Testo disegnato come forme: si sposta, ma le parole non si possono cambiare "
                         f"({len(glyphs)} forme).")
     if locked:
-        warnings.append(f"{locked} oggetti restano come sono (sfumature, ritagli, testo ruotato o forme che "
+        warnings.append(f"{locked} oggetti restano come sono (sfumature, ritagli o forme che "
                         "PDFlex non riesce a staccare dalla pagina).")
     if page.rotation:
         for o in objs:
@@ -278,8 +277,14 @@ def _drawings(o: Obj) -> list[dict]:
 def _area(o: Obj) -> pymupdf.Rect:
     r = pymupdf.Rect(o.rect)
     if o.kind == "text":  # the middle of the line: its characters, not the neighbours above and below
-        h = r.height
-        return pymupdf.Rect(r.x0 + 0.5, r.y0 + h * 0.25, r.x1 - 0.5, r.y1 - h * 0.25)
+        dx, dy = o.data.get("dir", (1, 0))
+        if abs(dy) < 0.01:
+            h = r.height
+            return pymupdf.Rect(r.x0 + 0.5, r.y0 + h * 0.25, r.x1 - 0.5, r.y1 - h * 0.25)
+        if abs(dx) < 0.01:  # reading up or down the page: its neighbours are left and right
+            w = r.width
+            return pymupdf.Rect(r.x0 + w * 0.25, r.y0 + 0.5, r.x1 - w * 0.25, r.y1 - 0.5)
+        return r + (0.5, 0.5, -0.5, -0.5)  # slanted: its box, neighbours are checked afterwards
     if o.kind == "image":
         return r + (0.5, 0.5, -0.5, -0.5)
     for d in _drawings(o):  # the redaction takes a path only if it covers its stroke too
@@ -337,13 +342,36 @@ def _mapping(old: pymupdf.Rect, new: pymupdf.Rect) -> pymupdf.Matrix:
     return pymupdf.Matrix(sx, 0, 0, sy, new.x0 - old.x0 * sx, new.y0 - old.y0 * sy)
 
 
+def _straight(m: pymupdf.Matrix) -> bool:
+    return abs(m.b) < 1e-9 and abs(m.c) < 1e-9
+
+
+def _turn(m: pymupdf.Matrix) -> float:
+    """How far m turns, in degrees, clockwise on the page."""
+    return math.degrees(math.atan2(m.b, m.a))
+
+
+def _put_image(page, xref: int, t: pymupdf.Matrix, overlay: bool = True) -> None:
+    """The picture xref drawn through t (unit square -> page, as get_image_info's "transform"): turned or flipped
+    as t says, not only stretched over a box as insert_image draws it."""
+    page.insert_image(pymupdf.Rect(0, 0, 1, 1) * t, xref=xref, keep_proportion=False, overlay=overlay)
+    c = page.get_contents()[-1 if overlay else 0]
+    cm = pymupdf.Matrix(1, 0, 0, -1, 0, 1) * t * ~page.transformation_matrix  # PDF space, image rows upward
+    data = page.parent.xref_stream(c)
+    new = re.sub(rb"[-+.\d\s]+cm(\s*/[^\s/]+\s+Do)", lambda g: b"\n" + b" ".join(content._num(v) for v in cm)
+                 + b" cm" + g.group(1), data, count=1)
+    page.parent.update_stream(c, new)
+
+
 def _draw_items(shape, items, m: pymupdf.Matrix) -> None:
     P = pymupdf.Point  # the raw form gives plain tuples
     for it in items:
         if it[0] == "l":
             shape.draw_line(P(it[1]) * m, P(it[2]) * m)
-        elif it[0] == "re":
+        elif it[0] == "re" and _straight(m):
             shape.draw_rect(pymupdf.Rect(it[1]) * m)
+        elif it[0] == "re":  # turned: its four corners
+            shape.draw_quad(pymupdf.Rect(it[1]).quad * m)
         elif it[0] == "qu":
             shape.draw_quad(pymupdf.Quad(it[1]) * m)
         elif it[0] == "c":
@@ -389,18 +417,21 @@ def _text_font(page, o: Obj, span: dict, override: str | None, text: str) -> pym
     return pymupdf.Font({"helv": "hebo", "tiro": "tibo", "cour": "cobo"}[base] if "bold" in name else base)
 
 
-def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color) -> None:
+def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color, way=(1, 0)) -> None:
+    """way: the direction it reads in, on the page ((1, 0): left to right)."""
     # TextWriter, not insert_text: insert_text writes the built-in fonts in Latin-1 and loses "€"
     tw = pymupdf.TextWriter(page.rect)
     for i, line in enumerate(text.split("\n")):
         tw.append(pymupdf.Point(origin) + (0, i * fontsize * 1.2), line, font=font, fontsize=fontsize)
+    dx, dy = way  # TextWriter turns in PDF space, upward: the other way round
+    morph = None if abs(dy) < 1e-6 and dx > 0 else (pymupdf.Point(origin), pymupdf.Matrix(dx, -dy, dy, dx, 0, 0))
     if not getattr(font, "from_file", False):
-        tw.write_text(page, color=color)
+        tw.write_text(page, color=color, morph=morph)
         return
     # a font file goes in whole (Arial: 1 MB): written on a page of its own, cut down to the letters it uses,
     # then shown on this one. Not subset_fonts on the PDF itself: it would cut the fonts of its fields too
     tmp = pymupdf.open()
-    tw.write_text(tmp.new_page(width=page.rect.width, height=page.rect.height), color=color)
+    tw.write_text(tmp.new_page(width=page.rect.width, height=page.rect.height), color=color, morph=morph)
     tmp.subset_fonts()
     page.show_pdf_page(page.rect, tmp, 0)
 
@@ -417,8 +448,18 @@ def _text_args(page, o: Obj, m: pymupdf.Matrix, style: dict, text: str | None) -
             raise EditError("Questo testo è intrecciato con un disegno e il suo carattere non si può riscrivere: "
                             "PDFlex non riesce a spostarlo.") from None
         raise
-    return (pymupdf.Point(s["origin"]) * m, words, font, style.get("fontsize") or s["size"] * abs(m.d),
-            style.get("color") or pymupdf.sRGB_to_pdf(s["color"]))
+    way, still = pymupdf.Point(o.data.get("dir", (1, 0))), pymupdf.Matrix(m.a, m.b, m.c, m.d, 0, 0)
+    up = pymupdf.Point(way.y, -way.x) * still  # its letters' height through m: the size it gets
+    way = way * still
+    way = way / (abs(way) or 1)
+    size = style.get("fontsize") or s["size"] * abs(up)
+    origin = pymupdf.Point(s["origin"]) * m
+    k = style.get("anchor", 0)
+    if k and (text is not None or "fontname" in style):  # the other edge, or the middle, stays where it was
+        last = pymupdf.Rect(o.data["spans"][-1]["bbox"]) * m
+        old = max((c - origin).x * way.x + (c - origin).y * way.y for c in last.quad)
+        origin += way * ((old - font.text_length(words, fontsize=size)) * k)
+    return origin, words, font, size, style.get("color") or pymupdf.sRGB_to_pdf(s["color"]), tuple(way)
 
 
 def _clip(o: Obj) -> pymupdf.Rect:
@@ -471,17 +512,24 @@ def _edit_in_place(page, shapes: list[tuple], before: list[dict]) -> bool:
     return content.edit(page, {d["seqno"]: (m, style) for o, m, style in shapes for d in _drawings(o)}, before)
 
 
-def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
+def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None) -> None:
     """Take objs off the page and draw each again through its matrix (None: deleted), with its style overrides
     and, for text, new words: new[i] = (matrix, style, text). What the redactions took with them is drawn back
-    as it was. Afterwards the page is checked: EditError if anything else went missing."""
+    as it was. Afterwards the page is checked: EditError if anything else went missing.
+    layer: (where, k) to draw them again elsewhere among the rest, as content.place reads it (see restack)."""
     for o in objs:
         if o.state == "locked":
             raise EditError(o.reason or "Questo oggetto non si può modificare.")
     before = page.get_cdrawings()
     targets = Counter(_key(d) for o in objs for d in _drawings(o))
     shapes = [(o, m, style) for o, (m, style, _) in zip(objs, new) if o.kind not in ("text", "image")]
-    in_place = bool(shapes) and _edit_in_place(page, shapes, before)  # else taken off and drawn again
+    drawn_before = len(page.get_bboxlog()) if layer else 0
+    if layer and shapes:  # taken off where they are, drawn again where they go: nothing else is touched
+        in_place = content.edit(page, {d["seqno"]: (None, {}) for o, _, _ in shapes for d in _drawings(o)}, before)
+        if not in_place:
+            raise EditError("PDFlex non riesce a staccare questa forma dal suo posto per portarla sopra o sotto.")
+    else:
+        in_place = bool(shapes) and _edit_in_place(page, shapes, before)  # else taken off and drawn again
     areas = {"shape": [], "text": [], "image": []}
     for o in objs:
         if in_place and o.kind not in ("text", "image"):
@@ -519,22 +567,31 @@ def _replace(page, objs: list[Obj], new: list[tuple]) -> None:
     # never covers the text (but a sheet drawn before them covers them: in place is tried first)
     redraw = [(d, pymupdf.Identity, {}) for d in collateral]
     for o, (m, style, _) in zip(objs, new):
-        if m is not None and not (in_place and o.kind not in ("text", "image")):
+        if m is not None and (layer or not (in_place and o.kind not in ("text", "image"))):
             redraw += [(d, m, style) for d in _drawings(o)]
     redraw.sort(key=lambda t: t[0]["seqno"])
+    if layer:  # drawn on top first, then moved where they go
+        where, k = layer
+        data, pos, ctm = content.place(page, where, k - (drawn_before - len(page.get_bboxlog())) * (where == "after"))
+        mark = content.isolate(page, data)
     if redraw:
         shape = page.new_shape()
         for d, m, style in redraw:
             _draw_items(shape, d["items"], m)
             _finish(shape, d, style)
-        shape.commit(overlay=False)
+        shape.commit(overlay=bool(layer))
     for o, (m, style, text) in zip(objs, new):
         if any(o is c for c in copied):
-            page.show_pdf_page(_clip(o) * m, src, 0, clip=_clip(o), keep_proportion=False)
+            page.show_pdf_page(_clip(o) * m, src, 0, clip=_clip(o), keep_proportion=False, rotate=-_turn(m))
         elif id(o) in rewritten:
             _write(page, *rewritten[id(o)])
         elif m is not None and o.kind == "image":
-            page.insert_image(pymupdf.Rect(o.rect) * m, xref=o.data["xref"], keep_proportion=False)
+            _put_image(page, o.data["xref"], pymupdf.Matrix(o.data["transform"]) * m)
+    if layer:
+        try:
+            content.splice(page, data, pos, ctm, mark)
+        except ValueError:
+            raise EditError("PDFlex non riesce a portare questo oggetto sopra o sotto gli altri.") from None
     gone = sum(len(_drawings(o)) for o, (m, _, _) in zip(objs, new) if m is None)
     if len(page.get_cdrawings()) != len(before) - gone:
         raise EditError("Con questa modifica sarebbe cambiata anche un'altra forma della pagina.")
@@ -583,6 +640,67 @@ def set_rect(page, obj: Obj, rect: tuple) -> None:
     _replace(page, [obj], [(m, {}, None)])
 
 
+def turning(objs: list[Obj], degrees: float) -> pymupdf.Matrix:
+    """The matrix that turns objs together around the middle of the box around them, clockwise on the page."""
+    box = pymupdf.Rect(objs[0].rect)
+    for o in objs[1:]:
+        box |= o.rect
+    c = (box.tl + box.br) / 2
+    return pymupdf.Matrix(1, 0, 0, 1, -c.x, -c.y) * pymupdf.Matrix(degrees) * pymupdf.Matrix(1, 0, 0, 1, c.x, c.y)
+
+
+def rotate(page, objs: list[Obj], degrees: float) -> None:
+    m = turning(objs, degrees)
+    _replace(page, objs, [(m, {}, None) for _ in objs])
+
+
+def _stack(page, objs: list[Obj]) -> dict[int, tuple[int, int] | None]:
+    """Where each object comes in what MuPDF draws, by id: the sequence numbers of its first and last piece."""
+    log, spans, used, out = page.get_bboxlog(), page.get_texttrace(), set(), {}
+    for o in objs:
+        if o.kind == "text":
+            r = _clip(o)
+            seq = [sp["seqno"] for sp in spans if r.contains(_mid(pymupdf.Rect(sp["bbox"])))]
+        elif o.kind == "image":
+            seq = [next((i for i, (t, b) in enumerate(log) if "image" in t and i not in used
+                         and content._same(pymupdf.Rect(b), o.rect)), None)]
+            used.update(seq)
+        else:
+            seq = [d["seqno"] for d in _drawings(o)]
+        seq = [q for q in seq if q is not None]
+        out[id(o)] = (min(seq), max(seq)) if seq else None
+    return out
+
+
+def _touch(a: Obj, b: Obj) -> bool:
+    return (pymupdf.Rect(a.rect) + (-0.5, -0.5, 0.5, 0.5)).intersects(pymupdf.Rect(b.rect) + (-0.5, -0.5, 0.5, 0.5))
+
+
+def restack(page, obj: Obj, where: str) -> None:
+    """obj drawn again over everything ("front"), under everything ("back"), just over the next thing above it
+    that it touches ("forward") or just under the next one below ("backward")."""
+    if obj.state == "locked":
+        raise EditError(obj.reason or "Questo oggetto non si può modificare.")
+    objs = [o for o in page_objects(page)[0] if not (o.kind == obj.kind and content._same(pymupdf.Rect(o.rect), obj.rect))]
+    z = _stack(page, objs + [obj])
+    if z[id(obj)] is None:
+        raise EditError("PDFlex non trova dove è disegnato questo oggetto.")
+    near = [o for o in objs if z[id(o)] is not None and _touch(o, obj)]
+    if where == "forward":
+        above = [o for o in near if z[id(o)][0] > z[id(obj)][1]]
+        if not above:
+            raise EditError("È già sopra a tutto quello che tocca.")
+        layer = ("after", z[id(min(above, key=lambda o: z[id(o)][0]))][1])
+    elif where == "backward":
+        below = [o for o in near if z[id(o)][1] < z[id(obj)][0]]
+        if not below:
+            raise EditError("È già sotto a tutto quello che tocca.")
+        layer = ("before", z[id(max(below, key=lambda o: z[id(o)][1]))][0])
+    else:
+        layer = (where, 0)
+    _replace(page, [obj], [(pymupdf.Identity, {}, None)], layer)
+
+
 def delete(page, objs: list[Obj]) -> None:
     _replace(page, objs, [(None, {}, None) for _ in objs])
 
@@ -613,7 +731,7 @@ def duplicate(page, objs: list[Obj], dx: float, dy: float) -> None:
         elif o.kind == "text":
             page.show_pdf_page(_clip(o) * m, src, 0, clip=_clip(o), keep_proportion=False)
         elif o.kind == "image":
-            page.insert_image(pymupdf.Rect(o.rect) * m, xref=o.data["xref"], keep_proportion=False)
+            _put_image(page, o.data["xref"], pymupdf.Matrix(o.data["transform"]) * m)
     if len(page.get_cdrawings()) != len(before) + len(paths):
         raise EditError("PDFlex non è riuscito a copiare queste forme così come sono.")
     if len(_image_info(page)) != images_before + sum(o.kind == "image" for o in objs):
@@ -625,14 +743,19 @@ def duplicate(page, objs: list[Obj], dx: float, dy: float) -> None:
         after.remove(w)
 
 
-def restyle(page, obj: Obj, *, color=None, fill=None, width=None, fontsize=None, fontname=None) -> None:
+def restyle(page, obj: Obj, *, color=None, fill=None, width=None, fontsize=None, fontname=None,
+            anchor: float = 0) -> None:
+    """anchor, for text: what stays in place when it gets wider or narrower (0 left edge, 0.5 middle, 1 right)."""
     style = {k: v for k, v in (("color", color), ("fill", fill), ("width", width), ("fontsize", fontsize),
                                ("fontname", fontname)) if v is not None}
     m = pymupdf.Identity
     if obj.kind == "text" and "fontsize" in style:
         k = style.pop("fontsize") / obj.data["spans"][0]["size"]
         r = pymupdf.Rect(obj.rect)
-        m = pymupdf.Matrix(k, 0, 0, k, r.x0 - r.x0 * k, r.y0 - r.y0 * k)
+        x = r.x0 + r.width * anchor
+        m = pymupdf.Matrix(k, 0, 0, k, x - x * k, r.y0 - r.y0 * k)
+    if obj.kind == "text" and anchor:
+        style["anchor"] = anchor
     _replace(page, [obj], [(m, style, None)])
 
 
@@ -647,12 +770,41 @@ def missing_letters(page, obj: Obj, text: str) -> str:
     return "".join(dict.fromkeys(c for c in text if not c.isspace() and not font.has_glyph(ord(c))))
 
 
-def set_text(page, obj: Obj, text: str, fallback: bool = False) -> None:
-    """New words for a text line, in its own font; with fallback, in Helvetica when letters are missing."""
+def set_text(page, obj: Obj, text: str, fallback: bool = False, anchor: float = 0) -> None:
+    """New words for a text line, in its own font; with fallback, in Helvetica when letters are missing.
+    anchor: as for restyle."""
     missing = missing_letters(page, obj, text)
     if missing and not fallback:
         raise EditError(f"Il carattere di questo testo non ha le lettere: {missing}")
-    _replace(page, [obj], [(pymupdf.Identity, {"fontname": ""} if missing else {}, text)])
+    style = {"fontname": ""} if missing else {}
+    _replace(page, [obj], [(pymupdf.Identity, {**style, "anchor": anchor} if anchor else style, text)])
+
+
+_ALIGN = {"left": (0, None), "hcenter": (0.5, None), "right": (1, None),
+          "top": (None, 0), "vcenter": (None, 0.5), "bottom": (None, 1)}
+
+
+def alignment(page, objs: list[Obj], how: str) -> list[tuple[Obj, float, float]]:
+    """How far each of objs moves to line up on one side or on the middle of the box around them (how: a key of
+    _ALIGN); one alone, on the page's. Only those that move."""
+    box = pymupdf.Rect(page.rect) if len(objs) == 1 else pymupdf.Rect(objs[0].rect)
+    for o in objs[1:]:
+        box |= o.rect
+    kx, ky = _ALIGN[how]
+    out = []
+    for o in objs:
+        r = pymupdf.Rect(o.rect)
+        dx = 0 if kx is None else (box.x0 + box.width * kx) - (r.x0 + r.width * kx)
+        dy = 0 if ky is None else (box.y0 + box.height * ky) - (r.y0 + r.height * ky)
+        if abs(dx) > 0.05 or abs(dy) > 0.05:
+            out.append((o, dx, dy))
+    return out
+
+
+def align(page, objs: list[Obj], how: str) -> None:
+    moves = alignment(page, objs, how)
+    if moves:
+        _replace(page, [o for o, _, _ in moves], [(pymupdf.Matrix(1, 0, 0, 1, dx, dy), {}, None) for _, dx, dy in moves])
 
 
 # new components go on top of everything (PyMuPDF's default overlay=True)
