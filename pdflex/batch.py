@@ -222,7 +222,8 @@ class BatchTab(QWidget):
     def set_template(self, path: str):
         doc = open_pdf(path)
         names = list(dict.fromkeys(w.field_name for page in doc for w in page.widgets()
-                                   if w.field_type != pymupdf.PDF_WIDGET_TYPE_SIGNATURE))
+                                   if w.field_type not in (pymupdf.PDF_WIDGET_TYPE_SIGNATURE,
+                                                           pymupdf.PDF_WIDGET_TYPE_BUTTON)))
         if not names:
             raise ValueError("questo PDF non ha campi da compilare. Aggiungili prima nella sezione Moduli.")
         self.template, self.field_names = path, names

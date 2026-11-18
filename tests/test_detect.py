@@ -94,3 +94,55 @@ def test_comb_field_round_trip(tmp_path, make_pdf):
     assert w.text_maxlen == 16 and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB
     f = load_fields(open_pdf(out))[0]
     assert f.comb == 16
+
+
+def _modello_redditi(tmp_path):
+    """Pieces of the Modello Redditi: what Rileva campi used to miss."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.draw_rect(pymupdf.Rect(100, 100, 580, 400), color=None, fill=(0.72, 0.77, 0.84))  # band
+    # amount box: column number in the corner, ",00" printed at the end
+    p.draw_rect(pymupdf.Rect(200, 110, 272, 128), color=None, fill=(1, 1, 1))
+    p.insert_text((200.5, 115.5), "3", fontsize=5)
+    p.insert_text((261, 127), ",00", fontsize=7)
+    # date split by separators, tiny labels inside
+    p.insert_text((120, 150), "Data di nascita", fontsize=7)
+    p.draw_rect(pymupdf.Rect(120, 152, 228, 176), color=None, fill=(1, 1, 1))
+    for x, word in ((125, "giorno"), (160, "mese"), (195, "anno")):
+        p.insert_text((x, 157), word, fontsize=5)
+    for x in (156, 192):
+        p.draw_line((x, 160), (x, 176), color=(0, 0, 0), width=0.6)
+    # SÌ / NO boxes, the answer printed inside
+    for x, word in ((300, "SI"), (330, "NO")):
+        p.draw_rect(pymupdf.Rect(x, 200, x + 17, 217), color=(0, 0.26, 0.44), fill=(1, 1, 1))
+        p.insert_text((x + 3, 212), word, fontsize=7)
+    p.insert_text((120, 212), "RM51", fontsize=8)
+    # partita IVA: 11 cells, ticks only between them
+    p.insert_text((120, 245), "Partita IVA", fontsize=7)
+    p.draw_rect(pymupdf.Rect(120, 250, 278.4, 268), color=None, fill=(1, 1, 1))
+    for k in range(1, 11):
+        p.draw_line((120 + 14.4 * k, 262), (120 + 14.4 * k, 268), color=(0, 0.26, 0.44))
+    p.draw_line((120, 268), (278.4, 268), color=(0, 0.26, 0.44))
+    # outside the band: "| COGNOME | NOME |" ticks rising from one line
+    p.insert_text((60, 460), "COGNOME", fontsize=7)
+    p.insert_text((204, 460), "NOME", fontsize=7)
+    for x in (60, 204, 334):
+        p.draw_line((x, 463), (x, 472), color=(0, 0.26, 0.44))
+    p.draw_line((60, 472), (334, 472), color=(0, 0.26, 0.44))
+    path = tmp_path / "redditi.pdf"
+    doc.save(path)
+    return open_pdf(path)
+
+
+def test_modello_redditi_boxes(tmp_path):
+    found = {f.name: f for f in detect_fields(_modello_redditi(tmp_path)[0], [])}
+    amount = next(f for f in found.values() if 200 <= f.rect[0] < 210 and f.rect[1] < 130)
+    assert amount.rect[0] > 202 and amount.rect[2] < 261 and amount.align == 2  # never over "3" or ",00"
+    date = [found[f"data_di_nascita_{p}"] for p in ("giorno", "mese", "anno")]
+    assert [f.comb for f in date] == [2, 2, 4] and all(f.rect[1] > 157 for f in date)  # under the tiny labels
+    assert found["rm51_si"].kind == found["rm51_no"].kind == "checkbox"
+    iva = next(f for f in found.values() if "iva" in f.name)
+    assert iva.comb == 11 and round(iva.rect[0]) == 120 and round(iva.rect[2]) == 278
+    cognome = next(f for f in found.values() if f.name.startswith("cognome"))
+    nome = next(f for f in found.values() if f.name.startswith("nome"))
+    assert round(cognome.rect[0]) == 60 and round(cognome.rect[2]) == 204 and round(nome.rect[2]) == 334

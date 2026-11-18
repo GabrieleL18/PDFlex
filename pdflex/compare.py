@@ -382,10 +382,11 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
 
 # ---------------------------------------------------------------- UI
 
-from PySide6.QtCore import QSize, Qt  # noqa: E402
+from PySide6.QtCore import QRectF, Qt, Signal  # noqa: E402
+from PySide6.QtGui import QColor, QPainter, QPen  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
-    QMessageBox, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QStackedWidget, QToolTip, QVBoxLayout, QWidget,
 )
 
 from pdflex import ui  # noqa: E402
@@ -397,6 +398,52 @@ KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move"
 HINT = "Trascina qui il PDF o clicca per sceglierlo"
 NO_OCR = ("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
           "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex.")
+
+
+class ChangeBar(ui.MarkBar):
+    """The one scrollbar between the two documents: a tick for every change, a click on a tick selects it."""
+    picked = Signal(int)  # index of the change
+
+    def __init__(self):
+        super().__init__()
+        self.ticks: list[tuple[float, str, int, str]] = []  # (0..1 down the document, colour, change, label)
+        self.current = -1
+        self.setMouseTracking(True)
+        self.setFixedWidth(18)
+
+    def _y(self, frac: float) -> float:
+        return 3 + frac * (self.height() - 6)
+
+    def tick_at(self, y: float):
+        """The change whose tick is under y (4 px either way), or None."""
+        near = min(self.ticks, key=lambda t: abs(self._y(t[0]) - y), default=None)
+        return near if near and abs(self._y(near[0]) - y) <= 4 else None
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        for frac, color, i, _ in self.ticks:
+            h = 5 if i == self.current else 3
+            p.fillRect(QRectF(2, self._y(frac) - h / 2, self.width() - 4, h), QColor(color))
+        cur = next((t for t in self.ticks if t[2] == self.current), None)
+        if cur:  # the change shown now: ringed
+            p.setPen(QPen(QColor(ui.ACCENT), 1.5))
+            p.drawRect(QRectF(0.75, self._y(cur[0]) - 4, self.width() - 1.5, 8))
+
+    def mousePressEvent(self, e):
+        tick = self.tick_at(e.position().y()) if e.button() == Qt.LeftButton else None
+        if tick:
+            self.picked.emit(tick[2])
+        else:
+            super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        tick = None if e.buttons() else self.tick_at(e.position().y())
+        if tick:
+            QToolTip.showText(e.globalPosition().toPoint(), tick[3], self)
+        else:
+            QToolTip.hideText()
+        super().mouseMoveEvent(e)
 
 
 class CompareTab(QWidget):
@@ -479,6 +526,17 @@ class CompareTab(QWidget):
         self.new_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.new_view, self.old_view))
         self.old_view.scaled.connect(self._zoom_to)
         self.new_view.scaled.connect(self._zoom_to)
+        # one scrollbar in the middle, for both documents (each keeps its own only when they scroll apart)
+        self.bar = ChangeBar()
+        own = self.old_view.verticalScrollBar()
+        self.old_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.new_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        own.rangeChanged.connect(self._bar_range)
+        own.valueChanged.connect(self._bar_follow)
+        self.bar.valueChanged.connect(own.setValue)
+        self.bar.picked.connect(self.go_to)
+        self.sync.toggled.connect(lambda on: self.new_view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff if on else Qt.ScrollBarAsNeeded))
         self.old_label, self.new_label = QLabel(), QLabel()
         self.list = QListWidget(objectName="Changes")
         self.list.setItemDelegate(ui.HtmlDelegate(self.list))
@@ -530,9 +588,10 @@ class CompareTab(QWidget):
         sl.addWidget(self.list)
         split = QSplitter()
         split.addWidget(column(self.old_label, self.old_view, ui.RED))
+        split.addWidget(column(QLabel(), self.bar, ui.color("line")))
         split.addWidget(column(self.new_label, self.new_view, ui.GREEN))
         split.addWidget(side)
-        split.setSizes([520, 520, 300])
+        split.setSizes([520, 18, 520, 300])
         split.setChildrenCollapsible(False)
 
         self.stack = QStackedWidget()
@@ -677,16 +736,45 @@ class CompareTab(QWidget):
         return bool(kind) and self.changes[i].kind != kind
 
     def _apply_filter(self):
-        shown = [c for i, c in enumerate(self.changes) if not self._hidden(i)]
         for i in range(len(self.changes)):
             self.list.setRowHidden(i, self._hidden(i))
-        # ticks on the scrollbars, like an overview of the whole document
-        self.old_view.set_marks([((c.old or [c.old_at])[0], KIND_COLORS[c.kind]) for c in shown if c.old or c.old_at])
-        self.new_view.set_marks([((c.new or [c.new_at])[0], KIND_COLORS[c.kind]) for c in shown if c.new or c.new_at])
+        self._update_ticks()
         if self.current < 0 or self._hidden(self.current):
             self.current = -1
             self.step(1)
         self._buttons()
+
+    def _update_ticks(self):
+        """Ticks on the middle bar, like an overview of the whole document: where each change is in the original
+        (or in the new version, for what the original lacks)."""
+        if self.old_view.scene() is None or self.new_view.scene() is None:
+            return  # the tab is being destroyed: its widgets go before the signals stop
+        ticks = []
+        for i, c in enumerate(self.changes):
+            if self._hidden(i):
+                continue
+            for view, words in ((self.old_view, c.old or [c.old_at]), (self.new_view, c.new or [c.new_at])):
+                total = view.scene().sceneRect().height() if view.offsets else 0
+                if words[0] is not None and total:
+                    ticks.append((view.word_rect(words[0])[1] / total, KIND_COLORS[c.kind], i, c.label()))
+                    break
+        self.bar.ticks = ticks
+        self.bar.update()
+
+    def _bar_range(self, lo, hi):
+        own = self.old_view.verticalScrollBar()
+        self.bar.blockSignals(True)
+        self.bar.setRange(lo, hi)
+        self.bar.setPageStep(own.pageStep())
+        self.bar.setSingleStep(own.singleStep())
+        self.bar.setValue(own.value())
+        self.bar.blockSignals(False)
+        self._update_ticks()  # zoom or resize: the document got taller or shorter
+
+    def _bar_follow(self, value):
+        self.bar.blockSignals(True)
+        self.bar.setValue(value)
+        self.bar.blockSignals(False)
 
     def _next_visible(self, d):
         i = self.current + d
@@ -757,6 +845,8 @@ class CompareTab(QWidget):
         if not 0 <= index < len(self.changes):
             return
         self.current = index
+        self.bar.current = index
+        self.bar.update()
         c = self.changes[index]
         self._syncing = True  # each side centres on its own copy of the change
         try:

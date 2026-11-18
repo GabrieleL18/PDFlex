@@ -237,7 +237,7 @@ def test_hand_signature_drawn_and_placed(qapp, make_pdf, tmp_path):
 
 
 def test_compare_marks_rows_and_page_view(qapp, make_pdf, tmp_path):
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
     from pdflex.compare import CompareTab
     tab = CompareTab()
@@ -246,8 +246,18 @@ def test_compare_marks_rows_and_page_view(qapp, make_pdf, tmp_path):
     pages = ["pagina %d testo" % i for i in range(6)]
     tab.load(str(make_pdf(tmp_path, pages)), str(make_pdf(tmp_path, pages[:4] + ["pagina 4 cambiata"] + pages[5:])))
     QTest.qWait(300)
-    marks = tab.new_view.verticalScrollBar().marks
-    assert len(marks) == len(tab.changes) == 1 and 0.6 < marks[0][0] < 0.85  # page 5 of 6
+    ticks = tab.bar.ticks  # the one scrollbar between the two documents
+    assert len(ticks) == len(tab.changes) == 1 and 0.6 < ticks[0][0] < 0.85  # page 5 of 6
+    assert not tab.old_view.verticalScrollBar().isVisible() and not tab.new_view.verticalScrollBar().isVisible()
+    # a click on the tick selects the change, dragging the bar scrolls both documents
+    tab.list.setCurrentRow(-1)
+    tab.current = -1
+    QTest.mouseClick(tab.bar, Qt.LeftButton, pos=tab.bar.rect().topLeft() + QPoint(9, round(tab.bar._y(ticks[0][0]))))
+    assert tab.current == 0 and tab.bar.current == 0
+    tab.bar.setValue(0)
+    assert tab.old_view.verticalScrollBar().value() == 0 and tab.new_view.position()[0] == 0
+    tab.bar.setValue(tab.bar.maximum())
+    assert tab.new_view.position()[0] == tab.old_view.position()[0] >= 4  # the new version followed to the end
     row = tab.list.item(0).data(Qt.UserRole + 1)
     assert "line-through" in row and "testo" in row and "cambiata" in row
     tab.zoom_page()

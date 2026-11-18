@@ -129,6 +129,9 @@ class PageGrid(QListWidget):
         self.setResizeMode(QListView.Adjust)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragDropMode(QAbstractItemView.InternalMove)
+        # Static movement also turns off drops on the viewport, the widget a drag actually lands on:
+        # without this the drag starts but nothing receives it
+        self.viewport().setAcceptDrops(True)
         self.marker = None  # (row, x, top, bottom) while dragging
         self.dragging = False  # a drag started here (files dragged in from Explorer are not ours)
         self.set_thumb(150)

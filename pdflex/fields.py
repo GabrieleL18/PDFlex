@@ -11,7 +11,7 @@ import pymupdf
 
 from pdflex import open_pdf, write_atomic
 
-FIELD_KINDS = ("text", "multiline", "checkbox", "radio", "dropdown", "date", "signature")
+FIELD_KINDS = ("text", "multiline", "checkbox", "radio", "dropdown", "date", "signature", "button")
 
 _TYPES = {
     "text": pymupdf.PDF_WIDGET_TYPE_TEXT,
@@ -21,7 +21,33 @@ _TYPES = {
     "radio": pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON,
     "dropdown": pymupdf.PDF_WIDGET_TYPE_COMBOBOX,
     "signature": pymupdf.PDF_WIDGET_TYPE_SIGNATURE,
+    "button": pymupdf.PDF_WIDGET_TYPE_BUTTON,
 }
+
+# Push buttons: Field.default is the caption, Field.value the action ("" = a script made elsewhere, kept as is)
+_FILL_TEST_JS = """// PDFlex: Popola test
+for (var i = 0; i < this.numFields; i++) {
+    var f = this.getField(this.getNthFieldName(i));
+    if (f == null || f.type != "text" || f.readonly) continue;
+    var nome = f.name.toLowerCase();
+    if (nome.indexOf("data") != -1 || nome.indexOf("date") != -1) f.value = util.printd("dd/mm/yyyy", new Date());
+    else if (nome.indexOf("fiscale") != -1) f.value = "RSSMRA80A01H501U";
+    else if (nome.indexOf("num") != -1 || nome.indexOf("tot") != -1 || nome.indexOf("importo") != -1) f.value = "1500";
+    else if (nome.indexOf("perc") != -1) f.value = "0.15";
+    else if (nome.indexOf("indirizzo") != -1)
+        f.value = "Test di un indirizzo lungo per capire se ci sta tutto il testo oppure no " + (i + 1);
+    else f.value = "Test corto";
+}"""
+BUTTON_ACTIONS = {"fill_test": ("Popola test", _FILL_TEST_JS), "reset": ("Svuota test", "this.resetForm();")}
+
+
+def button_action(script: str) -> str:
+    """The action of a button's script: PDFlex's own, or one that does the same (filling / emptying the form)."""
+    if "resetForm" in script:
+        return "reset"
+    if "getNthFieldName" in script and ".value" in script:
+        return "fill_test"
+    return ""
 
 
 @dataclass
@@ -216,6 +242,8 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
             elif kind == "dropdown":
                 f.options = [c if isinstance(c, str) else c[0] for c in (w.choice_values or [])]
                 f.default = w.field_value or ""
+            elif kind == "button":
+                f.default, f.value = w.button_caption or "", button_action(w.script or "")
             elif kind != "signature":
                 f.default = w.field_value or ""
             if kind == "text" and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB:
@@ -292,6 +320,11 @@ def _new_widget(f: Field) -> pymupdf.Widget:
         w.field_value = f.default
     if f.kind == "checkbox":
         w.field_value = f.default == "1"
+    if f.kind == "button":
+        w.button_caption = f.default or BUTTON_ACTIONS.get(f.value, ("Pulsante",))[0]
+        w.script = BUTTON_ACTIONS[f.value][1] if f.value in BUTTON_ACTIONS else None
+        w.fill_color = (0.9, 0.92, 0.95)
+        w.text_color = (0.1, 0.15, 0.25)
     return w
 
 
@@ -367,7 +400,7 @@ def _update_widget(doc, f: Field) -> None:
         _set_inherited(doc, f, "Opt", "[" + "".join(pymupdf.get_pdf_str(x) for x in f.options) + "]")
     if f.align != o.align:
         _set_inherited(doc, f, "Q", str(f.align))
-    if f.default != o.default and not f.default and f.kind not in ("checkbox", "radio"):
+    if f.default != o.default and not f.default and f.kind not in ("checkbox", "radio", "button"):
         _set_inherited(doc, f, "V", "()")  # PyMuPDF skips an empty value: the old one would stay
     page = doc[f.page]  # keep the page alive: the widget only holds a weak reference to it
     w = page.load_widget(f.xref)
@@ -376,9 +409,13 @@ def _update_widget(doc, f: Field) -> None:
     if f.default != o.default:
         if f.kind == "checkbox":
             w.field_value = f.default == "1"
+        elif f.kind == "button":
+            w.button_caption = f.default
         elif f.kind != "radio" and f.default:
             w.field_value = f.default
     _safe_update(doc, w)
+    if f.kind == "button" and f.value != o.value and f.value in BUTTON_ACTIONS:
+        doc.xref_set_key(f.xref, "A", f"<</S/JavaScript/JS {pymupdf.get_pdf_str(BUTTON_ACTIONS[f.value][1])}>>")
     changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt), "V": (f.fmt, o.fmt),
                                    "C": (f.calc, o.calc)}.items() if a != b]
     if changed:
@@ -406,7 +443,7 @@ def _hide_fields(doc) -> None:
     names, formats, fonts included, for the program that fills them in."""
     for page in doc:
         for w in list(page.widgets()):
-            if w.field_type not in _TYPES.values():
+            if w.field_type not in _TYPES.values() or w.field_type == pymupdf.PDF_WIDGET_TYPE_BUTTON:
                 continue
             for key in ("MK/BC", "MK/BG"):
                 if doc.xref_get_key(w.xref, key)[0] != "null":
@@ -433,7 +470,7 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False) -> pymupdf.Doc
     """The form with these fields. blank: for a program that fills it in later, fields empty and invisible."""
     _check_names(fields)
     if blank:
-        fields = [dataclasses.replace(f, default="") for f in fields]
+        fields = [dataclasses.replace(f, default="") if f.kind != "button" else f for f in fields]
     doc = open_pdf(src_path)
     keep = {f.xref for f in fields if f.xref}
     for page in doc:

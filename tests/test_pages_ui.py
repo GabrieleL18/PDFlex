@@ -19,6 +19,7 @@ def test_drag_reorders_pages(qapp, make_pdf, tmp_path):
     tab.show()
     tab.add_files([str(make_pdf(tmp_path, ["a", "b", "c", "d"]))])
     g = tab.grid
+    assert g.dragEnabled() and g.viewport().acceptDrops()  # a real drag lands on the viewport
     g.item(0).setSelected(True)
     last = g.visualItemRect(g.item(3))
     ev = _drop(g, QPoint(last.right() - 3, last.center().y()))  # right half of the last page: after it

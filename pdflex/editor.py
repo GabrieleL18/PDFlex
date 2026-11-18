@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from pdflex import open_pdf
 from pdflex.fields import (
-    ALIGN, DATE_PATTERNS, FONTS, FORMATS, NUMERIC, _TYPES, Field, align_rects, build_pdf, clean_value, fill_sample,
+    BUTTON_ACTIONS, ALIGN, DATE_PATTERNS, FONTS, FORMATS, NUMERIC, _TYPES, Field, align_rects, build_pdf, clean_value, fill_sample,
     fmt_label, fmt_parts, from_view, load_fields, make_block, place_block, sample_value, save_with_fields, snap,
     suggest_save_path, to_view,
 )
@@ -33,9 +33,10 @@ from pdflex.ui import (
 
 KIND_LABELS = {"text": "Testo", "multiline": "Testo lungo", "checkbox": "Casella di spunta",
                "radio": "Scelta singola", "dropdown": "Menu a tendina", "date": "Data", "signature": "Firma",
-               "image": "Firma a mano"}
+               "image": "Firma a mano", "button": "Pulsante"}
 KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B", "radio": "#7A4FD1",
-               "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633"}
+               "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633",
+               "button": "#4A5568"}
 HANDLE = 10  # px, resize grip in the bottom-right corner
 PAGE_MARGIN = 24
 TAG_H = 20  # name tag of the selected field
@@ -300,10 +301,21 @@ class EditorTab(QWidget):
         tl.setSpacing(2)
         self.mode_group = QButtonGroup(self)
         self.mode_buttons = {}
-        for mode, label in [("select", "Seleziona e sposta"), *((k, v) for k, v in KIND_LABELS.items() if k != "image")]:
+        buttons = [(f"button:{a}", caption) for a, (caption, _) in BUTTON_ACTIONS.items()]
+        modes = [("select", "Seleziona e sposta"),
+                 *((k, v) for k, v in KIND_LABELS.items() if k not in ("image", "button")), *buttons]
+        for mode, label in modes:
+            if mode == buttons[0][0]:  # a section of its own: buttons that act on the whole form
+                head = QLabel("Pulsanti", objectName="Muted")
+                head.setToolTip("Pulsanti dentro il PDF: Popola test riempie i campi di testo con dati di prova "
+                                "(date, codice fiscale, importi), Svuota test li cancella tutti")
+                head.setContentsMargins(4, 8, 0, 2)
+                tl.addWidget(head)
             b = QToolButton()
             b.setText(label)
-            if mode in KIND_COLORS:
+            if mode.startswith("button:"):
+                b.setIcon(icon("button", KIND_COLORS["button"]))
+            elif mode in KIND_COLORS:
                 b.setIcon(icon(mode, KIND_COLORS[mode]))
             else:
                 ui.set_glyph(b, mode)  # "select": ink, follows the theme
@@ -514,6 +526,11 @@ class EditorTab(QWidget):
         self.p_default.setPlaceholderText("Vuoto")
         self.p_size.setPlaceholderText("Automatica")
         self.p_size.setValidator(QIntValidator(0, 72, self.p_size))
+        self.p_action = QComboBox()
+        for key, (caption, _) in BUTTON_ACTIONS.items():
+            self.p_action.addItem({"fill_test": "Riempie i campi con dati di prova",
+                                   "reset": "Svuota tutti i campi"}.get(key, caption), key)
+        self.p_action.addItem("Script già presente nel PDF (non cambia)", "")
         self.p_comb = QLineEdit()
         self.p_comb.setPlaceholderText("No")
         self.p_comb.setValidator(QIntValidator(0, 99, self.p_comb))
@@ -532,11 +549,12 @@ class EditorTab(QWidget):
         form.addRow("Colore del testo", self.p_color)
         form.addRow("Allineamento", self.p_align)
         form.addRow("Caselle, una lettera ciascuna", self.p_comb)
+        form.addRow("Quando si preme", self.p_action)
         form.addRow(self.p_checked)
         form.addRow(self.p_required)
         for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc, self.p_comb):
             w.editingFinished.connect(self._props_edited)
-        for c in (self.p_fmt, self.p_font, self.p_dec, self.p_pattern, self.p_align):
+        for c in (self.p_fmt, self.p_font, self.p_dec, self.p_pattern, self.p_align, self.p_action):
             c.currentIndexChanged.connect(self._props_edited)
         self.p_thousands.toggled.connect(self._props_edited)
         self.p_required.toggled.connect(self._props_edited)
@@ -861,12 +879,16 @@ class EditorTab(QWidget):
 
     def _drawn(self, r):
         x0, y0, x1, y1 = (v / self.zoom for v in r)
+        kind, _, action = self.mode.partition(":")  # "button:reset": a button and what it does
         if x1 - x0 < 8 or y1 - y0 < 8:  # a click, not a drag: default size
             w, h = {"checkbox": (14, 14), "radio": (14, 14), "multiline": (200, 60),
-                    "signature": (180, 50)}.get(self.mode, (150, 20))
+                    "signature": (180, 50), "button": (70, 18)}.get(kind, (150, 20))
             x1, y1 = x0 + w, y0 + h
         page = self.doc[self.page_no]
-        f = self.add_field(self.mode, self.page_no, from_view(page, self._clamp(self._snap((x0, y0, x1, y1)))))
+        f = self.add_field(kind, self.page_no, from_view(page, self._clamp(self._snap((x0, y0, x1, y1)))))
+        if action:
+            caption = BUTTON_ACTIONS[action][0]
+            f.default, f.value, f.name = caption, action, self._free_name(clean_value(caption.lower()))
         self.mode_buttons["select"].click()
         self._select(f)
         self.refresh()
@@ -1280,6 +1302,7 @@ class EditorTab(QWidget):
         self._show_color(f.color)
         self.p_calc.setText(", ".join(f.calc))
         self.p_comb.setText(str(f.comb) if f.comb else "")
+        self.p_action.setCurrentIndex(max(self.p_action.findData(f.value if f.kind == "button" else "fill_test"), 0))
         self._update_rows(f)
         self._loading = False
 
@@ -1325,6 +1348,16 @@ class EditorTab(QWidget):
                 self.p_pattern.addItem(label, pattern)
             self.p_pattern.setCurrentIndex(max(self.p_pattern.findData(args[0]), 0))
             self.p_pattern.blockSignals(False)
+        self.form.setRowVisible(self.p_action, k == "button")
+        self.form.labelForField(self.p_default).setText("Testo del pulsante" if k == "button" else "Valore iniziale")
+        if k == "button":
+            for w in (self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required, self.p_fmt,
+                      self.p_calc, self.p_comb, self.p_font, self.p_dec, self.p_thousands, self.p_pattern):
+                self.form.setRowVisible(w, False)
+            self.form.setRowVisible(self.p_default, True)
+            self.form.labelForField(self.p_name).setText("Nome")
+            self.p_default.setPlaceholderText("")
+            return
         if k == "image":
             for w in (self.p_default, self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required,
                       self.p_fmt, self.p_calc, self.p_comb, self.p_font, self.p_dec, self.p_thousands,
@@ -1380,6 +1413,12 @@ class EditorTab(QWidget):
         f.calc = ([n.strip() for n in self.p_calc.text().split(",") if n.strip()]
                   if f.kind == "text" and fmt_parts(f.fmt)[0] in ("number", "amount") else [])
         f.comb = int(self.p_comb.text() or 0) if f.kind == "text" else 0
+        if f.kind == "button":
+            action = self.p_action.currentData() or ""
+            if action != f.value and action:
+                if self.p_default.text() == BUTTON_ACTIONS.get(f.value, ("",))[0]:  # caption still the default
+                    self.p_default.setText(BUTTON_ACTIONS[action][0])
+                f.value = action
         if f.kind == "radio":
             f.value = clean_value(self.p_value.text())
             if self.p_value.text() != f.value:

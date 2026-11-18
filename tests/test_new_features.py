@@ -112,3 +112,51 @@ def test_fill_dialog_from_editor(qapp, make_pdf, tmp_path, monkeypatch):
     tab.fields = []
     tab.fill()
     assert "non ha campi" in seen["info"]
+
+
+def test_buttons_made_read_and_changed(qapp, make_pdf, tmp_path):
+    from pdflex.editor import EditorTab
+    from pdflex.fields import load_fields
+    tab = EditorTab()
+    tab.open(str(_form(tmp_path, make_pdf)))
+    for action in ("fill_test", "reset"):
+        tab.set_mode(f"button:{action}")
+        tab._drawn((300 * tab.zoom, 10 * tab.zoom, 300 * tab.zoom, 10 * tab.zoom))  # a click: default size
+    out = tmp_path / "con_pulsanti.pdf"
+    tab.save(str(out))
+    doc = open_pdf(out)
+    buttons = {w.field_name: w for w in doc[0].widgets() if w.field_type == pymupdf.PDF_WIDGET_TYPE_BUTTON}
+    assert set(buttons) == {"popola_test_1", "svuota_test_1"}
+    assert buttons["popola_test_1"].button_caption == "Popola test" and "getNthFieldName" in buttons["popola_test_1"].script
+    assert "resetForm" in buttons["svuota_test_1"].script
+    got = {f.name: f for f in load_fields(doc)}
+    assert (got["svuota_test_1"].kind, got["svuota_test_1"].value) == ("button", "reset")
+    # changing what an existing button does rewrites its script, the caption follows when it was the default
+    tab.select_field(next(f for f in tab.fields if f.name == "svuota_test_1"))
+    tab.p_action.setCurrentIndex(tab.p_action.findData("fill_test"))
+    assert tab.selected.value == "fill_test" and tab.p_default.text() == "Popola test"
+    tab.save(str(tmp_path / "cambiato.pdf"))
+    w = next(w for w in open_pdf(tmp_path / "cambiato.pdf")[0].widgets() if w.field_name == "svuota_test_1")
+    assert "getNthFieldName" in w.script
+    # not something to fill in: neither in Compila nor in In serie
+    assert not any(i.name.startswith(("popola", "svuota")) for i in form_inputs(doc))
+    from pdflex.batch import BatchTab
+    b = BatchTab()
+    b.set_template(str(out))
+    assert not any(n.startswith(("popola", "svuota")) for n in b.field_names)
+
+
+def test_buttons_of_another_program_kept(make_pdf, tmp_path):
+    from pdflex.fields import load_fields, save_with_fields
+    src = tmp_path / "altro.pdf"
+    doc = pymupdf.open(make_pdf(tmp_path, ["x"]))
+    w = pymupdf.Widget()
+    w.field_type, w.field_name, w.rect = pymupdf.PDF_WIDGET_TYPE_BUTTON, "stampa", pymupdf.Rect(10, 10, 80, 28)
+    w.button_caption, w.script = "Stampa", "this.print();"
+    doc[0].add_widget(w)
+    doc.save(src)
+    fields = load_fields(open_pdf(src))
+    assert (fields[0].kind, fields[0].value, fields[0].default) == ("button", "", "Stampa")
+    fields[0].rect = (20, 10, 90, 28)  # moved: its own script stays
+    save_with_fields(src, fields, tmp_path / "out.pdf")
+    assert open_pdf(tmp_path / "out.pdf")[0].first_widget.script == "this.print();"
