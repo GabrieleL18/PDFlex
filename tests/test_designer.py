@@ -416,3 +416,41 @@ def test_drag_catches_an_edge_and_the_knob_turns(qapp, tmp_path):
     QTest.mouseRelease(v.viewport(), Qt.LeftButton, Qt.NoModifier, side + QPoint(40, 0))
     turned = next(o for o in tab.objects if o.rect[1] > 230 and o.kind != "text")
     assert pymupdf.Rect(turned.rect).height > 45  # a 60x40 box turned stands taller than before
+
+
+def test_list_shows_colours_and_the_hovered_object(qapp, tmp_path):
+    tab = _boxes(tmp_path)
+    row = next(i for i, o in enumerate(tab.rows) if o.kind == "rect")
+    tab._layer_hovered(tab.layers.item(row))
+    assert [i.hover for i in tab.items if i.obj is tab.rows[row]] == [True]
+    assert sum(i.hover for i in tab.items) == 1
+    tab._layer_hovered(None)
+    assert not any(i.hover for i in tab.items)
+
+
+def test_editor_empty_screen_lists_recent_files(qapp, tmp_path):
+    tab = _boxes(tmp_path)
+    tab.doc = None
+    tab.refresh()
+    assert tab.recent_box.lay.count() >= 2  # title + the file opened
+
+
+def test_bar_drops_words_one_at_a_time(qapp):
+    from PySide6.QtWidgets import QHBoxLayout
+    bar = ui.Bar()
+    lay = QHBoxLayout(bar)
+    save = ui.button("Salva modulo", "save", "Primary")
+    plain = [ui.button(t, "open") for t in ("Apri", "Esporta per gestionale", "Anteprima")]
+    for b in [plain[0], save] + plain[1:]:
+        lay.addWidget(b)
+    bar.resize(lay.sizeHint().width() - 20, 40)
+    bar.show()
+    qapp.processEvents()
+    assert [b.text() for b in plain] == ["Apri", "Esporta per gestionale", ""]  # the rightmost first
+    assert save.text() == "Salva modulo"
+    bar.resize(200, 40)
+    qapp.processEvents()
+    assert all(not b.text() for b in plain)  # the main one keeps its words while it fits
+    bar.resize(2000, 40)
+    qapp.processEvents()
+    assert save.text() == "Salva modulo" and plain[2].text() == "Anteprima"

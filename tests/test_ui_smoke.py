@@ -169,7 +169,7 @@ def test_close_recent_and_zoom_reset(qapp, make_pdf, tmp_path, monkeypatch):
     tab.add_field("text", 0, (10, 10, 100, 30))
     monkeypatch.setattr("pdflex.editor.message", lambda *a, **k: 1)  # "Non salvare"
     assert tab.close_doc() and tab.doc is None and tab.fields == []
-    assert tab.recent_lay.count() >= 2  # title + the file
+    assert tab.recent_box.lay.count() >= 2  # title + the file
 
 
 def test_compare_long_docs_render_lazily_and_scroll_sideways_together(qapp, make_pdf, tmp_path):

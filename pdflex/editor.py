@@ -346,12 +346,12 @@ class EditorTab(QWidget):
         pl.addWidget(self.block_combo)
         pl.addWidget(self.b_block)
         pl.addStretch()
-        keys = QLabel("Trascina sul vuoto o Ctrl+clic: più campi\n"
-                      "Frecce: sposta di poco\nMaiusc+frecce: allinea al campo vicino\nCtrl+frecce: scorri la pagina\n"
-                      "Ctrl+C / Ctrl+V copia e incolla, anche su un'altra pagina\n"
-                      "Canc elimina, Ctrl+D duplica\nCtrl+Z annulla, Ctrl+Y ripete", objectName="Muted")
-        keys.setWordWrap(True)
-        pl.addWidget(keys)
+        pl.addWidget(ui.keys_button("Trascina sul vuoto o Ctrl+clic: più campi\n"
+                                    "Frecce: sposta di poco\nMaiusc+frecce: allinea al campo vicino\n"
+                                    "Ctrl+frecce: scorri la pagina\n"
+                                    "Ctrl+C / Ctrl+V copia e incolla, anche su un'altra pagina\n"
+                                    "Canc elimina, Ctrl+D duplica\nCtrl+Z annulla, Ctrl+Y ripete"),
+                     alignment=Qt.AlignLeft)
 
         # center: command bar + page
         bar = ui.Bar()
@@ -377,8 +377,7 @@ class EditorTab(QWidget):
         self.b_save.clicked.connect(self.ask_save)
         self.b_list.toggled.connect(self._show_list)
         self.b_preview.clicked.connect(self.preview)
-        self.file_label = QLabel("", objectName="Muted")
-        self.file_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never forces the window wider
+        self.file_label = ui.Elided(objectName="Muted")
         self.b_pages = button("", "page", "Ghost", "Mostra o nascondi le miniature delle pagine")
         self.b_pages.setCheckable(True)
         self.b_pages.setChecked(True)
@@ -420,10 +419,8 @@ class EditorTab(QWidget):
         el = QVBoxLayout(empty)
         el.setContentsMargins(80, 60, 80, 60)
         el.addWidget(self.drop, 3)
-        self.recent_box = QWidget()
-        self.recent_lay = QVBoxLayout(self.recent_box)
-        self.recent_lay.setContentsMargins(0, 18, 0, 0)
-        self.recent_lay.setSpacing(2)
+        self.recent_box = ui.RecentFiles()
+        self.recent_box.picked.connect(self.open)
         el.addWidget(self.recent_box, 2)
         empty.setObjectName("Desk")
         self.stack = QStackedWidget()
@@ -679,22 +676,6 @@ class EditorTab(QWidget):
         self.title_changed.emit("")
         self.refresh()
         return True
-
-    def _fill_recent(self):
-        while self.recent_lay.count():
-            w = self.recent_lay.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        files = recent_files()
-        if not files:
-            return
-        self.recent_lay.addWidget(QLabel("Aperti di recente", objectName="H2"))
-        for p in files[:6]:
-            b = button(f"{Path(p).name}   {Path(p).parent}", "clock", "Recent", tip=p)
-            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)  # a long path must not widen the window
-            b.clicked.connect(lambda _=False, p=p: self.open(p))
-            self.recent_lay.addWidget(b)
-        self.recent_lay.addStretch()
 
     def open(self, path: str) -> None:
         if not self.confirm_discard():
@@ -1197,7 +1178,7 @@ class EditorTab(QWidget):
             self.file_label.setText("")
             self.page_label.setText("")
             self.thumbs.clear()
-            self._fill_recent()
+            self.recent_box.fill()
         else:
             counts = Counter(f.page for f in self.fields)
             self.thumbs.blockSignals(True)

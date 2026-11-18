@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
@@ -91,11 +91,9 @@ def _label(o: design.Obj) -> str:
     if o.kind == "text":
         words = "".join(s["text"] for s in o.data["spans"]).strip()
         text = f'Testo "{words[:40]}{"…" if len(words) > 40 else ""}"'
-    elif o.state == "move":
-        text = "Testo disegnato come forme"
     else:
         r = pymupdf.Rect(o.rect)
-        text = f"{KINDS[o.kind]}  {r.width:.0f} × {r.height:.0f} pt"
+        text = f"{'Testo disegnato' if o.state == 'move' else KINDS[o.kind]}  {r.width:.0f} × {r.height:.0f} pt"
     return ("🔒 " if o.state == "locked" else "📌 " if o.data.get("pinned") else "") + text
 
 
@@ -402,18 +400,19 @@ class DesignTab(QWidget):
         self.layers = QListWidget(objectName="Layers")  # every object, top to bottom: also the small or hidden ones
         self.layers.setSelectionMode(QListWidget.ExtendedSelection)
         self.layers.setIconSize(QSize(16, 16))
+        self.layers.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # a long row ends in "…", no sideways scroll
         self.layers.itemSelectionChanged.connect(self._layers_picked)
+        self.layers.setMouseTracking(True)
+        self.layers.itemEntered.connect(self._layer_hovered)
+        self.layers.viewport().installEventFilter(self)  # the mouse leaving the list: no object shown
         self.rows: list[design.Obj] = []
         pl.addWidget(self.layers, 1)
-        keys = QLabel("Trascina sul vuoto o Ctrl+clic: più oggetti (quelli tutti dentro il riquadro, "
+        pl.addWidget(ui.keys_button("Trascina sul vuoto o Ctrl+clic: più oggetti (quelli tutti dentro il riquadro, "
                       "anche uno sfondo grande)\nFrecce: sposta di 1 pt, Maiusc+frecce di 10\n"
                       "Maiusc mentre disegni: linea dritta\nAlt mentre trascini: senza guide\n"
                       "Maniglia tonda: ruota (Maiusc: a 15°)\nCanc elimina\nCtrl+C / Ctrl+V copia e incolla, "
                       "anche su un'altra pagina\nCtrl+G raggruppa, Ctrl+L blocca\nCtrl+H trova e sostituisci\n"
-                      "Ctrl+Z annulla, Ctrl+Y ripete",
-                      objectName="Muted")
-        keys.setWordWrap(True)
-        pl.addWidget(keys)
+                      "Ctrl+Z annulla, Ctrl+Y ripete"), alignment=Qt.AlignLeft)
 
         # center: bar, warnings, page
         bar = ui.Bar()
@@ -425,8 +424,7 @@ class DesignTab(QWidget):
         self.b_forms = button("Apri in Moduli", "form", tip="Passa il PDF a Moduli per sistemare i campi")
         self.b_undo = button("", "undo", "Ghost", "Annulla (Ctrl+Z)")
         self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
-        self.file_label = QLabel("", objectName="Muted")
-        self.file_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.file_label = ui.Elided(objectName="Muted")
         self.b_prev = button("", "prev", "Ghost", "Pagina precedente")
         self.b_next = button("", "next", "Ghost", "Pagina successiva")
         self.page_label = QLabel("")
@@ -463,7 +461,10 @@ class DesignTab(QWidget):
         empty = QWidget(objectName="Desk")
         el = QVBoxLayout(empty)
         el.setContentsMargins(80, 60, 80, 60)
-        el.addWidget(self.drop)
+        el.addWidget(self.drop, 3)
+        self.recent_box = ui.RecentFiles()
+        self.recent_box.picked.connect(self.open)
+        el.addWidget(self.recent_box, 2)
         self.stack = QStackedWidget()
         self.stack.addWidget(empty)
         self.stack.addWidget(self.view)
@@ -660,6 +661,7 @@ class DesignTab(QWidget):
         pr.addLayout(acts)
         pr.addStretch()
         side = QScrollArea(objectName="PanelRight")
+        self.panel = props
         side.setWidget(props)
         side.setWidgetResizable(True)
         side.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1354,13 +1356,36 @@ class DesignTab(QWidget):
         self.layers.clear()
         self.rows = sorted(self.objects, key=lambda o: (round(o.rect[1]), o.rect[0]))  # as they are read
         for o in self.rows:
-            it = QListWidgetItem(ui.icon(GLYPHS[o.kind]), _label(o))
+            look = o.data.get("drawing", {})
+            tint = look.get("fill") or look.get("color")
+            it = QListWidgetItem(ui.dot(_hex(tint)) if tint and o.state != "move" else ui.icon(GLYPHS[o.kind]),
+                                 _label(o))
             if o.state == "locked":
                 it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
                 it.setToolTip(f"🔒 {o.reason}")
+            elif o.state == "move":
+                it.setToolTip("Testo disegnato come forme: si sposta, ma le parole non si possono cambiare")
             self.layers.addItem(it)
         self.layers.blockSignals(False)
         self._mark_layers()
+
+    def _layer_hovered(self, it):
+        """The row under the mouse shows its object on the page, as when the mouse is on the object itself."""
+        o = self.rows[self.layers.row(it)] if it is not None else None
+        for i in self.items:
+            on = i.obj is o
+            if i.hover != on:
+                i.hover = on
+                i.update()
+
+    def eventFilter(self, obj, e):
+        if obj is self.layers.viewport() and e.type() == QEvent.Leave:
+            self._layer_hovered(None)
+        return super().eventFilter(obj, e)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.panel.layout().invalidate()  # laid out while hidden, at another width: Qt would keep that one
 
     def _mark_layers(self):
         """The list shows the selection made on the page."""
@@ -1425,6 +1450,7 @@ class DesignTab(QWidget):
         else:
             self.file_label.setText("")
             self.page_label.setText("")
+            self.recent_box.fill()
         self.scene.blockSignals(False)
         self._fill_layers()
         self._show_props()

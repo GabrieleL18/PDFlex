@@ -8,7 +8,9 @@ import threading
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QBuffer, QByteArray, QEventLoop, QIODevice, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import (
+    QBuffer, QByteArray, QEventLoop, QIODevice, QPoint, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
+)
 from PySide6.QtGui import (
     QBrush, QColor, QGuiApplication, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QTextDocument,
 )
@@ -16,7 +18,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
     QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
-    QVBoxLayout,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 INK = "#1D2633"  # on the page (always white paper) and as the light theme's text
@@ -370,36 +372,86 @@ def write_ico(path: str | Path) -> None:
 
 class Bar(QFrame):
     """Command bar at the top of a tab. When the window is too narrow for it, the buttons with an icon
-    drop their text (it stays in the tooltip) instead of forcing the whole window wider."""
+    drop their text (it stays in the tooltip) one at a time, instead of forcing the whole window wider:
+    the plain ones first, from the right; the main one (Primary) last."""
 
     def __init__(self):
         super().__init__(objectName="Bar")
         self.setMinimumWidth(360)
-        self._compact = False
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._fit()
 
-    def _set_compact(self, on: bool):
-        self._compact = on
-        for b in self.findChildren(QPushButton):
-            full = b.property("full")
-            if full is None and b.icon().isNull():
-                continue
-            if full is None:
-                full = b.text()
-                b.setProperty("full", full)
-                if full and not b.toolTip():
-                    b.setToolTip(full)
-            b.setText("" if on else full)
-
     def _fit(self):
-        if self._compact:
-            self._set_compact(False)  # measure with the words back
-        self.layout().invalidate()
-        if self.layout().sizeHint().width() > self.width():
-            self._set_compact(True)
+        lay = self.layout()
+        bs = [b for b in self.findChildren(QPushButton) if not b.icon().isNull()]
+        for b in bs:  # measured with all the words back
+            if b.property("full") is None:
+                b.setProperty("full", b.text())
+                if b.text() and not b.toolTip():
+                    b.setToolTip(b.text())
+            b.setText(b.property("full"))
+        rank = {"Ghost": 0, "Primary": 2}
+        bs.sort(key=lambda b: -b.mapTo(self, QPoint()).x())
+        for b in sorted(bs, key=lambda b: rank.get(b.objectName(), 1)):
+            lay.invalidate()
+            if lay.sizeHint().width() <= self.width():
+                break
+            b.setText("")
+
+
+class Elided(QLabel):
+    """A one-line label that ends in "…" when there is no room for all of it (all of it in the tooltip)."""
+
+    def __init__(self, text="", objectName=""):
+        super().__init__(text, objectName=objectName)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never forces the window wider
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setPen(self.palette().color(self.foregroundRole()))
+        text = self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle, self.contentsRect().width())
+        if text != "…":  # nothing left of it but the dots: better nothing
+            p.drawText(self.contentsRect(), Qt.AlignVCenter | Qt.AlignLeft, text)
+
+
+class RecentFiles(QWidget):
+    """The last PDFs opened, under the big "Apri" target: one click opens one again."""
+    picked = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(0, 18, 0, 0)
+        self.lay.setSpacing(2)
+
+    def fill(self):
+        while self.lay.count():
+            w = self.lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        files = recent_files()
+        if not files:
+            return
+        self.lay.addWidget(QLabel("Aperti di recente", objectName="H2"))
+        for p in files[:6]:
+            b = button(f"{Path(p).name}   {Path(p).parent}", "clock", "Recent", tip=p)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)  # a long path must not widen the window
+            b.clicked.connect(lambda _=False, p=p: self.picked.emit(p))
+            self.lay.addWidget(b)
+        self.lay.addStretch()
+
+
+def keys_button(text: str) -> QPushButton:
+    """The keyboard shortcuts of a tab: shown on hover, and in a box on click, instead of a wall of text."""
+    b = button("Tasti rapidi", "help", "Ghost", text.replace("\n", "<br>"))
+    b.clicked.connect(lambda: message(b.window(), "Tasti rapidi", "info", note=text))
+    return b
 
 
 class DropZone(QFrame):
@@ -692,9 +744,9 @@ def dot(color: str, size=10) -> QIcon:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setPen(Qt.NoPen)
+    p.setPen(QPen(QColor(0, 0, 0, 70), 1.5))  # a white one still shows on a white list
     p.setBrush(QColor(color))
-    p.drawEllipse(2, 2, size * 2 - 4, size * 2 - 4)
+    p.drawEllipse(QRectF(2.5, 2.5, size * 2 - 5, size * 2 - 5))
     p.end()
     return QIcon(pm)
 
