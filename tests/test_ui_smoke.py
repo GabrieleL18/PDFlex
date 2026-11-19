@@ -427,3 +427,23 @@ def test_compare_fit_same_size_side_zoom_and_hover(qapp, make_pdf, tmp_path):
                                                Qt.NoButton, Qt.NoButton, Qt.NoModifier))
     assert len(old._hovering) == 1 and len(new._hovering) == 1  # it and its counterpart
     assert not old._outlined  # hovering is not clicking
+
+
+def test_compare_remembers_last_15(qapp, make_pdf, tmp_path):
+    from pathlib import Path
+    from pdflex.compare import CompareTab, recent_comparisons
+    tab = CompareTab()
+    pdfs =[str(make_pdf(tmp_path, [f"testo {i}"])) for i in range(17)]
+    for i in range(16):
+        tab.load(pdfs[i], pdfs[i + 1])
+    tab.formatting.setChecked(True)  # read again: the last one is remembered with it
+    saved = recent_comparisons()
+    assert len(saved) == 15 and saved[0]["new"].endswith(Path(pdfs[16]).name)
+    assert saved[0]["options"]["formatting"] and not saved[1]["options"]["formatting"]
+    tab.reset()
+    assert tab.recent.count() == 15 and tab.recent.isVisibleTo(tab)
+    tab.reopen(saved[1])  # opens it again, with its options
+    assert tab.stack.currentIndex() == 1 and not tab.formatting.isChecked()
+    assert Path(tab.new_path).name == Path(pdfs[15]).name
+    Path(pdfs[1]).unlink()  # in the oldest one kept (the first comparison was dropped: 16 made, 15 kept)
+    assert len(recent_comparisons()) == 14  # a file gone: left out

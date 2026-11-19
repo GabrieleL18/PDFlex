@@ -443,6 +443,25 @@ KIND_PLURALS = {"insert": "Aggiunte", "delete": "Rimozioni", "replace": "Sostitu
 HINT = "Trascina qui il PDF o clicca per sceglierlo"
 
 
+MEMORY, KEPT = "confronti.json", 15  # the last comparisons, to open again
+OPTIONS = ("ignore_case", "ignore_punct", "ignore_images", "formatting", "moves")  # remembered with each one
+
+
+def recent_comparisons() -> list[dict]:
+    """{"old", "new", "date", "options"}, newest first; the ones whose files are gone are left out."""
+    return [c for c in ui.load_json(MEMORY, []) if Path(c["old"]).exists() and Path(c["new"]).exists()]
+
+
+def remember_comparison(old: str, new: str, options: dict) -> None:
+    old, new = str(Path(old).resolve()), str(Path(new).resolve())
+    c = {"old": old, "new": new, "date": f"{datetime.now():%d/%m/%Y %H:%M}", "options": options}
+    ui.save_json(MEMORY, ([c] + [r for r in ui.load_json(MEMORY, []) if (r["old"], r["new"]) != (old, new)])[:KEPT])
+
+
+def forget_comparison(c: dict) -> None:
+    ui.save_json(MEMORY, [r for r in ui.load_json(MEMORY, []) if (r["old"], r["new"]) != (c["old"], c["new"])])
+
+
 def _dot(color: str) -> QIcon:
     pix = QPixmap(10, 10)
     pix.fill(Qt.transparent)
@@ -577,6 +596,13 @@ class CompareTab(QWidget):
         el.addSpacing(20)
         self.start_slot = QVBoxLayout()  # the comparing options sit here before the comparison, then in the panel
         el.addLayout(self.start_slot)
+        self.recent_title = QLabel("Confronti recenti", objectName="H2")
+        self.recent = QListWidget(objectName="Changes")  # the last comparisons: a click opens one again
+        self.recent.setFixedSize(640, 220)
+        self.recent.itemClicked.connect(lambda it: self.reopen(it.data(Qt.UserRole)))
+        el.addSpacing(16)
+        el.addWidget(self.recent_title, 0, Qt.AlignHCenter)
+        el.addWidget(self.recent, 0, Qt.AlignHCenter)
         el.addStretch(2)
 
         # result
@@ -777,8 +803,37 @@ class CompareTab(QWidget):
         self.drop_new.set_file(None)
         self.summary.setText("Scegli i due PDF da confrontare")
         self.start_slot.addWidget(self.opts, 0, Qt.AlignHCenter)
+        self._fill_recent()
         self.stack.setCurrentIndex(0)
         self._buttons()
+
+    def _fill_recent(self):
+        self.recent.clear()
+        items = recent_comparisons()
+        for c in items:
+            item = QListWidgetItem(ui.icon("clock", ui.color("muted")),
+                                   f"{Path(c['old']).name}   →   {Path(c['new']).name}      {c['date']}")
+            item.setToolTip(f"Originale: {c['old']}\nNuova versione: {c['new']}")
+            item.setData(Qt.UserRole, c)
+            self.recent.addItem(item)
+        self.recent_title.setVisible(bool(items))
+        self.recent.setVisible(bool(items))
+
+    def reopen(self, c: dict):
+        """A remembered comparison again, with the options it had."""
+        missing = [p for p in (c["old"], c["new"]) if not Path(p).exists()]
+        if missing:
+            warn(self, "Non trovo più " + " e ".join(missing))
+            forget_comparison(c)
+            self._fill_recent()
+            return
+        for name, on in c.get("options", {}).items():
+            toggle = getattr(self, name, None)
+            if isinstance(toggle, ui.Toggle):
+                toggle.blockSignals(True)  # set them all, then compare once
+                toggle.setChecked(on)
+                toggle.blockSignals(False)
+        self.load(c["old"], c["new"])
 
     def _buttons(self):
         loaded = self.stack.currentIndex() == 1
@@ -879,6 +934,7 @@ class CompareTab(QWidget):
             self.summary.setText(f"{len(self.changes)} modifiche: " + ", ".join(parts))
         else:
             self.summary.setText("Nessuna differenza nel testo")
+        remember_comparison(self.old_path, self.new_path, {name: getattr(self, name).isChecked() for name in OPTIONS})
         self._apply_filter()
 
     def eventFilter(self, obj, e):
