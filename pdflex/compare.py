@@ -30,6 +30,7 @@ class Word:
     rect: tuple[float, float, float, float]
     text: str
     style: tuple = field(default=(), compare=False)  # (bold, italic, size) when known
+    line: tuple = field(default=(), compare=False)  # (page, block, line): words of one printed line share it
 
 
 @dataclass
@@ -110,21 +111,22 @@ def ocr_available() -> bool:
         return False
 
 
-def extract_words(doc: pymupdf.Document, ocr: bool = False, on_page=None) -> list[Word]:
+def extract_words(doc: pymupdf.Document, ocr: bool = False, on_page=None, styles: bool = True) -> list[Word]:
+    """styles=False skips reading bold/italic/size: the slowest part, needed only to report formatting."""
     out = []
     for page in doc:
         if on_page:
             on_page(page.number)
         words = page.get_text("words")
-        styles = None
+        st = None
         if not words and ocr and ocr_available():  # a scanned page: read the image (no formatting to read)
             tp = page.get_textpage_ocr(language="ita+eng", dpi=300, full=True)
             words = page.get_text("words", textpage=tp)
-            styles = [()] * len(words)
-        styles = styles or _styles(page, words)
-        # get_text gives unrotated coordinates; turn them into what the reader sees
-        out += [Word(page.number, tuple(pymupdf.Rect(w[:4]) * page.rotation_matrix), w[4], st)
-                for w, st in zip(words, styles)]
+            st = [()] * len(words)
+        st = st or (_styles(page, words) if styles else [()] * len(words))
+        m = page.rotation_matrix  # get_text gives unrotated coordinates; turn them into what the reader sees
+        out += [Word(page.number, tuple(pymupdf.Rect(w[:4]) * m), w[4], s, (page.number, w[5], w[6]))
+                for w, s in zip(words, st)]
     return out
 
 
@@ -185,27 +187,25 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
         new = [w for w in new if key(w)]
     a = [key(w) for w in old]
     b = [key(w) for w in new]
-    # Trim the common head/tail first: typical revisions touch a few spots, and
-    # SequenceMatcher is roughly quadratic on what remains.
-    # A 100+ page contract rewritten everywhere can still take seconds: the tab runs this in a thread (ui.run_busy).
-    lo = 0
-    while lo < min(len(a), len(b)) and a[lo] == b[lo]:
-        lo += 1
-    hi = 0
-    while hi < min(len(a), len(b)) - lo and a[-1 - hi] == b[-1 - hi]:
-        hi += 1
-    sm = SequenceMatcher(None, a[lo:len(a) - hi], b[lo:len(b) - hi], autojunk=False)
+    # Lines first, then words only inside the lines that differ: word by word over a whole document is
+    # roughly quadratic (49 s on 100 pages of real text), lines are few and mostly unique.
+    # A document reflowed everywhere is one big region, as slow as before: the tab runs this in a thread.
+    sa, sb = _breaks(old), _breaks(new)
+    ops = []
+    for tag, i1, i2, j1, j2 in _opcodes([tuple(a[x:y]) for x, y in zip(sa, sa[1:])],
+                                        [tuple(b[x:y]) for x, y in zip(sb, sb[1:])]):
+        i1, i2, j1, j2 = sa[i1], sa[i2], sb[j1], sb[j2]
+        ops += ([(tag, i1, i2, j1, j2)] if tag == "equal" else
+                [(t, x1 + i1, x2 + i1, y1 + j1, y2 + j1) for t, x1, x2, y1, y2 in _opcodes(a[i1:i2], b[j1:j2])])
     keyed = []  # (position in the original, change)
-    same = [(k, k) for k in range(lo)]  # pairs of identical words, to look at their formatting
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        i1, i2, j1, j2 = i1 + lo, i2 + lo, j1 + lo, j2 + lo
+    same = []  # pairs of identical words, to look at their formatting
+    for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
             same += list(zip(range(i1, i2), range(j1, j2)))
             continue
         old_at = old[min(i1, len(old) - 1)] if old else None
         new_at = new[min(j1, len(new) - 1)] if new else None
         keyed.append((i1, Change(tag, old[i1:i2], new[j1:j2], old_at, new_at)))
-    same += [(len(a) - hi + k, len(b) - hi + k) for k in range(hi)]
     keyed = _find_moves(keyed, key)
     if formatting:
         run = []
@@ -230,6 +230,26 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
             run = [key(w) for w in words]
             c.whole = [pg for pg in sorted({w.page for w in words}) if _covers(run, pages[side][pg])]
     return changes
+
+
+def _breaks(words: list[Word]) -> list[int]:
+    """Where each printed line starts, plus the end: words[x:y] for consecutive x, y is one line."""
+    return [0] + [k for k in range(1, len(words)) if words[k].line != words[k - 1].line] + [len(words)]
+
+
+def _opcodes(a: list, b: list) -> list[tuple]:
+    """SequenceMatcher's opcodes, with the common head and tail trimmed first: revisions touch a few
+    spots, and it is roughly quadratic on what remains."""
+    lo = 0
+    while lo < min(len(a), len(b)) and a[lo] == b[lo]:
+        lo += 1
+    hi = 0
+    while hi < min(len(a), len(b)) - lo and a[-1 - hi] == b[-1 - hi]:
+        hi += 1
+    sm = SequenceMatcher(None, a[lo:len(a) - hi], b[lo:len(b) - hi], autojunk=False)
+    ops = [("equal", 0, lo, 0, lo)] if lo else []
+    ops += [(t, i1 + lo, i2 + lo, j1 + lo, j2 + lo) for t, i1, i2, j1, j2 in sm.get_opcodes()]
+    return ops + ([("equal", len(a) - hi, len(a), len(b) - hi, len(b))] if hi else [])
 
 
 def _covers(run: list[str], page: list[str]) -> bool:
@@ -517,6 +537,9 @@ class CompareTab(QWidget):
         el.addWidget(sub)
         el.addSpacing(20)
         el.addLayout(zones)
+        el.addSpacing(20)
+        self.start_slot = QVBoxLayout()  # the comparing options sit here before the comparison, then in the panel
+        el.addLayout(self.start_slot)
         el.addStretch(2)
 
         # result
@@ -560,6 +583,12 @@ class CompareTab(QWidget):
         title = QLabel("Modifiche", objectName="H2")
         title.setContentsMargins(14, 0, 14, 4)
         sl.addWidget(title)
+        self.side_slot = QVBoxLayout()
+        self.side_slot.setContentsMargins(14, 0, 14, 0)
+        sl.addLayout(self.side_slot)
+        self.opts = QWidget()  # what to compare: chosen before (reading formatting and images is the slow part)
+        ol = QVBoxLayout(self.opts)
+        ol.setContentsMargins(0, 0, 0, 0)
         opts = QVBoxLayout()
         opts.setContentsMargins(14, 0, 14, 8)
         self.kind_filter = QComboBox()
@@ -572,15 +601,15 @@ class CompareTab(QWidget):
         self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
         self.ignore_case.setChecked(True)
         self.ignore_punct.setChecked(True)
+        self.ignore_images = ui.Toggle("Ignora le immagini")
         self.formatting = ui.Toggle("Segnala grassetto, corsivo e dimensione")
-        self.formatting.toggled.connect(self._rediff)
+        self.formatting.setToolTip("Rende il confronto più lento: va letto lo stile di ogni parola")
         self.include_list = ui.Toggle("Elenco modifiche nel PDF esportato")
         self.include_list.setChecked(True)
         self.include_list.setToolTip("Spento: il PDF esportato contiene solo le pagine affiancate")
-        for c in (self.ignore_case, self.ignore_punct):
-            c.toggled.connect(self._rediff)
-            opts.addWidget(c)
-        opts.addWidget(self.formatting)
+        for c in (self.ignore_case, self.ignore_punct, self.ignore_images, self.formatting):
+            c.toggled.connect(self._options_changed)
+            ol.addWidget(c)
         opts.addWidget(self.include_list)
         opts.addWidget(self.kind_filter)
         sl.addLayout(opts)
@@ -659,6 +688,7 @@ class CompareTab(QWidget):
         self.drop_old.set_file(None)
         self.drop_new.set_file(None)
         self.summary.setText("Scegli i due PDF da confrontare")
+        self.start_slot.addWidget(self.opts, 0, Qt.AlignHCenter)
         self.stack.setCurrentIndex(0)
         self._buttons()
 
@@ -680,13 +710,14 @@ class CompareTab(QWidget):
             return
         # OCR of a scan can take a while: a bar with Annulla, refreshed after every page
         # (no thread: PyMuPDF keeps Python's lock while it works, the window would freeze all the same)
+        styles, pics = self.formatting.isChecked(), not self.ignore_images.isChecked()  # read only what is asked
         try:
             n_old, n = old.page_count, old.page_count + new.page_count
-            with ui.progress(self, "Leggo testo e immagini delle pagine...", 2 * n, cancel=True) as step:
-                old_words = extract_words(old, ocr=True, on_page=step)
-                new_words = extract_words(new, ocr=True, on_page=lambda i: step(n_old + i))
+            with ui.progress(self, "Leggo il testo delle pagine...", 2 * n if pics else n, cancel=True) as step:
+                old_words = extract_words(old, ocr=True, on_page=step, styles=styles)
+                new_words = extract_words(new, ocr=True, on_page=lambda i: step(n_old + i), styles=styles)
                 images = diff_images(extract_images(old, lambda i: step(n + i)),
-                                     extract_images(new, lambda i: step(n + n_old + i)))
+                                     extract_images(new, lambda i: step(n + n_old + i))) if pics else []
         except ui.Cancelled:
             self.reset()
             self.summary.setText("Confronto annullato")
@@ -697,10 +728,20 @@ class CompareTab(QWidget):
             return
         self.old_path, self.new_path = old_path, new_path
         self.docs, self.words, self.images = (old, new), (old_words, new_words), images
+        self._read = (styles, pics)
+        self.side_slot.addWidget(self.opts)
         self.old_label.setText(f"Originale  {Path(old_path).name}")
         self.new_label.setText(f"Nuova versione  {Path(new_path).name}")
         self.stack.setCurrentIndex(1)
         self._rediff()
+
+    def _options_changed(self):
+        """Diff again; read the files again if what is now asked was skipped when they were read."""
+        if self.stack.currentIndex() == 1 and ((self.formatting.isChecked() and not self._read[0]) or
+                                               (not self.ignore_images.isChecked() and not self._read[1])):
+            self.load(self.old_path, self.new_path)
+        else:
+            self._rediff()
 
     def _rediff(self):
         """Diff again with the current options and redraw the highlights."""
@@ -715,7 +756,7 @@ class CompareTab(QWidget):
             options = dict(ignore_case=self.ignore_case.isChecked(), ignore_punct=self.ignore_punct.isChecked(),
                            formatting=self.formatting.isChecked())
             text = ui.run_busy(self, "Confronto i testi...", lambda: diff_words(*self.words, **options))
-            self.changes = merge_changes(text, self.images)
+            self.changes = merge_changes(text, [] if self.ignore_images.isChecked() else self.images)
         finally:
             QApplication.restoreOverrideCursor()
         counts = {k: sum(c.kind == k for c in self.changes) for k in KIND_NAMES}

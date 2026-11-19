@@ -223,3 +223,19 @@ def test_compare_tab_lists_image_changes(qapp, tmp_path):
     assert not tab.list.isRowHidden(0)
     tab.export(str(tmp_path / "r.pdf"))
     tab.export_xlsx(str(tmp_path / "r.xlsx"))
+
+
+def test_lines_first_gives_the_same_changes():
+    """Diffing lines, then words inside the lines that differ, finds what a word-by-word diff finds."""
+    import random
+    rnd = random.Random(3)
+    lines = [[rnd.choice("di la il contratto parte mesi euro".split()) for _ in range(8)] for _ in range(60)]
+    edited = [l[:] for l in lines]
+    edited[10][3], edited[40][0] = "nuovo", "anni"
+    del edited[25]
+
+    def words(ls, with_lines):
+        return [Word(0, (0, 0, 1, 1), t, line=(0, 0, n) if with_lines else ()) for n, l in enumerate(ls) for t in l]
+    plain = diff_words(words(lines, False), words(edited, False))
+    by_line = diff_words(words(lines, True), words(edited, True))
+    assert [(c.kind, c.old, c.new) for c in by_line] == [(c.kind, c.old, c.new) for c in plain]
