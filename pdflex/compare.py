@@ -176,7 +176,7 @@ def merge_changes(text: list[Change], images: list[Change]) -> list[Change]:
 
 
 def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
-               ignore_punct: bool = False, formatting: bool = False) -> list[Change]:
+               ignore_punct: bool = False, formatting: bool = False, moves: bool = True) -> list[Change]:
     """Changes in reading order. A piece removed in one place and added unchanged elsewhere is one "move";
     with formatting=True, same words in bold/italic/another size are a "format" change."""
     def key(w):
@@ -206,7 +206,7 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
         old_at = old[min(i1, len(old) - 1)] if old else None
         new_at = new[min(j1, len(new) - 1)] if new else None
         keyed.append((i1, Change(tag, old[i1:i2], new[j1:j2], old_at, new_at)))
-    keyed = _find_moves(keyed, key)
+    keyed = _find_moves(keyed, key) if moves else keyed
     if formatting:
         run = []
         for i, j in same + [(None, None)]:
@@ -230,6 +230,29 @@ def diff_words(old: list[Word], new: list[Word], ignore_case: bool = False,
             run = [key(w) for w in words]
             c.whole = [pg for pg in sorted({w.page for w in words}) if _covers(run, pages[side][pg])]
     return changes
+
+
+def counterparts(old: list[Word], new: list[Word], changes: list[Change], ignore_punct: bool = False) -> dict:
+    """id(word) -> (its group, the matching words on the other side): the same word for unchanged
+    text, the other side of the change for changed text (for a removal, where it would have been)."""
+    out, changed = {}, set()
+    for c in changes:
+        if c.kind in ("format", "image"):  # same words (format), or not words at all
+            continue
+        pairs = zip(c.old, c.new) if c.kind == "move" else ()
+        for a, b in pairs:
+            out[id(a)], out[id(b)] = ([a], [b]), ([b], [a])
+        if c.kind != "move":
+            there_new, there_old = c.new or [c.new_at] * bool(c.new_at), c.old or [c.old_at] * bool(c.old_at)
+            out.update({id(w): (c.old, there_new) for w in c.old})
+            out.update({id(w): (c.new, there_old) for w in c.new})
+        changed.update(map(id, c.old + c.new))
+
+    def rest(words):  # unchanged words, in order: the same on both sides
+        return [w for w in words if id(w) not in changed and not (ignore_punct and not re.sub(r"[^\w]", "", w.text))]
+    for a, b in zip(rest(old), rest(new)):
+        out[id(a)], out[id(b)] = ([a], [b]), ([b], [a])
+    return out
 
 
 def _breaks(words: list[Word]) -> list[int]:
@@ -402,11 +425,11 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
 
 # ---------------------------------------------------------------- UI
 
-from PySide6.QtCore import QRectF, Qt, Signal  # noqa: E402
-from PySide6.QtGui import QColor, QPainter, QPen  # noqa: E402
+from PySide6.QtCore import QEvent, QRectF, Qt, Signal  # noqa: E402
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
-    QSizePolicy, QSplitter, QStackedWidget, QToolTip, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+    QListWidgetItem, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QToolTip, QVBoxLayout, QWidget,
 )
 
 from pdflex import ui  # noqa: E402
@@ -415,7 +438,21 @@ from pdflex.ui import DocView, button, info, warn  # noqa: E402
 KIND_NAMES = KIND_TITLES
 KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1",
                "image": "#C2357A"}
+KIND_PLURALS = {"insert": "Aggiunte", "delete": "Rimozioni", "replace": "Sostituzioni", "move": "Spostamenti",
+                "format": "Formattazione", "image": "Immagini"}
 HINT = "Trascina qui il PDF o clicca per sceglierlo"
+
+
+def _dot(color: str) -> QIcon:
+    pix = QPixmap(10, 10)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(1, 1, 8, 8)
+    p.end()
+    return QIcon(pix)
 NO_OCR = ("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
           "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex.")
 
@@ -550,6 +587,12 @@ class CompareTab(QWidget):
         self.new_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.new_view, self.old_view))
         self.old_view.scaled.connect(self._zoom_to)
         self.new_view.scaled.connect(self._zoom_to)
+        self.pairs, self.by_page, self._names = {}, ({}, {}), ()
+        for v in (self.old_view, self.new_view):  # the headers say which page is at the top
+            v.verticalScrollBar().valueChanged.connect(self._page_labels)
+            v.verticalScrollBar().rangeChanged.connect(self._page_labels)
+        for v in (self.old_view, self.new_view):  # a click on a word finds its counterpart on the other side
+            v.viewport().installEventFilter(self)
         # the changes' bar in the middle (a click on a tick selects it); each document keeps its own scrollbar too
         self.bar = ChangeBar()
         own = self.old_view.verticalScrollBar()
@@ -591,12 +634,24 @@ class CompareTab(QWidget):
         ol.setContentsMargins(0, 0, 0, 0)
         opts = QVBoxLayout()
         opts.setContentsMargins(14, 0, 14, 8)
-        self.kind_filter = QComboBox()
-        for label, kind in (("Tutte le modifiche", ""), ("Solo aggiunte", "insert"), ("Solo rimozioni", "delete"),
-                            ("Solo sostituzioni", "replace"), ("Solo testo spostato", "move"),
-                            ("Solo formattazione", "format"), ("Solo immagini", "image")):
-            self.kind_filter.addItem(label, kind)
-        self.kind_filter.currentIndexChanged.connect(self._apply_filter)
+        self.search = QLineEdit(placeholderText="Cerca nei due documenti (Ctrl+F)")
+        self.search.setClearButtonEnabled(True)
+        self.search.setToolTip("Invio: risultato successivo, Maiusc+Invio: precedente")
+        self.search.returnPressed.connect(lambda: self.find_text(1))
+        self.search.textChanged.connect(lambda: self.found.setText(""))
+        QShortcut(QKeySequence("Shift+Return"), self.search, lambda: self.find_text(-1))
+        QShortcut(QKeySequence.Find, self, lambda: (self.search.setFocus(), self.search.selectAll()))
+        self.found = QLabel(objectName="Muted")
+        self.hits, self.hit, self._hits_for = [], -1, None
+        self.kind_buttons = {}  # each kind of change shown (pressed) or hidden in the list and on the bar
+        chips = QGridLayout()
+        chips.setSpacing(6)
+        for n, (kind, label) in enumerate(KIND_PLURALS.items()):
+            b = QPushButton(label, checkable=True, checked=True, icon=_dot(KIND_COLORS[kind]))
+            b.setToolTip("Mostra o nascondi questo tipo di modifica nell'elenco e sulla barra")
+            b.toggled.connect(self._apply_filter)
+            chips.addWidget(b, n // 2, n % 2)
+            self.kind_buttons[kind] = b
         self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
         self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
         self.ignore_case.setChecked(True)
@@ -604,14 +659,23 @@ class CompareTab(QWidget):
         self.ignore_images = ui.Toggle("Ignora le immagini")
         self.formatting = ui.Toggle("Segnala grassetto, corsivo e dimensione")
         self.formatting.setToolTip("Rende il confronto più lento: va letto lo stile di ogni parola")
+        self.moves = ui.Toggle("Segnala il testo spostato")
+        self.moves.setChecked(True)
+        self.moves.setToolTip("Spento: un pezzo spostato appare come rimosso in un punto e aggiunto in un altro")
         self.include_list = ui.Toggle("Elenco modifiche nel PDF esportato")
         self.include_list.setChecked(True)
         self.include_list.setToolTip("Spento: il PDF esportato contiene solo le pagine affiancate")
-        for c in (self.ignore_case, self.ignore_punct, self.ignore_images, self.formatting):
+        for c in (self.ignore_case, self.ignore_punct, self.ignore_images, self.formatting, self.moves):
             c.toggled.connect(self._options_changed)
             ol.addWidget(c)
         opts.addWidget(self.include_list)
-        opts.addWidget(self.kind_filter)
+        opts.addSpacing(6)
+        row = QHBoxLayout()
+        row.addWidget(self.search, 1)
+        row.addWidget(self.found)
+        opts.addLayout(row)
+        opts.addSpacing(4)
+        opts.addLayout(chips)
         sl.addLayout(opts)
         sl.addWidget(self.list)
         # the two documents share one divider, with the changes' bar inside it: dragging its edges
@@ -729,9 +793,14 @@ class CompareTab(QWidget):
         self.old_path, self.new_path = old_path, new_path
         self.docs, self.words, self.images = (old, new), (old_words, new_words), images
         self._read = (styles, pics)
+        self.by_page = ({}, {})
+        for side, words in enumerate(self.words):
+            for w in words:
+                self.by_page[side].setdefault(w.page, []).append(w)
         self.side_slot.addWidget(self.opts)
-        self.old_label.setText(f"Originale  {Path(old_path).name}")
-        self.new_label.setText(f"Nuova versione  {Path(new_path).name}")
+        self._names = (("Originale", Path(old_path).name), ("Nuova versione", Path(new_path).name))
+        widest = max(p.rect.width for d in (old, new) for p in d)  # one scale for both: the same size on
+        self.old_view.ref_width = self.new_view.ref_width = widest  # paper is the same size on screen
         self.stack.setCurrentIndex(1)
         self._rediff()
 
@@ -754,9 +823,10 @@ class CompareTab(QWidget):
             self.old_view.show_doc(self.docs[0])
             self.new_view.show_doc(self.docs[1])
             options = dict(ignore_case=self.ignore_case.isChecked(), ignore_punct=self.ignore_punct.isChecked(),
-                           formatting=self.formatting.isChecked())
+                           formatting=self.formatting.isChecked(), moves=self.moves.isChecked())
             text = ui.run_busy(self, "Confronto i testi...", lambda: diff_words(*self.words, **options))
             self.changes = merge_changes(text, [] if self.ignore_images.isChecked() else self.images)
+            self.pairs = counterparts(*self.words, text, options["ignore_punct"])
         finally:
             QApplication.restoreOverrideCursor()
         counts = {k: sum(c.kind == k for c in self.changes) for k in KIND_NAMES}
@@ -772,6 +842,11 @@ class CompareTab(QWidget):
             item.setData(Qt.UserRole + 1, change_html(c, KIND_COLORS[c.kind], ui.color("text_red"),
                                                       ui.color("text_green"), ui.color("muted")))
             self.list.addItem(item)
+        for kind, b in self.kind_buttons.items():
+            b.setText(f"{KIND_PLURALS[kind]}  {counts[kind]}")
+        self._hits_for = None  # the pairs changed: search again
+        self.found.setText("")
+        self._page_labels()
         if self.changes:
             parts = [f"{n} {word}" for n, word in ((counts["insert"], "aggiunte"), (counts["delete"], "rimozioni"),
                                                     (counts["replace"], "sostituzioni"), (counts["move"], "spostamenti"),
@@ -782,9 +857,87 @@ class CompareTab(QWidget):
             self.summary.setText("Nessuna differenza nel testo")
         self._apply_filter()
 
+    def eventFilter(self, obj, e):
+        views = (self.old_view, self.new_view)
+        side = next((n for n, v in enumerate(views) if v.viewport() is obj), None)
+        if side is not None and e.type() == QEvent.MouseButtonPress and e.button() == Qt.LeftButton                 and views[side].offsets:
+            pos = e.position().toPoint()
+            self.find_other(side, views[side].word_at(pos, self.by_page[side]), pos.y())
+        return super().eventFilter(obj, e)
+
+    def find_other(self, side: int, word, at_y: int = 0):
+        """A word clicked: if changed, select its change; otherwise outline it and its counterpart, and
+        scroll the other side to put the counterpart at the same height (at_y, in the viewport)."""
+        here, there = (self.old_view, self.new_view)[side], (self.new_view, self.old_view)[side]
+        i = next((n for n, c in enumerate(self.changes) if any(w is word for w in c.old + c.new)), None)             if word else None
+        if i is not None and not self._hidden(i):
+            here.outline([])
+            there.outline([])
+            self.go_to(i)
+            return
+        mine, other = self.pairs.get(id(word), ([], [])) if word else ([], [])
+        self._show_pair(side, mine, other, at_y)
+
+    def _show_pair(self, side: int, mine, other, at_y: float):
+        """Outline words on one side and their counterpart on the other, lined up at the same height."""
+        here, there = (self.old_view, self.new_view)[side], (self.new_view, self.old_view)[side]
+        here.outline(mine)
+        there.outline(other)
+        if other:
+            self._syncing = True  # only the other side moves
+            try:
+                there.verticalScrollBar().setValue(round(there.word_rect(other[0])[1] - at_y))
+            finally:
+                self._syncing = False
+
+    def _search_hits(self, text: str) -> list:
+        """(side, words) of each match, in the original's reading order; text found in both versions at
+        the same unchanged spot counts once."""
+        q = text.lower().split()
+        old_pos = {id(w): i for i, w in enumerate(self.words[0])}
+        hits, starts = [], set()
+        for side, words in enumerate(self.words):
+            keys = [w.text.lower() for w in words]
+            for i in range(len(keys) - len(q) + 1):
+                if all(q[k] in keys[i + k] for k in range(len(q))):
+                    ws = words[i:i + len(q)]
+                    mine, there = self.pairs.get(id(ws[0]), ([ws[0]], []))
+                    if side == 1 and len(mine) == 1 and there and id(there[0]) in starts:
+                        continue  # the same, unchanged, already found in the original
+                    if side == 0:
+                        starts.add(id(ws[0]))
+                    at = i if side == 0 else old_pos.get(id(there[0]), len(old_pos)) if there else len(old_pos)
+                    hits.append((at, side, ws))
+        return [(side, ws) for _, side, ws in sorted(hits, key=lambda h: (h[0], h[1]))]
+
+    def find_text(self, d: int = 1):
+        """Next (d=1) or previous (d=-1) match of the search box, outlined with its counterpart."""
+        text = self.search.text().strip()
+        if not text or self.stack.currentIndex() != 1:
+            return
+        if self._hits_for != text:
+            self.hits, self.hit, self._hits_for = self._search_hits(text), (-1 if d > 0 else 0), text
+        if not self.hits:
+            self.found.setText("Nessun risultato")
+            return
+        self.hit = (self.hit + d) % len(self.hits)
+        side, ws = self.hits[self.hit]
+        self.found.setText(f"{self.hit + 1} di {len(self.hits)}")
+        here = (self.old_view, self.new_view)[side]
+        x, y, wd, h = here.word_rect(ws[0])
+        here.centerOn(x + wd / 2, y + h / 2)  # the other side follows, then lines up exactly
+        other = self.pairs.get(id(ws[0]), ([], []))[1]
+        self._show_pair(side, ws, other, here.mapFromScene(x, y).y())
+
+    def _page_labels(self):
+        """Column headers: which page is at the top of each side, and the file."""
+        for label, view, (title, name) in zip((self.old_label, self.new_label), (self.old_view, self.new_view),
+                                              self._names):
+            pages = f"   ·   pagina {view.position()[0] + 1} di {len(view.offsets)}" if view.offsets else ""
+            label.setText(f"{title}{pages}   ·   {name}")
+
     def _hidden(self, i) -> bool:
-        kind = self.kind_filter.currentData()
-        return bool(kind) and self.changes[i].kind != kind
+        return not self.kind_buttons[self.changes[i].kind].isChecked()
 
     def _apply_filter(self):
         for i in range(len(self.changes)):

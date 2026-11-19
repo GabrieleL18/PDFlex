@@ -866,11 +866,13 @@ class DocView(QGraphicsView):
         self.doc = None
         self.k = 1.0
         self.scale = 1.0  # zoom on top of "fit to width"
+        self.ref_width = None  # points fitted to the width; None: this document's widest page
         self.offsets: list[float] = []
         self.heights: list[float] = []
         self.highlights = []  # (words, rgb, opacity)
         self.current = ([], None)
         self._marks = []
+        self._outlined = []  # words outlined under the mouse (compare: a word and its counterpart)
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBar(MarkBar())
@@ -891,8 +893,8 @@ class DocView(QGraphicsView):
         frac = bar.value() / bar.maximum() if bar.maximum() else 0
         s = self.scene()
         s.clear()
-        self._marks = []
-        widest = max(p.rect.width for p in self.doc)
+        self._marks, self._outlined = [], []
+        widest = self.ref_width or max(p.rect.width for p in self.doc)
         # width with the scrollbar always reserved: it comes and goes with the zoom, the fit must not move
         avail = self.width() - 2 * self.frameWidth() - self.verticalScrollBar().sizeHint().width()
         self.k = max(avail - 2 * self.GAP, 200) / widest * self.scale
@@ -989,6 +991,24 @@ class DocView(QGraphicsView):
         for w in self.current[0]:
             x, y, wd, h = self.word_rect(w)
             self._marks.append(self.scene().addRect(x - 2, y - 2, wd + 4, h + 4, pen))
+
+    def outline(self, words):
+        """A light box around these words, replacing the previous one ([] removes it)."""
+        for item in self._outlined:
+            self.scene().removeItem(item)
+        pen, fill = QPen(QColor(ACCENT), 1.5), QBrush(QColor.fromRgbF(0.23, 0.25, 0.68, 0.12))
+        self._outlined = [self.scene().addRect(x - 1.5, y - 1.5, wd + 3, h + 3, pen, fill)
+                          for x, y, wd, h in map(self.word_rect, words)]
+
+    def word_at(self, pos, words_by_page: dict) -> object:
+        """The word under a point of the viewport, among words_by_page[page]; None between words."""
+        p = self.mapToScene(pos)
+        page = max((n for n, off in enumerate(self.offsets) if off <= p.y()), default=None)
+        if page is None:
+            return None
+        x, y = (p.x() - self.GAP) / self.k, (p.y() - self.offsets[page]) / self.k
+        return next((w for w in words_by_page.get(page, ()) if w.rect[0] <= x <= w.rect[2] and
+                     w.rect[1] <= y <= w.rect[3]), None)
 
     def mark(self, words, at=None):
         self.current = (words, at)

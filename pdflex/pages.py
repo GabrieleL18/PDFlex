@@ -232,8 +232,8 @@ class PagesTab(QWidget):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
         self.b_add = button("Aggiungi PDF", "open", tip="Aggiungi le pagine di uno o più PDF in fondo")
-        self.b_left = button("", "rotate-left", "Ghost", "Ruota a sinistra")
-        self.b_right = button("", "rotate-right", "Ghost", "Ruota a destra")
+        self.b_left = button("", "rotate-left", "Ghost", "Ruota a sinistra le pagine selezionate (Ctrl+Maiusc+R)")
+        self.b_right = button("", "rotate-right", "Ghost", "Ruota a destra le pagine selezionate (Ctrl+R)")
         self.b_del = button("Elimina", "trash", "Danger", "Togli le pagine selezionate (Canc)")
         self.b_view = button("Anteprima", "eye", tip="Il PDF come verrà salvato, pagina per pagina")
         self.b_extras = button("Opzioni", "page", tip="Numeri di pagina, intestazione, filigrana e dimensione del file")
@@ -299,6 +299,8 @@ class PagesTab(QWidget):
         lay.addWidget(bar)
         lay.addWidget(self.stack, 1)
         QShortcut(QKeySequence.Delete, self.grid, self.delete_selected)
+        QShortcut(QKeySequence("Ctrl+R"), self.grid, lambda: self.rotate(90))
+        QShortcut(QKeySequence("Ctrl+Shift+R"), self.grid, lambda: self.rotate(-90))
         QShortcut(QKeySequence.Undo, self, self.undo)
         QShortcut(QKeySequence.Redo, self, self.redo)
         self._buttons()
@@ -406,7 +408,7 @@ class PagesTab(QWidget):
             self.page_menu(item).exec(self.grid.viewport().mapToGlobal(pos))
 
     def page_menu(self, item) -> QMenu:
-        """Right click on a page: move it, look at it, delete it (the selection, if the page is in it)."""
+        """Right click on a page: move it, rotate it, look at it, delete it (the selection, if the page is in it)."""
         if not item.isSelected():
             self.grid.clearSelection()
             item.setSelected(True)
@@ -419,6 +421,10 @@ class PagesTab(QWidget):
                                       ("Sposta alla fine", None, last, rows[-1] < last)):
             a = m.addAction(ui.icon(glyph, ui.color("ink")) if glyph else QIcon(), text, lambda s=step: self.shift(s))
             a.setEnabled(ok)
+        m.addSeparator()
+        m.addAction(ui.icon("rotate-right", ui.color("ink")), "Ruota a destra	Ctrl+R", lambda: self.rotate(90))
+        m.addAction(ui.icon("rotate-left", ui.color("ink")), "Ruota a sinistra	Ctrl+Maiusc+R", lambda: self.rotate(-90))
+        m.addAction(QIcon(), "Capovolgi", lambda: self.rotate(180))
         m.addSeparator()
         m.addAction(ui.icon("eye", ui.color("ink")), "Vedi la pagina", lambda: self.show_page(item))
         m.addAction(ui.icon("trash", ui.color("danger")), "Elimina", self.delete_selected)

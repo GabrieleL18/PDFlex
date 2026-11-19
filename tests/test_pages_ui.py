@@ -110,7 +110,15 @@ def test_right_click_moves_shows_and_deletes(qapp, make_pdf, tmp_path):
     shown = {a.text(): a for a in menu.actions() if a.text()}
     assert [i.text() for i in g.selectedItems()] == [g.item(1).text()]
     assert set(shown) == {"Sposta indietro", "Sposta avanti", "Sposta all'inizio", "Sposta alla fine",
+                          "Ruota a destra	Ctrl+R", "Ruota a sinistra	Ctrl+Maiusc+R", "Capovolgi",
                           "Vedi la pagina", "Elimina"}
+    shown["Ruota a destra	Ctrl+R"].trigger()
+    shown["Capovolgi"].trigger()
+    assert tab.refs()[1].rotation == 270
+    tab.undo()
+    tab.undo()
+    menu = tab.page_menu(g.item(1))
+    shown = {a.text(): a for a in menu.actions() if a.text()}
     shown["Sposta avanti"].trigger()
     assert order() == [0, 2, 1, 3]
     shown["Sposta indietro"].trigger()

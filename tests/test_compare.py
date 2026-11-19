@@ -219,7 +219,8 @@ def test_compare_tab_lists_image_changes(qapp, tmp_path):
     tab.load(*paths)
     assert [c.kind for c in tab.changes] == ["image"]
     assert "Immagine cambiata" in tab.list.item(0).data(256 + 1)
-    tab.kind_filter.setCurrentIndex(tab.kind_filter.findData("image"))
+    for kind, b in tab.kind_buttons.items():
+        b.setChecked(kind == "image")
     assert not tab.list.isRowHidden(0)
     tab.export(str(tmp_path / "r.pdf"))
     tab.export_xlsx(str(tmp_path / "r.xlsx"))
@@ -239,3 +240,13 @@ def test_lines_first_gives_the_same_changes():
     plain = diff_words(words(lines, False), words(edited, False))
     by_line = diff_words(words(lines, True), words(edited, True))
     assert [(c.kind, c.old, c.new) for c in by_line] == [(c.kind, c.old, c.new) for c in plain]
+
+
+def test_counterparts_pair_same_words_and_changes():
+    from pdflex.compare import counterparts
+    old, new = W("a", "b", "c", "d", "e", "f"), W("a", "x", "c", "e", "f", "g")
+    m = counterparts(old, new, diff_words(old, new))
+    assert m[id(old[2])] == ([old[2]], [new[2]])  # unchanged "c"
+    assert m[id(old[1])] == ([old[1]], [new[1]])  # "b" replaced by "x"
+    assert m[id(old[3])] == ([old[3]], [new[3]])  # "d" removed: where it would be in the new one
+    assert m[id(new[5])][1] and m[id(old[5])] == ([old[5]], [new[4]])  # "g" added; "f" still paired

@@ -98,7 +98,8 @@ def test_compare_options_filter_excel(qapp, make_pdf, tmp_path):
     tab.load(str(make_pdf(tmp_path, ["uno due tre quattro"])), str(make_pdf(tmp_path, ["uno DUE tre quattro cinque"])))
     tab.ignore_punct.setChecked(False)
     assert [c.kind for c in tab.changes] == ["replace", "insert"]
-    tab.kind_filter.setCurrentIndex(tab.kind_filter.findData("insert"))
+    for kind, b in tab.kind_buttons.items():  # only the additions
+        b.setChecked(kind == "insert")
     assert tab.list.isRowHidden(0) and not tab.list.isRowHidden(1) and tab.current == 1
     out = tmp_path / "m.xlsx"
     tab.export_xlsx(str(out))
@@ -348,3 +349,50 @@ def test_keys_window_and_f1_of_the_tab_shown(qapp, monkeypatch):
         QTest.keyClick(w, Qt.Key_F1)
         assert shown[-1] == first
     w.close()
+
+
+def test_compare_click_finds_counterpart(qapp, make_pdf, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1200, 700)
+    tab.show()
+    tab.load(str(make_pdf(tmp_path, ["prezzo 100 euro\ncontratto annuale"])),
+             str(make_pdf(tmp_path, ["premessa nuova\nprezzo 120 euro\ncontratto annuale"])))
+    QTest.qWait(300)
+    v = tab.old_view
+
+    def click(text):
+        w = next(w for w in tab.words[0] if w.text == text)
+        x, y, wd, h = v.word_rect(w)
+        QTest.mouseClick(v.viewport(), Qt.LeftButton, pos=v.mapFromScene(x + wd / 2, y + h / 2))
+    click("contratto")  # unchanged: outlined on both sides
+    assert len(v._outlined) == 1 and len(tab.new_view._outlined) == 1
+    tab.go_to(0)
+    click("100")  # changed: its change gets selected
+    assert "100" in tab.changes[tab.current].label() and not tab.new_view._outlined
+
+
+def test_compare_search_same_scale_moves_and_page_labels(qapp, make_pdf, tmp_path):
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1200, 700)
+    tab.show()
+    tab.load(str(make_pdf(tmp_path, ["alfa beta gamma\ndelta prezzo", "seconda pagina"])),
+             str(make_pdf(tmp_path, ["delta prezzo\nalfa beta gamma", "seconda pagina nuova"])))
+    assert abs(tab.old_view.k / tab.new_view.k - 1) < 0.01  # one scale for both (columns may differ by a pixel)
+    assert "pagina 1 di 2" in tab.old_label.text()
+    assert any(c.kind == "move" for c in tab.changes)
+    tab.moves.setChecked(False)  # a move becomes a removal and an addition
+    assert not any(c.kind == "move" for c in tab.changes)
+    tab.search.setText("gamma")
+    tab.find_text(1)
+    assert tab.found.text() == "1 di 1"  # unchanged in both: found once, outlined on both sides
+    assert tab.old_view._outlined and tab.new_view._outlined
+    tab.search.setText("nuova")  # only in the new version
+    tab.find_text(1)
+    assert tab.found.text() == "1 di 1" and tab.hits[0][0] == 1
+    tab.search.setText("zzz")
+    tab.find_text(1)
+    assert tab.found.text() == "Nessun risultato"
