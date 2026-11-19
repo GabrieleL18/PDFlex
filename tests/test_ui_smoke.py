@@ -396,3 +396,34 @@ def test_compare_search_same_scale_moves_and_page_labels(qapp, make_pdf, tmp_pat
     tab.search.setText("zzz")
     tab.find_text(1)
     assert tab.found.text() == "Nessun risultato"
+
+
+def test_compare_fit_same_size_side_zoom_and_hover(qapp, make_pdf, tmp_path):
+    from PySide6.QtTest import QTest
+    from pdflex.compare import CompareTab
+    tab = CompareTab()
+    tab.resize(1400, 700)
+    tab.show()
+    tab.load(str(make_pdf(tmp_path, ["prezzo 100 euro\ncontratto annuale"])),
+             str(make_pdf(tmp_path, ["prezzo 120 euro\ncontratto annuale"])))
+    tab.pair.setSizes([700, 300])  # columns of different widths: same pages, still the same size
+    QTest.qWait(400)
+    old, new = tab.old_view, tab.new_view
+    assert old.k == new.k
+    tab.side_zoom[new].click()  # "fit" on one side: nothing changes
+    assert old.k == new.k
+    plus = [b for b in new.parent().findChildren(type(tab.b_zin)) if "Ingrandisci" in b.toolTip()][0]
+    plus.click()  # only the new version grows
+    assert old.scale == 1.0 and new.scale == 1.25 and tab.zoom_label.text() == "100% · 125%"
+    tab.zoom_fit()
+    assert old.k == new.k and tab.zoom_label.text() == "100%"
+    QTest.qWait(300)  # let pending re-renders run: they would drop the outline
+    w = next(w for w in tab.words[0] if w.text == "contratto")
+    x, y, wd, h = old.word_rect(w)
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    at = QPointF(old.mapFromScene(x + wd / 2, y + h / 2))  # sent straight to it: other tests' windows linger
+    qapp.sendEvent(old.viewport(), QMouseEvent(QEvent.MouseMove, at, old.viewport().mapToGlobal(at),
+                                               Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+    assert len(old._hovering) == 1 and len(new._hovering) == 1  # it and its counterpart
+    assert not old._outlined  # hovering is not clicking

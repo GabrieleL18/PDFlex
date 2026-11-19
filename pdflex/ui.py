@@ -867,12 +867,14 @@ class DocView(QGraphicsView):
         self.k = 1.0
         self.scale = 1.0  # zoom on top of "fit to width"
         self.ref_width = None  # points fitted to the width; None: this document's widest page
+        self.partner = None  # another DocView: both fit to the narrower of the two, so equal pages look equal
         self.offsets: list[float] = []
         self.heights: list[float] = []
         self.highlights = []  # (words, rgb, opacity)
         self.current = ([], None)
         self._marks = []
-        self._outlined = []  # words outlined under the mouse (compare: a word and its counterpart)
+        self._outlined = []  # words outlined after a click (compare: a word and its counterpart)
+        self._hovering = []  # the same, lighter, for the word under the mouse
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBar(MarkBar())
@@ -893,10 +895,9 @@ class DocView(QGraphicsView):
         frac = bar.value() / bar.maximum() if bar.maximum() else 0
         s = self.scene()
         s.clear()
-        self._marks, self._outlined = [], []
+        self._marks, self._outlined, self._hovering = [], [], []
         widest = self.ref_width or max(p.rect.width for p in self.doc)
-        # width with the scrollbar always reserved: it comes and goes with the zoom, the fit must not move
-        avail = self.width() - 2 * self.frameWidth() - self.verticalScrollBar().sizeHint().width()
+        avail = min(v.fit_px() for v in (self, self.partner) if v is not None)
         self.k = max(avail - 2 * self.GAP, 200) / widest * self.scale
         dpr = self.devicePixelRatioF()
         self.offsets, self.heights, y = [], [], self.GAP
@@ -992,13 +993,24 @@ class DocView(QGraphicsView):
             x, y, wd, h = self.word_rect(w)
             self._marks.append(self.scene().addRect(x - 2, y - 2, wd + 4, h + 4, pen))
 
-    def outline(self, words):
-        """A light box around these words, replacing the previous one ([] removes it)."""
-        for item in self._outlined:
+    def fit_px(self) -> int:
+        """Pixels the page width is fitted to: the view without its scrollbar, always reserved, since it
+        comes and goes with the zoom and the fit must not move."""
+        return self.width() - 2 * self.frameWidth() - self.verticalScrollBar().sizeHint().width()
+
+    def outline(self, words, hover: bool = False):
+        """A box around these words, replacing the previous one ([] removes it); hover=True: a lighter,
+        dashed one for the word under the mouse, kept apart from the clicked one."""
+        for item in self._hovering if hover else self._outlined:
             self.scene().removeItem(item)
-        pen, fill = QPen(QColor(ACCENT), 1.5), QBrush(QColor.fromRgbF(0.23, 0.25, 0.68, 0.12))
-        self._outlined = [self.scene().addRect(x - 1.5, y - 1.5, wd + 3, h + 3, pen, fill)
-                          for x, y, wd, h in map(self.word_rect, words)]
+        pen = QPen(QColor(ACCENT), 1.2 if hover else 1.5, Qt.DashLine if hover else Qt.SolidLine)
+        fill = QBrush(QColor.fromRgbF(0.23, 0.25, 0.68, 0.08 if hover else 0.12))
+        items = [self.scene().addRect(x - 1.5, y - 1.5, wd + 3, h + 3, pen, fill)
+                 for x, y, wd, h in map(self.word_rect, words)]
+        if hover:
+            self._hovering = items
+        else:
+            self._outlined = items
 
     def word_at(self, pos, words_by_page: dict) -> object:
         """The word under a point of the viewport, among words_by_page[page]; None between words."""

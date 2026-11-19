@@ -585,13 +585,16 @@ class CompareTab(QWidget):
         self.new_view.verticalScrollBar().valueChanged.connect(lambda: self._follow(self.new_view, self.old_view))
         self.old_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.old_view, self.new_view))
         self.new_view.horizontalScrollBar().valueChanged.connect(lambda: self._follow_x(self.new_view, self.old_view))
-        self.old_view.scaled.connect(self._zoom_to)
-        self.new_view.scaled.connect(self._zoom_to)
+        self.old_view.scaled.connect(lambda: self._zoom_labels())  # Ctrl+wheel: only the document under it
+        self.new_view.scaled.connect(lambda: self._zoom_labels())
+        self.old_view.partner, self.new_view.partner = self.new_view, self.old_view  # same pages, same size
         self.pairs, self.by_page, self._names = {}, ({}, {}), ()
         for v in (self.old_view, self.new_view):  # the headers say which page is at the top
             v.verticalScrollBar().valueChanged.connect(self._page_labels)
             v.verticalScrollBar().rangeChanged.connect(self._page_labels)
-        for v in (self.old_view, self.new_view):  # a click on a word finds its counterpart on the other side
+        self._hovered = None
+        for v in (self.old_view, self.new_view):  # the word under the mouse and its counterpart are outlined;
+            v.viewport().setMouseTracking(True)  # a click finds the counterpart on the other side
             v.viewport().installEventFilter(self)
         # the changes' bar in the middle (a click on a tick selects it); each document keeps its own scrollbar too
         self.bar = ChangeBar()
@@ -609,15 +612,36 @@ class CompareTab(QWidget):
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self._row_changed)
 
+        self.side_zoom = {}  # view -> its own percentage button
+
         def column(label, view, color):
             w = QWidget()
             v = QVBoxLayout(w)
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(0)
-            label.setObjectName("Column")
-            label.setStyleSheet(f"border-bottom: 3px solid {color};")
-            v.addWidget(label)
-            v.addWidget(view, 1)  # the view takes the height, not the label (the bar's one is empty)
+            head = QFrame(objectName="Column")
+            head.setFixedHeight(36)
+            hl = QHBoxLayout(head)
+            hl.setContentsMargins(14, 0, 6, 0)
+            hl.setSpacing(0)
+            hl.addWidget(label, 1)
+            if isinstance(view, DocView):  # its own zoom, like the top bar's but for this document only
+                out = button("", "zoom-out", "Ghost", "Rimpicciolisci solo questo documento (Ctrl+rotellina sopra)")
+                pct = button("100%", None, "Ghost", "Adatta alla larghezza solo questo documento")
+                inn = button("", "zoom-in", "Ghost", "Ingrandisci solo questo documento (Ctrl+rotellina sopra)")
+                out.clicked.connect(lambda: self._zoom({view: view.scale / 1.25}))
+                inn.clicked.connect(lambda: self._zoom({view: view.scale * 1.25}))
+                pct.clicked.connect(lambda: self._zoom({view: 1.0}))
+                for b in (out, pct, inn):
+                    b.setFixedHeight(28)
+                    hl.addWidget(b)
+                self.side_zoom[view] = pct
+            line = QFrame()  # the side's colour under its header
+            line.setFixedHeight(3)
+            line.setStyleSheet(f"background: {color};")
+            v.addWidget(head)
+            v.addWidget(line)
+            v.addWidget(view, 1)  # the view takes the height, not the header
             return w
 
         side = QFrame(objectName="Panel")
@@ -860,16 +884,35 @@ class CompareTab(QWidget):
     def eventFilter(self, obj, e):
         views = (self.old_view, self.new_view)
         side = next((n for n, v in enumerate(views) if v.viewport() is obj), None)
-        if side is not None and e.type() == QEvent.MouseButtonPress and e.button() == Qt.LeftButton                 and views[side].offsets:
+        if side is None or not views[side].offsets:
+            return super().eventFilter(obj, e)
+        if e.type() == QEvent.MouseButtonPress and e.button() == Qt.LeftButton:
             pos = e.position().toPoint()
             self.find_other(side, views[side].word_at(pos, self.by_page[side]), pos.y())
+        elif e.type() == QEvent.MouseMove and not e.buttons():
+            self._hover(side, views[side].word_at(e.position().toPoint(), self.by_page[side]))
+        elif e.type() == QEvent.Leave:
+            self._hover(side, None)
         return super().eventFilter(obj, e)
+
+    def _hover(self, side: int, word):
+        """The word under the mouse (its whole change, if changed) and its counterpart, lightly outlined;
+        nothing scrolls: a click does that."""
+        here, there = (self.old_view, self.new_view)[side], (self.new_view, self.old_view)[side]
+        if word is self._hovered and (here._hovering or not word):  # a re-render drops the outline
+            return
+        self._hovered = word
+        mine, other = self.pairs.get(id(word), ([word], [])) if word else ([], [])
+        here.outline(mine, hover=True)
+        there.outline(other, hover=True)
+        here.viewport().setCursor(Qt.PointingHandCursor if word else Qt.ArrowCursor)
 
     def find_other(self, side: int, word, at_y: int = 0):
         """A word clicked: if changed, select its change; otherwise outline it and its counterpart, and
         scroll the other side to put the counterpart at the same height (at_y, in the viewport)."""
         here, there = (self.old_view, self.new_view)[side], (self.new_view, self.old_view)[side]
-        i = next((n for n, c in enumerate(self.changes) if any(w is word for w in c.old + c.new)), None)             if word else None
+        i = (next((n for n, c in enumerate(self.changes) if any(w is word for w in c.old + c.new)), None)
+             if word else None)
         if i is not None and not self._hidden(i):
             here.outline([])
             there.outline([])
@@ -993,22 +1036,33 @@ class CompareTab(QWidget):
         if i is not None:
             self.go_to(i)
 
-    def _zoom_to(self, scale: float):
-        """Both documents always share the same zoom, keeping the reader on the same spot."""
-        pos = self.old_view.position() if self.old_view.offsets else None
+    def _zoom(self, scales: dict):
+        """New zoom for some views ({view: scale}); each keeps the reader on the same spot. 1.0 is "fit to
+        width", the same size for both documents: it changes only from here, never by itself."""
         self._syncing = True
         try:
-            self.old_view.set_scale(scale)
-            self.new_view.set_scale(scale)
-            if pos:
-                self.old_view.scroll_to(*pos)
-                self.new_view.scroll_to(*pos)
+            for view, scale in scales.items():
+                pos = view.position() if view.offsets else None
+                view.set_scale(scale)
+                if pos:
+                    view.scroll_to(*pos)
         finally:
             self._syncing = False
-        self.zoom_label.setText(f"{round(self.old_view.scale * 100)}%")
+        self._zoom_labels()
+
+    def _zoom_labels(self):
+        a, b = (round(v.scale * 100) for v in (self.old_view, self.new_view))
+        self.zoom_label.setText(f"{a}%" if a == b else f"{a}% · {b}%")
+        for view, pct in self.side_zoom.items():
+            pct.setText(f"{round(view.scale * 100)}%")
+
+    def _zoom_to(self, scale: float):
+        """Both documents at the same zoom."""
+        self._zoom({self.old_view: scale, self.new_view: scale})
 
     def zoom_by(self, factor: float):
-        self._zoom_to(self.old_view.scale * factor)
+        """Both documents bigger or smaller, each from its own zoom."""
+        self._zoom({v: v.scale * factor for v in (self.old_view, self.new_view)})
 
     def zoom_fit(self):
         self._zoom_to(1.0)
