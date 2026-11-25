@@ -701,14 +701,26 @@ def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dic
     """(field data, on-screen rect) for a block dropped at `at`; a name already in `taken` gets the next
     free one (see next_name: arrays like "Nome[0]" count up).
 
-    A sum keeps pointing at the renamed fields of the same block."""
+    A sum keeps pointing at the renamed fields of the same block. Numbered names all move on by the same
+    step, the first one free for all of them: Nome[0..2] -> Nome[3..5] in the same order whatever was
+    selected first, and a row Nome[0] + Cognome[0] stays a row (Nome[2] + Cognome[2], not Nome[2] + Cognome[1])."""
+    names = list(dict.fromkeys(d["name"] for d in block))  # radio buttons of one group share the name
+
+    def shifted(name, k):
+        m = NUMBERED.match(name)
+        if not m:
+            return None
+        return f"{m.group(1)}[{int(m.group(3)) + k}]" if m.group(3) is not None else f"{m.group(1)}({int(m.group(4)) + k})"
+    k = 0
+    if any(n in taken for n in names):
+        k = 1
+        while any(shifted(n, k) in taken for n in names):
+            k += 1
     renamed = {}
-    for d in block:
-        if d["name"] in renamed:  # radio buttons of one group share the name
-            continue
-        name = next_name(d["name"], taken)
+    for n in names:
+        name = shifted(n, k) if k and NUMBERED.match(n) else next_name(n, taken)
         taken.add(name)
-        renamed[d["name"]] = name
+        renamed[n] = name
     out = []
     for d in block:
         d = {**copy.deepcopy(d), "name": renamed[d["name"]]}

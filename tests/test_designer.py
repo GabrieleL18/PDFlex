@@ -466,3 +466,16 @@ def test_unsaved_pdf_comes_back_after_a_crash(qapp, tmp_path):
     again = DesignTab()
     again.restore(path, copy)
     assert again.path == path and again.dirty and _line_y(again) == 134
+
+
+def test_close_frees_the_file_and_asks_to_save(qapp, tmp_path, monkeypatch):
+    import os
+    tab = _tab(tmp_path)
+    os.replace(tab.path, tmp_path / "moved.pdf")  # free while open: read into memory
+    tab.select([o for o in tab.objects if o.kind == "line"])
+    tab.move_selected(0, 30)
+    asked = []
+    monkeypatch.setattr(ui, "message", lambda *a, **k: asked.append(a[1]) or 2)  # Annulla
+    assert not tab.close_doc() and tab.doc is not None
+    monkeypatch.setattr(ui, "message", lambda *a, **k: 1)  # Non salvare
+    assert tab.close_doc() and tab.doc is None and not tab.b_close.isVisibleTo(tab) and asked

@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
             b.setChecked(tab is self.editor)
             b.setFixedWidth(76)
             b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(lambda _=False, t=tab: self.tabs.setCurrentWidget(t))
+            b.clicked.connect(lambda _=False, t=tab: self.go(t))
             group.addButton(b)
             self.rail[tab] = b
             rl.addWidget(b, alignment=Qt.AlignHCenter)
@@ -136,8 +136,18 @@ class MainWindow(QMainWindow):
         """The Editor hands its saved PDF to Moduli, to fix the fields."""
         self.editor.open(path)
         if self.editor.path == path:
-            self.tabs.setCurrentWidget(self.editor)
-            self.rail[self.editor].setChecked(True)
+            self.go(self.editor)
+
+    def go(self, tab) -> bool:
+        """To another section. The Editor or Moduli being left closes its document, so the file is free
+        (asking to save it first); Annulla stays where it was."""
+        here = self.tabs.currentWidget()
+        if tab is not here and getattr(here, "doc", None) is not None and not here.close_doc():
+            self.rail[here].setChecked(True)
+            return False
+        self.tabs.setCurrentWidget(tab)
+        self.rail[tab].setChecked(True)
+        return True
 
     def _theme_button(self):
         dark = ui.THEME == "dark"

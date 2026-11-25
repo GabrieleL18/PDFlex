@@ -68,6 +68,7 @@ def test_setup_download_runs_silently(monkeypatch, tmp_path):
     monkeypatch.setattr(update.sys, "platform", "test")
     command = _install_command(update.start_install(installer, pid=1, folder=folder).read_text(encoding="utf-8-sig"))
     assert "Start-Process -Wait" in command and "'/VERYSILENT'" in command and str(installer) in command
+    assert f"/DIR=\"{update.INSTALLED.parent}\"" in command  # over the running copy, wherever it is
 
 
 def test_update_button_downloads_then_waits_to_install(qapp, monkeypatch, tmp_path):

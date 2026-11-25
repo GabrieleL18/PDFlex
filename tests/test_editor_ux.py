@@ -346,3 +346,22 @@ def test_unsaved_fields_come_back_after_a_crash(tab, qapp):
     tab.dirty = False
     tab.backup()
     assert "moduli" not in recovery.pending()
+
+
+def test_pasted_array_keeps_its_order_and_its_rows(tab):
+    def make(names):
+        tab.fields.clear()
+        out = []
+        for i, n in enumerate(names):
+            f = tab.add_field("text", 0, (20, 20 + 30 * i, 100, 40 + 30 * i))
+            f.name = n
+            out.append(f)
+        return out
+    column = make(["Nome[0]", "Nome[1]", "Nome[2]"])
+    tab.select_many(column[::-1])  # selected from the bottom up
+    tab.copy_selected()
+    assert [f.name for f in sorted(tab.paste(), key=lambda f: f.rect[1])] == ["Nome[3]", "Nome[4]", "Nome[5]"]
+    row = make(["Nome[0]", "Cognome[0]", "Nome[1]"])
+    tab.select_many(row[:2])
+    tab.copy_selected()
+    assert sorted(f.name for f in tab.paste()) == ["Cognome[2]", "Nome[2]"]  # still one row

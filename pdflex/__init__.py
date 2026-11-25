@@ -3,13 +3,15 @@ from pathlib import Path
 
 import pymupdf
 
-__version__ = "1.5"  # also the GitHub release tag (v1.5): the update check compares the two
+__version__ = "1.6"  # also the GitHub release tag (v1.6): the update check compares the two
 from pdflex.i18n import tr
 
 
 def open_pdf(path: str | Path) -> pymupdf.Document:
+    """The PDF read into memory: the file itself is free at once (opened from its path, MuPDF kept it locked
+    as long as PDFlex showed it, and it could not be saved, moved or opened elsewhere)."""
     try:
-        doc = pymupdf.open(path, filetype="pdf")
+        doc = pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf")
     except Exception as e:
         raise ValueError(tr("Impossibile aprire il PDF: {0}").format(e)) from e
     if doc.needs_pass:

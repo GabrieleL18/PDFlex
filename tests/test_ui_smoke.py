@@ -447,3 +447,17 @@ def test_compare_remembers_last_15(qapp, make_pdf, tmp_path):
     assert Path(tab.new_path).name == Path(pdfs[15]).name
     Path(pdfs[1]).unlink()  # in the oldest one kept (the first comparison was dropped: 16 made, 15 kept)
     assert len(recent_comparisons()) == 14  # a file gone: left out
+
+
+def test_leaving_a_section_closes_its_file_after_asking(qapp, tmp_path, monkeypatch, make_pdf):
+    from pdflex import app, editor
+    w = app.MainWindow()
+    w.editor.open(str(make_pdf(tmp_path, ["uno"])))
+    w.editor.add_field("text", 0, (10, 10, 150, 30))
+    w.editor.dirty = True
+    monkeypatch.setattr(editor, "message", lambda *a, **k: 2)  # Annulla: stays, file still open
+    assert not w.go(w.compare) and w.tabs.currentWidget() is w.editor and w.rail[w.editor].isChecked()
+    monkeypatch.setattr(editor, "message", lambda *a, **k: 1)  # Non salvare
+    assert w.go(w.compare) and w.tabs.currentWidget() is w.compare and w.editor.doc is None
+    assert w.go(w.pages)  # nothing open: no question
+    w.close()

@@ -102,9 +102,12 @@ def start_install(installer: Path, message: str = "Aggiornamento di PDFlex in co
     """A PowerShell that waits for PDFlex to close and installs, showing a small window with a moving bar
     meanwhile; then reopens PDFlex and deletes the download."""
     script = folder / "aggiorna.ps1"
-    if installer.suffix.lower() == ".exe":  # Inno Setup, without its pages: same folder, same choices as before
+    if installer.suffix.lower() == ".exe":  # Inno Setup, without its pages, same choices as before
+        # /DIR: over the copy that is running. Without it Inno updated its own folder, and the copy
+        # PDFlex reopened (e.g. from a desktop shortcut elsewhere) was still the old one
         install = (f"Start-Process -Wait -FilePath {_ps(installer)} -ArgumentList '/VERYSILENT', "
-                   f"'/SUPPRESSMSGBOXES', '/NORESTART', {_ps('/LOG=' + chr(34) + str(LOG) + chr(34))}")
+                   f"'/SUPPRESSMSGBOXES', '/NORESTART', {_ps('/DIR=' + chr(34) + str(INSTALLED.parent) + chr(34))}, "
+                   f"{_ps('/LOG=' + chr(34) + str(LOG) + chr(34))}")
     else:
         install = f"& {_ps(installer)} *> {_ps(LOG)}"
     encoded = base64.b64encode(install.encode("utf-16-le")).decode()  # no quoting troubles with any path

@@ -419,7 +419,8 @@ class DesignTab(QWidget):
             (tr("Modificare"), [(tr("Ctrl+C / Ctrl+V"), tr("copia e incolla, anche su un'altra pagina")), (tr("Ctrl+D"), "duplica"),
                             (tr("Canc"), "elimina"), (tr("Ctrl+G"), tr("raggruppa o separa")), (tr("Ctrl+L"), tr("blocca o sblocca")),
                             (tr("Ctrl+H"), tr("trova e sostituisci in tutto il PDF"))]),
-            (tr("File"), [(tr("Ctrl+O"), tr("apri un PDF")), (tr("Ctrl+S"), tr("salva il PDF")), (tr("Ctrl+Z"), "annulla"),
+            (tr("File"), [(tr("Ctrl+O"), tr("apri un PDF")), (tr("Ctrl+S"), tr("salva il PDF")),
+                   (tr("Ctrl+W"), tr("chiudi il documento")), (tr("Ctrl+Z"), "annulla"),
                    (tr("Ctrl+Y"), "ripeti"), ("F11", tr("schermo intero")), ("F1", tr("questi tasti rapidi"))]),
         ]), alignment=Qt.AlignLeft)
 
@@ -453,7 +454,10 @@ class DesignTab(QWidget):
         self.b_paste.clicked.connect(self.paste)
         self.b_find = button("", "search", "Ghost", tr("Trova e sostituisci un testo in tutto il PDF (Ctrl+H)"))
         self.b_find.clicked.connect(self.find_replace)
-        for w in (self.b_open, self.b_save, self.b_forms, self.b_undo, self.b_redo, self.b_paste, self.b_find):
+        self.b_close = button(tr("Chiudi"), "close", "Ghost", tr("Chiudi il documento (Ctrl+W)"))
+        self.b_close.clicked.connect(self.close_doc)
+        for w in (self.b_open, self.b_save, self.b_forms, self.b_undo, self.b_redo, self.b_paste, self.b_find,
+                  self.b_close):
             bl.addWidget(w)
         bl.addWidget(self.file_label, 1)
         for w in (self.b_prev, self.page_label, self.b_next, self.b_zout, self.b_zin):
@@ -694,6 +698,7 @@ class DesignTab(QWidget):
         QShortcut(QKeySequence(tr("Ctrl+L")), self, self.pin_selected)
         QShortcut(QKeySequence(tr("Ctrl+H")), self, self.find_replace)
         QShortcut(QKeySequence.Open, self, self.ask_open)
+        QShortcut(QKeySequence(tr("Ctrl+W")), self, self.close_doc)
         QShortcut(QKeySequence.Save, self, self.ask_save)
         QShortcut(QKeySequence.Undo, self, self.undo)
         QShortcut(QKeySequence.Redo, self, self.redo)
@@ -760,6 +765,21 @@ class DesignTab(QWidget):
         ui.add_recent(path)
         self._fill_thumbs()
         self._load_page()
+
+    def close_doc(self) -> bool:
+        """Back to the start screen and the file free; asks to save first when something changed."""
+        self.view.flush_nudge()
+        if not self.doc or not self.confirm_discard():
+            return False
+        self.doc.close()
+        self.doc, self.path, self.page_no, self.dirty = None, None, 0, False
+        self.objects, self.selection = [], []
+        self._undo.clear()
+        self._redo.clear()
+        self.banner.hide()
+        self._fill_thumbs()
+        self.refresh()
+        return True
 
     def ask_save(self) -> bool:
         if not self.doc:
@@ -1442,6 +1462,7 @@ class DesignTab(QWidget):
         self.b_undo.setEnabled(bool(self._undo))
         self.b_paste.setEnabled(has and self.clip is not None)
         self.b_find.setEnabled(has)
+        self.b_close.setVisible(has)
         self.b_redo.setEnabled(bool(self._redo))
         if has:
             self.file_label.setText(Path(self.path).name + ("  (modificato)" if self.dirty else ""))
