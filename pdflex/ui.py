@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import (
-    QBuffer, QByteArray, QEventLoop, QIODevice, QPoint, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
+    QBuffer, QByteArray, QEventLoop, QIODevice, QLineF, QPoint, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
@@ -221,6 +221,8 @@ _ICONS = {
     "align-top": '<path d="M4 4h16"/><rect x="6" y="7" width="4" height="11" rx="1"/><rect x="14" y="7" width="4" height="7" rx="1"/>',
     "align-vcenter": '<path d="M4 12h16"/><rect x="6" y="6" width="4" height="12" rx="1"/><rect x="14" y="8" width="4" height="8" rx="1"/>',
     "align-bottom": '<path d="M4 20h16"/><rect x="6" y="6" width="4" height="11" rx="1"/><rect x="14" y="10" width="4" height="7" rx="1"/>',
+    "same-width": '<path d="M4 4v16M20 4v16"/><rect x="6.5" y="6" width="11" height="4" rx="1"/><rect x="6.5" y="14" width="11" height="4" rx="1"/>',
+    "same-height": '<path d="M4 4h16M4 20h16"/><rect x="6" y="6.5" width="4" height="11" rx="1"/><rect x="14" y="6.5" width="4" height="11" rx="1"/>',
     "distribute-h": '<path d="M4 4v16M20 4v16"/><rect x="9.5" y="7" width="5" height="10" rx="1"/>',
     "distribute-v": '<path d="M4 4h16M4 20h16"/><rect x="7" y="9.5" width="10" height="5" rx="1"/>',
     "paste": '<rect x="5.5" y="5" width="13" height="16" rx="2"/><path d="M9 5V3.5h6V5M9 11h6M9 15h4"/>',
@@ -814,6 +816,54 @@ def render_page(page, zoom, annots=True, dpr=1.0) -> QPixmap:
     pm = QPixmap.fromImage(img.copy())
     pm.setDevicePixelRatio(dpr)
     return pm
+
+
+GUIDE = "#D6409F"  # alignment guides while dragging
+
+
+def _thirds(r: QRectF, axis: int) -> tuple:
+    return (r.left(), r.center().x(), r.right()) if axis == 0 else (r.top(), r.center().y(), r.bottom())
+
+
+def snap_box(box: QRectF, others: list[QRectF], page: QRectF, reach: float):
+    """A box being dragged: (dx, dy, guides). dx/dy line an edge or middle of it up with the nearest edge or
+    middle, within reach, of another box or of the page; guides say with what: [(line, [boxes it lines up with])],
+    the line running from the dragged box to them (across the page when it is the page)."""
+    found = []
+    for axis in (0, 1):
+        best = None
+        for t in (t for r in others + [page] for t in _thirds(r, axis)):
+            for v in _thirds(box, axis):
+                if abs(t - v) <= reach and (best is None or abs(t - v) < abs(best[0])):
+                    best = (t - v, t)
+        found.append(best)
+    (fx, fy), moved = found, box.translated(found[0][0] if found[0] else 0, found[1][0] if found[1] else 0)
+    guides = []
+    for axis, f in ((0, fx), (1, fy)):
+        if f is None:
+            continue
+        hits = [r for r in others if any(abs(t - f[1]) < 0.5 for t in _thirds(r, axis))]
+        span = [moved] + (hits or [page])
+        if axis == 0:
+            line = QLineF(f[1], min(r.top() for r in span) - 10, f[1], max(r.bottom() for r in span) + 10)
+        else:
+            line = QLineF(min(r.left() for r in span) - 10, f[1], max(r.right() for r in span) + 10, f[1])
+        guides.append((line, hits))
+    return moved.left() - box.left(), moved.top() - box.top(), guides
+
+
+def draw_guides(scene, guides) -> list:
+    """The guides of snap_box on a scene: a dashed line, and a box around what it lines up with."""
+    line_pen, box_pen = QPen(QColor(GUIDE), 1.2, Qt.DashLine), QPen(QColor(GUIDE), 1.5)
+    fill = QColor(GUIDE)
+    fill.setAlpha(28)
+    items = []
+    for line, hits in guides:
+        items.append(scene.addLine(line, line_pen))
+        items += [scene.addRect(r.adjusted(-2, -2, 2, 2), box_pen, QBrush(fill)) for r in hits]
+    for it in items:
+        it.setZValue(1000)  # over everything being dragged
+    return items
 
 
 def page_shadow(item):

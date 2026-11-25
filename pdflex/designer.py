@@ -361,7 +361,7 @@ class DesignTab(QWidget):
         self._redo: list[tuple[int, bytes]] = []
         self.groups: list[list[design.Obj]] = []  # on this page, from the PDF's own notes (see MARKS)
         self.clip, self.pastes = None, 0  # copied objects: (a copy of their page, their keys, its number)
-        self.guides, self.snap_x, self.snap_y = [], [], []
+        self.guides, self.snap_rects = [], []
         self.setAcceptDrops(True)
 
         # left: tools
@@ -1077,12 +1077,10 @@ class DesignTab(QWidget):
     # ---- guides while dragging
     def start_drag(self) -> None:
         """What a drag can catch: edges and middles of the other objects and of the page (screen units)."""
-        z, page = self.zoom, self.doc[self.page_no].rect
-        others = [o for o in self.objects if not any(o is s for s in self.selection)]
-        self.snap_x = [v * z for o in others for v in (o.rect[0], (o.rect[0] + o.rect[2]) / 2, o.rect[2])]
-        self.snap_y = [v * z for o in others for v in (o.rect[1], (o.rect[1] + o.rect[3]) / 2, o.rect[3])]
-        self.snap_x += [0, page.width * z / 2, page.width * z]
-        self.snap_y += [0, page.height * z / 2, page.height * z]
+        z = self.zoom
+        chosen = {id(s) for s in self.selection}
+        self.snap_rects = [QRectF(o.rect[0] * z, o.rect[1] * z, (o.rect[2] - o.rect[0]) * z, (o.rect[3] - o.rect[1]) * z)
+                           for o in self.objects if id(o) not in chosen]
 
     def snap_drag(self, item) -> None:
         """While dragging: the selection's edges and middle catch the nearest ones in reach, a guide shows it."""
@@ -1095,21 +1093,12 @@ class DesignTab(QWidget):
         for i in moving[1:]:
             box |= i.obj.rect
         box = box * self.zoom + (d.x(), d.y(), d.x(), d.y())
-
-        def catch(mine, targets):
-            best = min(((t - v, t) for v in mine for t in targets), key=lambda c: abs(c[0]), default=(SNAP + 1, 0))
-            return best if abs(best[0]) <= SNAP else (0, None)
-
-        (cx, gx), (cy, gy) = (catch((box.x0, (box.x0 + box.x1) / 2, box.x1), self.snap_x),
-                              catch((box.y0, (box.y0 + box.y1) / 2, box.y1), self.snap_y))
+        page = self.doc[self.page_no].rect
+        cx, cy, guides = ui.snap_box(QRectF(box.x0, box.y0, box.width, box.height), self.snap_rects,
+                                     QRectF(0, 0, page.width * self.zoom, page.height * self.zoom), SNAP)
         for i in moving:
             i.moveBy(cx, cy)
-        pen = QPen(QColor("#D6409F"), 1, Qt.DashLine)
-        rect = self.scene.sceneRect()
-        if gx is not None:
-            self.guides.append(self.scene.addLine(gx, rect.top(), gx, rect.bottom(), pen))
-        if gy is not None:
-            self.guides.append(self.scene.addLine(rect.left(), gy, rect.right(), gy, pen))
+        self.guides = ui.draw_guides(self.scene, guides)
 
     def end_drag(self) -> None:
         for g in self.guides:

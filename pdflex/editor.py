@@ -11,7 +11,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QPlainTextEdit, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton,
@@ -20,9 +20,9 @@ from PySide6.QtWidgets import (
 
 from pdflex import open_pdf
 from pdflex.fields import (
-    ALIGN, DATE_PATTERNS, FONTS, FORMATS, NUMERIC, _TYPES, Field, align_rects, build_pdf, clean_value, fill_sample,
-    fmt_label, fmt_parts, from_view, load_fields, make_block, place_block, sample_value, save_with_fields, snap,
-    suggest_save_path, to_view,
+    ALIGN, DATE_PATTERNS, FONTS, FORMATS, NUMBERED, NUMERIC, _TYPES, Field, align_rects, build_pdf, clean_value,
+    fill_sample, fmt_label, fmt_parts, from_view, load_fields, make_block, next_name, place_block, sample_value,
+    save_with_fields, snap, suggest_save_path, to_view,
 )
 from pdflex import ui
 from pdflex.fill import FillDialog
@@ -39,10 +39,17 @@ KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B",
                "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633",
                "button": "#4A5568"}
 THUMB_W = 110  # px, width of a page thumbnail
-HANDLE = 10  # px, resize grip in the bottom-right corner
+HANDLE = 6  # px: the resize grips on the edges and corners, and how near an edge a press resizes
 PAGE_MARGIN = 24
 TAG_H = 20  # name tag of the selected field
 TAG_MAX = 420  # px, longer names are cut
+SNAP = 6  # px: how close an edge or middle comes before it catches another field's (or the page's)
+TAGS_MAX = 12  # more selected fields than this: only the main one shows its name tag (hundreds were slow)
+
+
+RESIZE_CURSORS = {"l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
+                  "lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor, "rt": Qt.SizeBDiagCursor,
+                  "lb": Qt.SizeBDiagCursor}
 
 
 class FieldItem(QGraphicsRectItem):
@@ -50,7 +57,7 @@ class FieldItem(QGraphicsRectItem):
         x0, y0, x1, y1 = view_rect
         super().__init__(0, 0, (x1 - x0) * zoom, (y1 - y0) * zoom)
         self.setPos(x0 * zoom, y0 * zoom)
-        self.field, self.tab, self.resizing = field, tab, False
+        self.field, self.tab, self.resizing = field, tab, ""  # resizing: the edges being dragged
         self.min_size = 8 * zoom
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
         self.setAcceptHoverEvents(True)
@@ -81,7 +88,7 @@ class FieldItem(QGraphicsRectItem):
         label = self.field.name + (f" = {self.field.value}" if self.field.kind == "radio" else "")
         if self.field.kind != "image":
             self._paint_info(painter, r, QColor(color).darker(150))
-        if sel:
+        if sel and (self.field is self.tab.selected or len(self.tab.selection) <= TAGS_MAX):
             # outer ring in the app accent so the selection reads at a glance
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor(ACCENT), 2, Qt.DashLine))
@@ -99,10 +106,16 @@ class FieldItem(QGraphicsRectItem):
             painter.drawRoundedRect(tag, 5, 5)
             painter.setPen(Qt.white)
             painter.drawText(tag, Qt.AlignCenter, text)
-            # resize grip
-            painter.setPen(QPen(color, 2))
+        if sel and (self.field is self.tab.selected or len(self.tab.selection) <= TAGS_MAX):
+            # resize grips: corners, and the middle of the sides when there is room
+            painter.setPen(QPen(color, 1.5))
             painter.setBrush(Qt.white)
-            painter.drawEllipse(QRectF(r.right() - HANDLE / 2, r.bottom() - HANDLE / 2, HANDLE, HANDLE))
+            xs = (r.left(), r.center().x(), r.right()) if r.width() >= 30 else (r.left(), r.right())
+            ys = (r.top(), r.center().y(), r.bottom()) if r.height() >= 30 else (r.top(), r.bottom())
+            for x in xs:
+                for y in ys:
+                    if (x, y) != (r.center().x(), r.center().y()):
+                        painter.drawRect(QRectF(x - HANDLE / 2, y - HANDLE / 2, HANDLE, HANDLE))
         details = self.details()
         self.setToolTip(f"{KIND_LABELS[self.field.kind]}: {label}" + (f"\n{details}" if details else ""))
 
@@ -193,28 +206,56 @@ class FieldItem(QGraphicsRectItem):
             p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, QFontMetricsF(bold).elidedText(text, Qt.ElideRight,
                                                                                             inner.width()))
 
-    def _on_handle(self, pos):
+    def edges_at(self, pos) -> str:
+        """The edges a press at pos grabs: "l"/"r" then "t"/"b" ("rb": bottom-right corner); "" moves."""
         r = self.rect()
-        return abs(pos.x() - r.right()) <= HANDLE and abs(pos.y() - r.bottom()) <= HANDLE
+        m = min(HANDLE, r.width() / 4, r.height() / 4)  # small fields keep room in the middle to move them
+        x, y = pos.x(), pos.y()
+        return (("l" if x <= r.left() + m else "r" if x >= r.right() - m else "") +
+                ("t" if y <= r.top() + m else "b" if y >= r.bottom() - m else ""))
 
     def hoverMoveEvent(self, e):
-        self.setCursor(Qt.SizeFDiagCursor if self.isSelected() and self._on_handle(e.pos()) else Qt.SizeAllCursor)
+        self.setCursor(RESIZE_CURSORS.get(self.edges_at(e.pos()), Qt.SizeAllCursor))
 
     def mousePressEvent(self, e):
-        self.resizing = self.isSelected() and self._on_handle(e.pos())
-        super().mousePressEvent(e)
+        self.resizing = self.edges_at(e.pos()) if e.button() == Qt.LeftButton else ""
+        super().mousePressEvent(e)  # selects it (alone, without Ctrl)
+        if not self.resizing:
+            self.tab.start_drag()
+        if self.resizing:  # every selected field resizes, each from its own size
+            self._start = e.scenePos()
+            chosen = [i for i in self.scene().selectedItems() if isinstance(i, FieldItem)] or [self]
+            self._from = [(i, i.pos(), QRectF(i.rect())) for i in chosen]
 
     def mouseMoveEvent(self, e):
-        if self.resizing:
-            self.prepareGeometryChange()
-            self.setRect(0, 0, max(e.pos().x(), self.min_size), max(e.pos().y(), self.min_size))
-        else:
+        if not self.resizing:
             super().mouseMoveEvent(e)
+            return self.tab.snap_drag()
+        d = e.scenePos() - self._start
+        for item, p, r in self._from:
+            x0, y0, x1, y1 = p.x(), p.y(), p.x() + r.width(), p.y() + r.height()
+            low = item.min_size
+            if "l" in self.resizing:
+                x0 = min(x0 + d.x(), x1 - low)
+            if "r" in self.resizing:
+                x1 = max(x1 + d.x(), x0 + low)
+            if "t" in self.resizing:
+                y0 = min(y0 + d.y(), y1 - low)
+            if "b" in self.resizing:
+                y1 = max(y1 + d.y(), y0 + low)
+            item.prepareGeometryChange()
+            item.setPos(x0, y0)
+            item.setRect(0, 0, x1 - x0, y1 - y0)
 
     def mouseReleaseEvent(self, e):
-        super().mouseReleaseEvent(e)
-        self.resizing = False
-        self.tab.item_moved(self)
+        resized = [i for i, _, _ in self._from] if self.resizing else None
+        chosen = list(self.tab.selection)
+        super().mouseReleaseEvent(e)  # a release that moved nothing drops the other selected fields
+        if resized:
+            self.tab.selection = chosen  # resizing them all is not picking one
+        self.resizing = ""
+        self.tab.end_drag()
+        self.tab.item_moved(self, resized)
 
 
 class PageView(QGraphicsView):
@@ -241,6 +282,32 @@ class PageView(QGraphicsView):
             self.tab.snap_selection(*d)
         else:
             self.tab.nudge(*d, push=not e.isAutoRepeat())  # holding the key down is one undo step
+
+    def drawForeground(self, painter, rect):
+        """The magnetic grid, when on: a faint line every 5 points, a stronger one every 50."""
+        tab = self.tab
+        if not tab.grid or not tab.doc:
+            return
+        pr = tab.doc[tab.page_no].rect
+        area = rect & QRectF(0, 0, pr.width * tab.zoom, pr.height * tab.zoom)
+        if area.isEmpty():
+            return
+        step = 5 * tab.zoom
+        if step < 4:  # zoomed far out: 5 points would be a grey blur
+            step *= 2
+        faint, strong = QPen(QColor(59, 63, 174, 28), 0), QPen(QColor(59, 63, 174, 70), 0)
+        major = round(50 * tab.zoom / step)
+        for axis in (0, 1):
+            lo, hi = (area.left(), area.right()) if axis == 0 else (area.top(), area.bottom())
+            n = int(lo // step)
+            while n * step <= hi:
+                v = n * step
+                painter.setPen(strong if n % major == 0 else faint)
+                if axis == 0:
+                    painter.drawLine(QPointF(v, area.top()), QPointF(v, area.bottom()))
+                else:
+                    painter.drawLine(QPointF(area.left(), v), QPointF(area.right(), v))
+                n += 1
 
     def mousePressEvent(self, e):
         if self.tab.mode == "select" or e.button() != Qt.LeftButton or not self.tab.doc:
@@ -281,6 +348,7 @@ class EditorTab(QWidget):
         self.selection: list[Field] = []  # every selected field (Ctrl+click for more)
         self.dirty = False
         self.grid = False
+        self.guides, self.snap_rects = [], []  # alignment guides while dragging fields
         self.page_words: list[QRectF] = []  # scene rects of the current page's words
         self._undo: list[list[Field]] = []
         self._redo: list[list[Field]] = []
@@ -330,13 +398,20 @@ class EditorTab(QWidget):
         self.b_detect = button("Rileva campi", "wand", tip="Cerca righe ____, caselle e spazi vuoti e crea i campi")
         self.b_detect.clicked.connect(self._detect_clicked)
         pl.addWidget(self.b_detect)
+        self.b_import = button("Importa campi da un PDF", "paste",
+                               tip="Copia qui tutti i campi di un altro modulo, alle stesse pagine e posizioni")
+        self.b_import.clicked.connect(self._import_clicked)
+        pl.addWidget(self.b_import)
         self.b_sign = button("Firma a mano", "signature", tip="Disegna la firma col mouse o caricane l'immagine")
         self.b_sign.clicked.connect(self.ask_signature)
         pl.addWidget(self.b_sign)
-        self.c_grid = Toggle("Griglia magnetica")
-        self.c_grid.setToolTip("Allinea posizione e misure dei campi a passi di 5 punti")
-        self.c_grid.toggled.connect(lambda on: setattr(self, "grid", on))
+        self.c_grid = Toggle("Griglia ogni 5 punti")
+        self.c_grid.toggled.connect(self._grid_toggled)
         pl.addWidget(self.c_grid)
+        grid_hint = QLabel("Accesa la vedi sulla pagina e i campi scattano sulle sue linee. Spenta, si "
+                           "agganciano agli altri campi (linea rosa). Alt: movimento libero.", objectName="Muted")
+        grid_hint.setWordWrap(True)
+        pl.addWidget(grid_hint)
         pl.addSpacing(12)
         pl.addWidget(QLabel("Blocchi salvati", objectName="H2"))
         self.block_combo = QComboBox()
@@ -415,6 +490,8 @@ class EditorTab(QWidget):
             bl.addWidget(w)
 
         self.scene = QGraphicsScene(self)
+        # a rubber band changes the selection once per field it reaches: gather them, update once
+        self._sel_timer = QTimer(self, singleShot=True, interval=0, timeout=self._selection_shown)
         self.scene.selectionChanged.connect(self._selection_changed)
         self.view = PageView(self.scene, self)
         self.view.drawn.connect(self._drawn)
@@ -590,20 +667,29 @@ class EditorTab(QWidget):
         grid = QGridLayout(self.multi_box)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(6)
-        aligns = [("Allinea a sinistra", "left"), ("Allinea a destra", "right"), ("Allinea in alto", "top"),
-                  ("Allinea in basso", "bottom"), ("Stessa larghezza", "same_width"),
-                  ("Stessa altezza", "same_height"), ("Distribuisci in verticale", "distribute_v"),
-                  ("Distribuisci in orizzontale", "distribute_h")]
-        for i, (label, how) in enumerate(aligns):
-            b = button(label)
-            b.clicked.connect(lambda _=False, h=how: self.align(h))
-            grid.addWidget(b, *((i // 2, i % 2) if i < 6 else (i - 3, 0, 1, 2)))  # long labels: full row
+        rows = (("Allinea", (("left", "A sinistra"), ("hcenter", "Al centro, in orizzontale"), ("right", "A destra"),
+                             ("top", "In alto"), ("vcenter", "Al centro, in verticale"), ("bottom", "In basso"))),
+                ("Misure e spazi", (("same_width", "Stessa larghezza del primo selezionato"),
+                                    ("same_height", "Stessa altezza del primo selezionato"),
+                                    ("distribute_h", "Stessa distanza tra loro, in orizzontale"),
+                                    ("distribute_v", "Stessa distanza tra loro, in verticale"))))
+        for r, (title, items) in enumerate(rows):  # icons, as in the Editor: quicker to read than words
+            grid.addWidget(QLabel(title, objectName="Muted"), 2 * r, 0, 1, 2)
+            line = QHBoxLayout()
+            line.setSpacing(2)
+            for how, tip in items:
+                b = button("", how.replace("_", "-") if how.startswith(("same", "distribute")) else "align-" + how,
+                           "Ghost", tip)
+                b.clicked.connect(lambda _=False, h=how: self.align(h))
+                line.addWidget(b)
+            line.addStretch()
+            grid.addLayout(line, 2 * r + 1, 0, 1, 2)
         b_block_many = button("Salva come blocco", "copy", tip="Riusa questi campi in altri moduli")
         b_block_many.clicked.connect(self.ask_save_block)
-        grid.addWidget(b_block_many, len(aligns) - 3, 0, 1, 2)
+        grid.addWidget(b_block_many, 4, 0, 1, 2)
         b_del_all = button("Elimina selezionati", "trash", "Danger")
         b_del_all.clicked.connect(self.delete_selected)
-        grid.addWidget(b_del_all, len(aligns) - 2, 0, 1, 2)
+        grid.addWidget(b_del_all, 5, 0, 1, 2)
         pr.addWidget(self.multi_box)
         pr.addStretch()
 
@@ -885,6 +971,10 @@ class EditorTab(QWidget):
         x0, y0 = min(max(x0, 0), pr.width - w), min(max(y0, 0), pr.height - h)
         return x0, y0, x0 + w, y0 + h
 
+    def _grid_toggled(self, on: bool) -> None:
+        self.grid = on
+        self.view.viewport().update()  # show or hide its lines
+
     def _snap(self, r):
         if not self.grid:
             return r
@@ -904,9 +994,10 @@ class EditorTab(QWidget):
         self._select(f)
         self.refresh()
 
-    def item_moved(self, item: FieldItem):
-        """Qt moved every selected item together; copy their new places into the fields."""
-        items = [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)] or [item]
+    def item_moved(self, item: FieldItem, items: list | None = None):
+        """Qt moved every selected item together (or they were resized: items); copy their new places
+        into the fields."""
+        items = items or [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)] or [item]
         page, z = self.doc[self.page_no], self.zoom
         moves = []
         for i in items:
@@ -921,6 +1012,34 @@ class EditorTab(QWidget):
                 f.rect = new
             self.dirty = True
         self.refresh()
+
+    # ---- guides while dragging: what a field lines up with, shown as it gets there
+    def start_drag(self) -> None:
+        chosen = {id(f) for f in self.selection}
+        self.snap_rects = [QRectF(i.pos(), i.rect().size()) for i in self.scene.items()
+                           if isinstance(i, FieldItem) and id(i.field) not in chosen]
+
+    def snap_drag(self) -> None:
+        """The dragged fields' edges and middle catch the nearest ones in reach; the guide shows which."""
+        self.end_drag()
+        moving = [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)]
+        if not moving or self.grid or QApplication.keyboardModifiers() & Qt.AltModifier:
+            return  # the magnetic grid has its own steps; Alt: free
+        box = QRectF(moving[0].pos(), moving[0].rect().size())
+        for i in moving[1:]:
+            box |= QRectF(i.pos(), i.rect().size())
+        page = self.doc[self.page_no].rect
+        dx, dy, guides = ui.snap_box(box, self.snap_rects, QRectF(0, 0, page.width * self.zoom,
+                                                                  page.height * self.zoom), SNAP)
+        for i in moving:
+            i.moveBy(dx, dy)
+        self.guides = ui.draw_guides(self.scene, guides)
+
+    def end_drag(self) -> None:
+        for g in self.guides:
+            if g.scene() is self.scene:
+                self.scene.removeItem(g)
+        self.guides = []
 
     def _chosen(self) -> list[Field]:
         return [f for f in self.selection if f.page == self.page_no]
@@ -1115,6 +1234,48 @@ class EditorTab(QWidget):
         self.block_combo.setEnabled(bool(names))
         self.b_block.setEnabled(bool(names) and self.doc is not None)
 
+    def import_fields(self, path: str) -> tuple[list[Field], int]:
+        """Every field of another PDF, same page and place, as new fields here; a name already taken
+        gets the next free one (radio groups and sums keep pointing at the renamed ones).
+        Returns (fields added, fields left out because this PDF has fewer pages)."""
+        src = open_pdf(path)
+        try:
+            theirs = load_fields(src)
+        finally:
+            src.close()
+        taken, renamed, made = {f.name for f in self.fields}, {}, []
+        for f in theirs:
+            if f.page >= len(self.doc):
+                continue
+            if f.name not in renamed:
+                renamed[f.name] = f.name if f.name not in taken else next_name(f.name, taken)
+                taken.add(renamed[f.name])
+            made.append(copy.replace(f, name=renamed[f.name], xref=0, parent=0, orig=None,
+                                     calc=[renamed.get(n, n) for n in f.calc]))
+        if made:
+            self._push()
+            self.fields += made
+            self.dirty = True
+            self.go_page(made[0].page)
+            self.select_many([f for f in made if f.page == self.page_no])  # this page's, ready to move together
+        return made, len(theirs) - len(made)
+
+    def _import_clicked(self):
+        if not self.doc:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Importa campi da", "", "PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            made, left = self.import_fields(path)
+        except ValueError as e:
+            return warn(self, str(e))
+        if not made:
+            return info(self, "Quel PDF non ha campi da importare.")
+        more = f" {left} erano su pagine che qui non ci sono." if left else ""
+        info(self, f"Importati {len(made)} campi; quelli di questa pagina sono selezionati, da spostare insieme se serve. "
+                   f"Ctrl+Z li toglie.{more}")
+
     def _detect_clicked(self):
         if not self.doc:
             return
@@ -1133,6 +1294,8 @@ class EditorTab(QWidget):
         if s.kind == "radio":
             f.name = s.name
             f.value = self._free_value(s.name)
+        elif NUMBERED.match(s.name):  # "Nome[0]" -> "Nome[1]", "Voce (1)" -> "Voce (2)"
+            f.name = next_name(s.name, {g.name for g in self.fields})
         self._select(f)
         self.refresh()
 
@@ -1174,7 +1337,7 @@ class EditorTab(QWidget):
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
         for w in (self.b_save, self.b_export, self.b_prev, self.b_next, self.b_zin, self.b_zout, self.b_list,
-                  self.b_preview, self.b_fill, self.b_detect, self.b_sign):
+                  self.b_preview, self.b_fill, self.b_detect, self.b_import, self.b_sign):
             w.setEnabled(has)
         for w in (self.b_close, self.zoom_label):
             w.setVisible(has)
@@ -1215,10 +1378,11 @@ class EditorTab(QWidget):
             self.scene.setSceneRect(-PAGE_MARGIN, -PAGE_MARGIN - TAG_H, w + 2 * PAGE_MARGIN,
                                     h + 2 * PAGE_MARGIN + 2 * TAG_H)
             self.view.setSceneRect(self.scene.sceneRect())  # re-anchor even while the view was hidden
+            chosen_ids = {id(s) for s in self.selection}
             for f in self.fields:
                 if f.page == self.page_no:
                     item = FieldItem(f, to_view(page, f.rect), self.zoom, self)
-                    chosen = any(f is s for s in self.selection)
+                    chosen = id(f) in chosen_ids
                     item.setZValue(10 if chosen else 0)
                     self.scene.addItem(item)
                     item.setSelected(chosen)
@@ -1252,13 +1416,14 @@ class EditorTab(QWidget):
             for i in range(pages):
                 self.f_page.addItem(f"Pagina {i + 1}", i)
             self.f_page.blockSignals(False)
+        chosen_ids = {id(s) for s in self.selection}
         for n, f in enumerate(self.fields, 1):
             label = f.name + (f" = {f.value}" if f.kind == "radio" else "") + (" *" if f.required else "")
             item = QListWidgetItem(dot(KIND_COLORS[f.kind]),
                                    f"{n}. {label}\n{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
             item.setData(Qt.UserRole, id(f))
             self.field_list.addItem(item)
-            if any(f is s for s in self.selection):
+            if id(f) in chosen_ids:
                 item.setSelected(True)
         self._filter_list()
         self.field_list.verticalScrollBar().setValue(scroll)
@@ -1277,16 +1442,29 @@ class EditorTab(QWidget):
             QTimer.singleShot(0, lambda: self.select_field(f) if any(f is g for g in self.fields) else None)
 
     def _selection_changed(self):
+        """The selection on the page changed: known at once; the panels follow once the band stops growing."""
         items = [i for i in self.scene.selectedItems() if isinstance(i, FieldItem)]
         self.selection = [i.field for i in items]
         if not any(self.selected is f for f in self.selection):
             self.selected = self.selection[0] if self.selection else None
+        self._sel_timer.start()
+
+    def _selection_shown(self):
         for i in self.scene.items():
             if isinstance(i, FieldItem):
                 i.setZValue(10 if i.field is self.selected else 0)
         self.scene.update()
-        self._fill_list()
+        self._mark_list()
         self._show_props()
+
+    def _mark_list(self):
+        """Only the selection changed: mark it in the list, without rebuilding the list."""
+        chosen_ids = {id(s) for s in self.selection}
+        self.field_list.blockSignals(True)
+        for i in range(self.field_list.count()):
+            item = self.field_list.item(i)
+            item.setSelected(item.data(Qt.UserRole) in chosen_ids)
+        self.field_list.blockSignals(False)
 
     def _show_props(self):
         many = len(self.selection) > 1

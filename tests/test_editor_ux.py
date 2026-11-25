@@ -200,3 +200,84 @@ def test_page_thumbnails_jump_and_count_fields(tab):
     assert tab.page_no == 0 and tab.thumbs.currentRow() == 0  # the strip follows the page shown
     tab.b_pages.click()
     assert not tab.thumbs.isVisible()
+
+
+def test_resize_from_any_edge_resizes_all_selected(tab):
+    from pdflex.editor import FieldItem
+    a = tab.add_field("text", 0, (20, 20, 100, 40))   # 80 wide
+    b = tab.add_field("text", 0, (20, 80, 60, 100))   # 40 wide
+    tab.select_many([a, b])
+    z, vp = tab.zoom, tab.view.viewport()
+    item = next(i for i in tab.scene.items() if isinstance(i, FieldItem) and i.field is a)
+    assert item.edges_at(item.rect().center()) == ""  # the middle moves
+    assert item.edges_at(QPoint(0, 0)) == "lt" and item.edges_at(item.rect().bottomRight()) == "rb"
+    start = tab.view.mapFromScene(19.5 * z, 30 * z)  # a's left edge
+    QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, start)
+    for i in range(1, 5):
+        QTest.mouseMove(vp, start + QPoint(-round(10 * z) * i // 4, 0))
+    QTest.mouseRelease(vp, Qt.LeftButton, Qt.NoModifier, start + QPoint(-round(10 * z), 0))
+    assert a.rect[0] == pytest.approx(10, abs=0.5) and a.rect[2] == pytest.approx(100, abs=0.5)
+    assert b.rect[0] == pytest.approx(10, abs=0.5) and b.rect[2] == pytest.approx(60, abs=0.5)  # each from its size
+    assert len(tab.selection) == 2
+    tab.undo()
+    assert a.rect[0] == pytest.approx(20) or tab.fields[0].rect[0] == pytest.approx(20)
+
+
+def test_copy_paste_counts_array_names_up(tab):
+    f = tab.add_field("text", 0, (20, 20, 100, 40))
+    f.name = "Nome[0]"
+    g = tab.add_field("text", 0, (20, 60, 100, 80))
+    g.name = "Voce (1)"
+    tab.select_many([f, g])
+    tab.copy_selected()
+    assert sorted(x.name for x in tab.paste()) == ["Nome[1]", "Voce (2)"]
+    assert sorted(x.name for x in tab.paste()) == ["Nome[2]", "Voce (3)"]
+    tab.select_many([f])
+    tab.duplicate_selected()
+    assert tab.selected.name == "Nome[3]"
+
+
+def test_dragging_a_field_catches_another_and_shows_the_guide(tab):
+    a = tab.add_field("text", 0, (100, 100, 180, 120))
+    b = tab.add_field("text", 0, (103, 200, 183, 220))  # 3 points off a's left edge
+    tab.select_many([b])
+    z, vp = tab.zoom, tab.view.viewport()
+    start = tab.view.mapFromScene(140 * z, 210 * z)
+    QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, start)
+    for i in range(1, 4):
+        QTest.mouseMove(vp, start + QPoint(0, round(20 * z) * i // 3))
+    assert tab.guides  # the line and the box of what it lines up with
+    QTest.mouseRelease(vp, Qt.LeftButton, Qt.NoModifier, start + QPoint(0, round(20 * z)))
+    assert b.rect[0] == pytest.approx(a.rect[0], abs=0.5)
+    assert tab.guides == []
+
+
+def test_grid_toggle_is_drawn_on_the_page(tab):
+    tab.c_grid.setChecked(True)
+    assert tab.grid
+    tab.view.viewport().repaint()  # drawForeground runs without errors
+    tab.c_grid.setChecked(False)
+    assert not tab.grid
+
+
+def test_import_fields_from_another_pdf(tab, make_pdf, tmp_path):
+    src = tmp_path / "altro"
+    src.mkdir()
+    other = EditorTab()
+    other.open(str(make_pdf(src, ["a", "b", "c"])))
+    other.add_field("text", 0, (20, 20, 100, 40)).name = "Nome"
+    other.add_field("text", 2, (20, 20, 100, 40)).name = "Terza"  # page 3: this PDF has only 2
+    s1 = other.add_field("text", 1, (20, 60, 100, 80))
+    s1.name, s1.calc = "Totale", ["Nome"]
+    out = tmp_path / "altro.pdf"
+    save_with_fields(other.path, other.fields, str(out))
+    other.close()
+    tab.add_field("text", 0, (200, 200, 260, 220)).name = "Nome"  # already here: the import gets Nome_2
+    made, left = tab.import_fields(str(out))
+    assert left == 1
+    names = {f.name: f for f in made}
+    assert set(names) == {"Nome_2", "Totale"}
+    assert names["Totale"].calc == ["Nome_2"] and names["Totale"].page == 1
+    assert names["Nome_2"].rect == pytest.approx((20, 20, 100, 40), abs=0.5) and not names["Nome_2"].xref
+    tab.undo()
+    assert [f.name for f in tab.fields] == ["Nome"]

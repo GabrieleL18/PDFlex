@@ -569,6 +569,10 @@ def align_rects(rects: list[tuple], how: str) -> list[tuple]:
             r = (r[0], y0, r[2], y0 + h)
         elif how == "bottom":
             r = (r[0], y1 - h, r[2], y1)
+        elif how == "hcenter":
+            r = ((x0 + x1 - w) / 2, r[1], (x0 + x1 + w) / 2, r[3])
+        elif how == "vcenter":
+            r = (r[0], (y0 + y1 - h) / 2, r[2], (y0 + y1 + h) / 2)
         elif how == "same_width":
             r = (r[0], r[1], r[0] + first[2] - first[0], r[3])
         elif how == "same_height":
@@ -661,17 +665,38 @@ def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
              "rect": [r[0] - x0, r[1] - y0, r[2] - x0, r[3] - y0]} for f, r in kept]
 
 
+NUMBERED = re.compile(r"^(.*?)(\[(\d+)\]|\((\d+)\))$")  # "Nome[0]" (an array) or "Voce (1)"
+
+
+def next_name(name: str, taken: set[str]) -> str:
+    """`name` if free, else the next free one: "Nome[0]" -> "Nome[1]", "Voce (1)" -> "Voce (2)",
+    any other name -> name_2, name_3..."""
+    if name not in taken:
+        return name
+    m = NUMBERED.match(name)
+    if m:
+        square = m.group(3) is not None
+        n = int(m.group(3) if square else m.group(4))
+        make = (lambda k: f"{m.group(1)}[{k}]") if square else (lambda k: f"{m.group(1)}({k})")
+        while make(n) in taken:
+            n += 1
+        return make(n)
+    out, n = f"{name}_2", 3
+    while out in taken:
+        out, n = f"{name}_{n}", n + 1
+    return out
+
+
 def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dict, tuple]]:
-    """(field data, on-screen rect) for a block dropped at `at`; names already in `taken` get _2, _3...
+    """(field data, on-screen rect) for a block dropped at `at`; a name already in `taken` gets the next
+    free one (see next_name: arrays like "Nome[0]" count up).
 
     A sum keeps pointing at the renamed fields of the same block."""
     renamed = {}
     for d in block:
         if d["name"] in renamed:  # radio buttons of one group share the name
             continue
-        name, n = d["name"], 2
-        while name in taken:
-            name, n = f"{d['name']}_{n}", n + 1
+        name = next_name(d["name"], taken)
         taken.add(name)
         renamed[d["name"]] = name
     out = []
