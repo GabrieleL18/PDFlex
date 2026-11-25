@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from pdflex import design, open_pdf, ui, write_atomic
+from pdflex import design, open_pdf, recovery, ui, write_atomic
 from pdflex.editor import PAGE_MARGIN, THUMB_W
 from pdflex.ui import ACCENT, DropZone, button, page_shadow, pdf_from_drop, render_page
 from pdflex.i18n import tr
@@ -722,13 +722,33 @@ class DesignTab(QWidget):
         if path:
             self.open(path)
 
-    def open(self, path: str) -> None:
+    def backup(self) -> None:
+        """Safety copy of the unsaved PDF, for the next start after a crash (see recovery);
+        written again only after a change."""
+        if not (self.doc and self.dirty):
+            recovery.clear("editor")
+            self._backed_up = None
+            return
+        state = (len(self._undo), len(self._redo))
+        if state != getattr(self, "_backed_up", None):
+            self.view.flush_nudge()
+            recovery.save_editor(self.path, self.doc.tobytes(garbage=1))
+            self._backed_up = state
+
+    def restore(self, path: str, copy: Path) -> None:
+        """Back to the PDF as the crash left it; saving still suggests a name next to the original."""
+        self.open(path, copy.read_bytes())
+        if self.path == path:
+            self.dirty = True
+
+    def open(self, path: str, data: bytes | None = None) -> None:
+        """data: the PDF's bytes instead of reading `path` (a safety copy)."""
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
         if not self.confirm_discard():
             return
         try:
-            doc = open_pdf(path)
-        except ValueError as e:
+            doc = open_pdf(path) if data is None else pymupdf.open(stream=data, filetype="pdf")
+        except (ValueError, RuntimeError) as e:
             ui.warn(self, str(e))
             return
         if self.doc:

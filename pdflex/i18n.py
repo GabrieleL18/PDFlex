@@ -1,6 +1,6 @@
 """Interface language. The Italian text is the key; tr() gives it back in the chosen language.
-The choice lives in lingua.json (written by install.ps1 or asked on the first start) and is read
-once, before the rest of PDFlex is imported, so module-level labels come out translated too."""
+Windows' own language unless one was picked with the button (lingua.json); read once, before the rest
+of PDFlex is imported, so module-level labels come out translated too."""
 import json
 import os
 from pathlib import Path
@@ -36,17 +36,18 @@ def use(lang: str) -> None:
         _TABLE = {}
 
 
-def ask() -> str:
-    """First start without a choice (the installer asks too): one small window, both languages."""
-    from PySide6.QtWidgets import QMessageBox
-    box = QMessageBox(QMessageBox.Question, "PDFlex", "Scegli la lingua di PDFlex\nChoose the language of PDFlex")
-    buttons = {box.addButton(name, QMessageBox.AcceptRole): code for code, name in LANGS.items()}
-    box.exec()
-    return buttons.get(box.clickedButton(), "it")
+def system() -> str:
+    """Italian on an Italian Windows, English on any other."""
+    try:
+        import ctypes
+        return "it" if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x10 else "en"
+    except (AttributeError, OSError):  # not Windows
+        import locale
+        return "it" if (locale.getlocale()[0] or "").lower().startswith("it") else "en"
 
 
 def tr(text: str) -> str:
     return _TABLE.get(text, text)
 
 
-use(os.environ.get("PDFLEX_LANG") or saved() or "it")
+use(os.environ.get("PDFLEX_LANG") or saved() or system())

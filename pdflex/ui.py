@@ -210,6 +210,8 @@ _ICONS = {
     "columns": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M12 4.5v15"/>',
     "rows": '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 12h17"/>',
     "moon": '<path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10z"/>',
+    "globe": '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5'
+             'M12 3.5c-2.4 2.3-3.6 5.1-3.6 8.5s1.2 6.2 3.6 8.5"/>',
     "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
     "button": '<rect x="3" y="7" width="18" height="10" rx="3.5"/><path d="M8 12h8"/>',
     "line": '<path d="M5 19 19 5"/>',
@@ -359,6 +361,16 @@ def app_icon() -> QIcon:
     for s in (16, 24, 32, 48, 64, 128, 256):
         ic.addPixmap(QPixmap.fromImage(_render(APP_ICON_SVG, s)))
     return ic
+
+
+def write_wizard_bmp(path: str | Path, size: int = 110) -> None:
+    """The icon on white, as a .bmp: the picture in the corner of the installer's pages."""
+    img = QImage(size, size, QImage.Format_RGB32)
+    img.fill(QColor("white"))
+    p = QPainter(img)
+    p.drawImage(size // 10, size // 10, _render(APP_ICON_SVG, size - size // 5))
+    p.end()
+    img.save(str(path), "BMP")
 
 
 def write_ico(path: str | Path) -> None:
@@ -911,8 +923,11 @@ class DocView(QGraphicsView):
     scaled = Signal(float)  # Ctrl+wheel changed the zoom
 
     def __init__(self, annots=True):
-        self._scene = QGraphicsScene()  # keep a Python reference or Qt frees it
-        super().__init__(self._scene)
+        super().__init__()
+        # owned by the view: a parentless scene was freed by Python while the closed preview was still
+        # waiting to be deleted, and the next preview crashed PDFlex
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
         self.annots = annots
         self.doc = None
         self.k = 1.0

@@ -454,3 +454,15 @@ def test_bar_drops_words_one_at_a_time(qapp):
     bar.resize(2000, 40)
     qapp.processEvents()
     assert save.text() == "Salva modulo" and plain[2].text() == "Anteprima"
+
+
+def test_unsaved_pdf_comes_back_after_a_crash(qapp, tmp_path):
+    from pdflex import recovery
+    tab = _tab(tmp_path)
+    tab.select([o for o in tab.objects if o.kind == "line"])
+    tab.move_selected(0, 30)
+    tab.backup()
+    path, copy = recovery.pending()["editor"]
+    again = DesignTab()
+    again.restore(path, copy)
+    assert again.path == path and again.dirty and _line_y(again) == 134

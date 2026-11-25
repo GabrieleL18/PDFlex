@@ -8,7 +8,7 @@ from pathlib import Path
 import pymupdf
 
 from pdflex import open_pdf, write_atomic
-from pdflex.fields import clean_value
+from pdflex.fields import clean_value, mupdf_text
 from pdflex.i18n import tr
 
 TRUE_WORDS = {"1", "x", "s", "si", "sì", "yes", "y", "true", "vero", "ok"}
@@ -67,7 +67,7 @@ def fill_form(doc, row: dict, mapping: dict) -> None:
             col = mapping.get(w.field_name)
             if col is None:
                 continue
-            value = row.get(col, "")
+            value = mupdf_text(row.get(col, ""))  # Excel gives numbers and dates too
             t = w.field_type
             if t == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
                 w.field_value = value.strip().lower() in TRUE_WORDS

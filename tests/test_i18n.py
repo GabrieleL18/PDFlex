@@ -11,7 +11,8 @@ def test_english_keeps_every_placeholder():
 
 def test_language_choice_is_saved_and_read_back(tmp_path, monkeypatch):
     monkeypatch.setattr(i18n, "FILE", tmp_path / "lingua.json")
-    assert i18n.saved() is None  # nothing chosen yet: PDFlex asks on first start
+    assert i18n.saved() is None  # nothing picked with the button: Windows' language
+    assert i18n.system() in ("it", "en")
     i18n.save("en")
     assert i18n.saved() == "en"
     (tmp_path / "lingua.json").write_bytes(b'\xef\xbb\xbf{"lingua": "it"}')  # written by PowerShell with a BOM

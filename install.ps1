@@ -8,18 +8,8 @@ $dest = Join-Path $env:LOCALAPPDATA "Programs\PDFlex"
 $exe = Join-Path $dest "PDFlex.exe"
 if (Get-Process PDFlex -ErrorAction SilentlyContinue) { throw "Chiudi PDFlex e riprova. / Close PDFlex and try again." }
 
-# lingua: chiesta solo alla prima installazione (poi si cambia dal pulsante in basso a sinistra in PDFlex)
-$langFile = Join-Path $env:LOCALAPPDATA "PDFlex\lingua.json"
-if (-not (Test-Path $langFile)) {
-    Write-Host ""
-    Write-Host "  1 = Italiano"
-    Write-Host "  2 = English"
-    $pick = Read-Host "Lingua / Language [1]"
-    $lang = if ($pick.Trim() -eq "2") { "en" } else { "it" }
-    New-Item (Split-Path $langFile) -ItemType Directory -Force | Out-Null
-    [IO.File]::WriteAllText($langFile, "{""lingua"": ""$lang""}")  # UTF-8 without BOM
-}
-$en = (Get-Content $langFile -Raw) -match '"en"'
+# messaggi nella lingua di Windows, come PDFlex (che si cambia dal pulsante in basso a sinistra)
+$en = (Get-UICulture).TwoLetterISOLanguageName -ne "it"
 if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
 Copy-Item $src $dest -Recurse
 Copy-Item (Join-Path $PSScriptRoot "uninstall.ps1") $dest

@@ -24,7 +24,7 @@ from pdflex.fields import (
     fill_sample, fmt_label, fmt_parts, from_view, load_fields, make_block, next_name, place_block, sample_value,
     save_with_fields, snap, suggest_save_path, to_view,
 )
-from pdflex import ui
+from pdflex import recovery, ui
 from pdflex.fill import FillDialog
 from pdflex.signature import SignatureDialog
 from pdflex.ui import (
@@ -419,7 +419,12 @@ class EditorTab(QWidget):
         self.block_combo.setToolTip(tr("Gruppi di campi salvati con \"Salva come blocco\", da riusare in altri moduli"))
         self.b_block = button(tr("Inserisci blocco"), "copy")
         self.b_block.clicked.connect(lambda: self.insert_block(self.block_combo.currentText()))
-        pl.addWidget(self.block_combo)
+        self.b_block_del = button("", "trash", "Ghost", tr("Elimina il blocco scelto"))
+        self.b_block_del.clicked.connect(lambda: self.ask_delete_block(self.block_combo.currentText()))
+        row = QHBoxLayout()
+        row.addWidget(self.block_combo, 1)
+        row.addWidget(self.b_block_del)
+        pl.addLayout(row)
         pl.addWidget(self.b_block)
         pl.addStretch()
         pl.addWidget(ui.keys_button([
@@ -769,6 +774,23 @@ class EditorTab(QWidget):
         self.refresh()
         return True
 
+    def backup(self) -> None:
+        """Safety copy of unsaved fields, for the next start after a crash (see recovery)."""
+        if self.doc and self.dirty:
+            recovery.save_forms(self.path, self.fields)
+        else:
+            recovery.clear("moduli")
+
+    def restore(self, path: str, data: list[dict]) -> None:
+        """Back to where the crash left the fields."""
+        self.open(path)
+        if self.path != path:
+            return
+        self._push()  # Ctrl+Z goes back to the PDF as it is on disk
+        self.fields = recovery.fields_from(data, self.fields)
+        self.dirty = True
+        self.refresh()
+
     def open(self, path: str) -> None:
         if not self.confirm_discard():
             return
@@ -875,10 +897,16 @@ class EditorTab(QWidget):
         if not self.doc:
             return
         self._props_edited()
+        self.backup()  # the preview once crashed PDFlex: the fields are safe whatever happens
         try:
             with ui.progress(self, tr("Preparo l'anteprima..."), len(self.fields)) as step:
                 doc = build_pdf(self.path, self.fields, step=step)
-                fill_sample(doc)
+                try:
+                    fill_sample(doc)
+                except (TypeError, ValueError, RuntimeError):
+                    # a field MuPDF would not fill: a half-filled document can crash later, so a fresh one
+                    doc.close()
+                    doc = build_pdf(self.path, self.fields)
         except ValueError as e:
             warn(self, str(e))
             return
@@ -1189,6 +1217,18 @@ class EditorTab(QWidget):
             self.save_block(name)
             info(self, tr("Blocco \"{0}\" salvato: lo trovi a sinistra, sotto \"Blocchi salvati\".").format(name))
 
+    def delete_block(self, name: str) -> None:
+        blocks = load_json("blocchi.json", {})
+        if blocks.pop(name, None) is not None:
+            save_json("blocchi.json", blocks)
+        self._fill_blocks()
+
+    def ask_delete_block(self, name: str):
+        if name and message(self, tr("Eliminare il blocco \"{0}\"?").format(name), "warn",
+                            (tr("Elimina"), tr("Annulla")),
+                            tr("I campi già inseriti nei moduli restano.")) == 0:
+            self.delete_block(name)
+
     def insert_block(self, name: str) -> list[Field]:
         block = load_json("blocchi.json", {}).get(name)
         if not self.doc or not block:
@@ -1201,25 +1241,37 @@ class EditorTab(QWidget):
         if not self.selection:
             return
         rects = [to_view(self.doc[f.page], f.rect) for f in self.selection]
-        self._clip = (make_block(self.selection, rects), (min(r[0] for r in rects), min(r[1] for r in rects)),
-                      self.page_no)
+        home = (min(r[0] for r in rects), min(r[1] for r in rects))  # where the copied fields are
+        self._clip = (make_block(self.selection, rects), home, self.page_no, home)
 
     def paste(self) -> list[Field]:
-        """Ctrl+V: same place on another page, a little lower-right on the same page (again and again)."""
+        """Ctrl+V: same place on another page, a little lower-right on the same page (again and again).
+        The fields keep their places among themselves: when the next step would push them off the sheet,
+        they go back over the copied ones instead."""
         clip = getattr(self, "_clip", None)
-        if not self.doc or not clip:
+        if not self.doc or not clip or not clip[0]:
             return []
-        block, (x, y), page = clip
+        block, (x, y), page, home = clip
         if page == self.page_no:
             x, y = x + 10, y + 10
-        self._clip = (block, (x, y), self.page_no)
+            if self._fit((x, y), block) != (x, y):
+                x, y = home
+        self._clip = (block, (x, y), self.page_no, home)
         return self._place(block, (x, y))
 
+    def _fit(self, at, block) -> tuple[float, float]:
+        """`at` moved just enough for the whole block to be on the page (the block moves as one)."""
+        pr = self.doc[self.page_no].rect
+        w, h = max(d["rect"][2] for d in block), max(d["rect"][3] for d in block)
+        return min(max(at[0], 0), max(pr.width - w, 0)), min(max(at[1], 0), max(pr.height - h, 0))
+
     def _place(self, block, at) -> list[Field]:
+        if not block:
+            return []
         page = self.doc[self.page_no]
         self._push()
         made = []
-        for data, r in place_block(block, at, {f.name for f in self.fields}):
+        for data, r in place_block(block, self._fit(at, block), {f.name for f in self.fields}):
             f = Field(page=self.page_no, rect=from_view(page, self._clamp(r)), **data)
             self.fields.append(f)
             made.append(f)
@@ -1232,6 +1284,7 @@ class EditorTab(QWidget):
         self.block_combo.clear()
         self.block_combo.addItems(names)
         self.block_combo.setEnabled(bool(names))
+        self.b_block_del.setEnabled(bool(names))
         self.b_block.setEnabled(bool(names) and self.doc is not None)
 
     def import_fields(self, path: str) -> tuple[list[Field], int]:

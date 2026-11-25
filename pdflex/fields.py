@@ -81,7 +81,7 @@ def _xref_ref(doc, xref, key):
 FORMATS = {"": tr("Testo libero"), "number": tr("Numero"), "amount": tr("Importo in euro"), "percent": tr("Percentuale"),
            "date": tr("Data"), "time": tr("Ora"), "cap": "CAP", "cf": tr("Codice fiscale"), "phone": tr("Telefono"), "email": tr("Email")}
 NUMERIC = ("number", "amount", "percent")
-DATE_PATTERNS = {"date": {"dd/mm/yyyy": "gg/mm/aaaa", "dd/mm/yy": "gg/mm/aa", "mm/yyyy": "mm/aaaa",
+DATE_PATTERNS = {"date": {"dd/mm/yyyy": tr("gg/mm/aaaa"), "dd/mm/yy": tr("gg/mm/aa"), "mm/yyyy": tr("mm/aaaa"),
                           "dd/mm/yyyy HH:MM": tr("gg/mm/aaaa hh:mm")},
                  "time": {"HH:MM": tr("hh:mm"), "HH:MM:ss": tr("hh:mm:ss")}}
 FONTS = {"": "Helvetica", "TiRo": "Times", "Cour": tr("Courier (larghezza fissa)")}
@@ -296,7 +296,7 @@ def _new_widget(f: Field) -> pymupdf.Widget:
     if f.kind == "dropdown":
         w.choice_values = list(f.options)
     if f.kind in ("text", "multiline", "date") or (f.kind == "dropdown" and f.default in f.options):
-        w.field_value = f.default
+        w.field_value = mupdf_text(f.default)
     if f.kind == "checkbox":
         w.field_value = f.default == "1"
     return w
@@ -384,7 +384,7 @@ def _update_widget(doc, f: Field) -> None:
         if f.kind == "checkbox":
             w.field_value = f.default == "1"
         elif f.kind != "radio" and f.default:
-            w.field_value = f.default
+            w.field_value = mupdf_text(f.default)
     _safe_update(doc, w)
     changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt), "V": (f.fmt, o.fmt),
                                    "C": (f.calc, o.calc)}.items() if a != b]
@@ -629,6 +629,15 @@ def sample_value(fmt: str, name: str, multiline: bool = False) -> str:
             "email": "mario.rossi@esempio.it"}.get(base) or _sample_text(name, multiline)
 
 
+def mupdf_text(value) -> str:
+    """A field value as MuPDF takes it: plain text it can encode. Anything else (a number from Excel,
+    a [value, label] pair, a stray surrogate) raised inside MuPDF and left it broken: PDFlex crashed
+    at the next drawing of the page, the preview's 'access violation'."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    return str(value).encode("utf-8", "replace").decode("utf-8")
+
+
 def fill_sample(doc: pymupdf.Document) -> None:
     """Fill the empty text fields and menus with a plausible example, for the preview.
 
@@ -643,10 +652,10 @@ def fill_sample(doc: pymupdf.Document) -> None:
                     n = w.text_maxlen
                     w.field_value = "RSSMRA80A01H501U"[:n] if "fisc" in (w.field_name or "") else ("1234567890" * 10)[:n]
                 else:
-                    w.field_value = sample_value(_fmt_from_js(_field_js(doc, w)), w.field_name or "", multiline)
+                    w.field_value = mupdf_text(sample_value(_fmt_from_js(_field_js(doc, w)), w.field_name or "",
+                                                            multiline))
             elif t == pymupdf.PDF_WIDGET_TYPE_COMBOBOX and not w.field_value and w.choice_values:
-                c = w.choice_values[0]
-                w.field_value = c if isinstance(c, str) else c[0]
+                w.field_value = mupdf_text(w.choice_values[0])
             else:
                 continue
             w.update()

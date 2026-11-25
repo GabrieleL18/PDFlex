@@ -281,3 +281,68 @@ def test_import_fields_from_another_pdf(tab, make_pdf, tmp_path):
     assert names["Nome_2"].rect == pytest.approx((20, 20, 100, 40), abs=0.5) and not names["Nome_2"].xref
     tab.undo()
     assert [f.name for f in tab.fields] == ["Nome"]
+
+
+def test_paste_near_the_edge_keeps_the_fields_together(tab):
+    pw, ph = tab.doc[0].rect.width, tab.doc[0].rect.height
+    a = tab.add_field("text", 0, (pw - 120, ph - 50, pw - 20, ph - 30))  # 20 points from the right and bottom
+    b = tab.add_field("text", 0, (pw - 120, ph - 25, pw - 60, ph - 5))
+    tab.select_many([a, b])
+    tab.copy_selected()
+    first = tab.paste()  # 10 lower-right would leave the sheet: back over the copied ones
+    assert sorted(f.rect for f in first) == sorted([a.rect, b.rect])
+    second = tab.paste()  # still no room: again over them, never squeezed against the edge
+    assert sorted(f.rect for f in second) == sorted([a.rect, b.rect])
+    dx = second[0].rect[0] - first[0].rect[0]
+    for old, new in zip(sorted(first, key=lambda f: f.rect), sorted(second, key=lambda f: f.rect)):
+        assert new.rect[0] - old.rect[0] == pytest.approx(dx) and new.rect[2] - new.rect[0] == pytest.approx(old.rect[2] - old.rect[0])
+        assert new.rect[1] - old.rect[1] == pytest.approx(new.rect[1] - old.rect[1])
+    gap = lambda fs: sorted(f.rect[1] for f in fs)[1] - sorted(f.rect[1] for f in fs)[0]
+    assert gap(second) == pytest.approx(gap([a, b]))  # same distance between them every time
+
+
+def test_preview_opens_again_and_again(tab):
+    """The second preview crashed PDFlex: the first one's page scene was freed too early."""
+    from pdflex.ui import DocView
+    tab.add_field("text", 0, (10, 10, 150, 30))
+
+    def use_and_close():
+        d = QApplication.activeModalWidget()
+        for i in range(4):  # scrolled and resized, as a person does
+            bar = d.findChild(DocView).verticalScrollBar()
+            bar.setValue(bar.maximum() * i // 3)
+            d.resize(700 + 60 * i, 800)
+            QApplication.processEvents()
+        QTimer.singleShot(150, d.reject)
+    for n in range(3):
+        tab.fields[0].rect = (10 + n * 5, 10, 150, 30)
+        QTimer.singleShot(300, use_and_close)
+        tab.preview()
+        QTest.qWait(50)
+    assert not tab.findChildren(QDialog)
+
+
+def test_saved_blocks_can_be_deleted(tab):
+    tab.select_many([tab.add_field("text", 0, (10, 10, 150, 30))])
+    tab.save_block("Anagrafica")
+    tab.save_block("Firma")
+    tab.delete_block("Anagrafica")
+    assert [tab.block_combo.itemText(i) for i in range(tab.block_combo.count())] == ["Firma"]
+    tab.delete_block("Firma")
+    assert tab.block_combo.count() == 0 and not tab.b_block_del.isEnabled()
+
+
+def test_unsaved_fields_come_back_after_a_crash(tab, qapp):
+    from pdflex import recovery
+    tab.add_field("text", 0, (10, 10, 150, 30)).name = "Ripreso"
+    tab.dirty = True
+    tab.backup()
+    path = tab.path
+    found = recovery.pending()
+    assert found["moduli"][0] == path
+    again = EditorTab()
+    again.restore(path, found["moduli"][1])
+    assert "Ripreso" in [f.name for f in again.fields] and again.dirty
+    tab.dirty = False
+    tab.backup()
+    assert "moduli" not in recovery.pending()

@@ -2,21 +2,20 @@ import base64
 import ctypes
 import faulthandler
 import os
-import shutil
 import sys
 import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QStackedWidget, QToolButton,
+    QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
-from pdflex import __version__, ui, update
+from pdflex import __version__, recovery, ui, update
 from pdflex.batch import BatchTab
 from pdflex.compare import CompareTab
 from pdflex.designer import DesignTab
@@ -85,11 +84,22 @@ class MainWindow(QMainWindow):
         self.b_theme.clicked.connect(self.toggle_theme)
         rl.addWidget(self.b_theme, alignment=Qt.AlignHCenter)
         self._theme_button()
-        other = "en" if i18n.LANG == "it" else "it"
-        self.b_lang = QToolButton(text=i18n.LANGS[other], cursor=Qt.PointingHandCursor)
+        # like the theme button: an icon, the language in use, and a menu to change it
+        self.b_lang = QToolButton(text=i18n.LANGS[i18n.LANG], cursor=Qt.PointingHandCursor)
+        self.b_lang.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.b_lang.setIconSize(QSize(22, 22))
         self.b_lang.setFixedWidth(76)
-        self.b_lang.setToolTip(tr("Usa PDFlex in un'altra lingua"))
-        self.b_lang.clicked.connect(lambda: self.switch_language(other))
+        ui.set_glyph(self.b_lang, "globe", "muted")
+        self.b_lang.setToolTip(tr("Lingua di PDFlex: clicca per cambiarla"))
+        self.b_lang.setPopupMode(QToolButton.InstantPopup)
+        self.b_lang.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+        langs = QMenu(self.b_lang)
+        for code, name in i18n.LANGS.items():
+            act = langs.addAction(name)
+            act.setCheckable(True)
+            act.setChecked(code == i18n.LANG)
+            act.triggered.connect(lambda _=False, c=code: self.switch_language(c))
+        self.b_lang.setMenu(langs)
         rl.addWidget(self.b_lang, alignment=Qt.AlignHCenter)
         self.b_update = QToolButton(cursor=Qt.PointingHandCursor, objectName="Primary")
         self.b_update.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
@@ -98,7 +108,9 @@ class MainWindow(QMainWindow):
         self.b_update.hide()  # until GitHub has a newer version
         self.update_found.connect(self._show_update)
         self.update_progress.connect(lambda p: self.b_update.setText(tr("Scarico\n{0}%").format(p)))
-        self.update_ready.connect(self._install_update)
+        self.update_ready.connect(self._downloaded)
+        self.backups = QTimer(self, interval=15000, timeout=self.backup)
+        self.backups.start()
         self.b_update.clicked.connect(self.get_update)
         self.version = QLabel(f"v{__version__}", objectName="Muted", alignment=Qt.AlignCenter)
         self.version.setToolTip(tr("Versione di PDFlex"))
@@ -147,48 +159,86 @@ class MainWindow(QMainWindow):
                 self.update_found.emit(*found)
         threading.Thread(target=run, daemon=True).start()
 
-    def _show_update(self, version: str, page: str, zip_url: str = ""):
-        self.update_info = version, page, zip_url
-        self.b_update.setText(tr("Aggiorna\nv{0}").format(version))
-        self.b_update.setToolTip(tr("È uscito PDFlex {0}: clicca per installarlo").format(version))
-        self.b_update.show()
+    # ---- safety copies: unsaved work survives a crash
+    def backup(self):
+        for tab in (self.design, self.editor):
+            try:
+                tab.backup()
+            except (OSError, RuntimeError, ValueError):
+                pass  # a full disk or a locked file must not stop the work: the next round tries again
 
-    def get_update(self):
-        """Download the new version, then close, install and reopen by itself."""
-        version, page, zip_url = self.update_info
-        if not zip_url or not getattr(sys, "frozen", False):  # no zip in the release, or run from the sources
-            QDesktopServices.openUrl(QUrl(page))
+    def offer_recovery(self):
+        """At start: PDFlex closed without saving last time? Pick up from there."""
+        found = recovery.pending()
+        if not found:
+            recovery.clear()
             return
-        if ui.message(self, tr("Installare PDFlex {0} adesso?").format(version), "ask",
-                      (tr("Aggiorna"), tr("Più tardi")),
-                      note=tr("PDFlex lo scarica, si chiude, si aggiorna e si riapre da solo. "
-                              "I file scaricati vengono cancellati dopo l'installazione.")) != 0:
+        names = ", ".join(dict.fromkeys(Path(path).name for path, _ in found.values()))
+        if ui.message(self, tr("PDFlex si è chiuso prima che salvassi."), "ask",
+                      (tr("Riprendi"), tr("No, scarta")),
+                      note=tr("Vuoi riprendere da dove eri rimasto? ({0})").format(names)) != 0:
+            recovery.clear()
             return
+        if "editor" in found:
+            self.design.restore(*found["editor"])
+            self.tabs.setCurrentWidget(self.design)
+            self.rail[self.design].setChecked(True)
+        if "moduli" in found:
+            self.editor.restore(*found["moduli"])
+            self.tabs.setCurrentWidget(self.editor)
+            self.rail[self.editor].setChecked(True)
+
+    # ---- updates: found at start, downloaded right away in the background, installed when the button is pressed
+    def _show_update(self, version: str, page: str, zip_url: str = ""):
+        self.update_info, self.update_files = (version, page, zip_url), ""
+        self.b_update.show()
+        if zip_url and getattr(sys, "frozen", False):
+            self._download_update()
+        else:  # no zip in the release, or run from the sources: the button opens the release page
+            self.b_update.setText(tr("Aggiorna\nv{0}").format(version))
+            self.b_update.setToolTip(tr("È uscito PDFlex {0}: clicca per aprirne la pagina").format(version))
+
+    def _download_update(self):
+        version, _, zip_url = self.update_info
         self.b_update.setEnabled(False)
+        self.b_update.setText(tr("Scarico\n{0}%").format(0))
+        self.b_update.setToolTip(tr("Scarico PDFlex {0}: quando è pronto, clicca per installarlo").format(version))
 
         def run():
             try:
-                self.update_ready.emit(str(update.download(zip_url, self.update_progress.emit)), "")
+                self.update_ready.emit(str(update.download(zip_url, self.update_progress.emit, version)), "")
             except (OSError, ValueError) as e:
                 self.update_ready.emit("", str(e))
         threading.Thread(target=run, daemon=True).start()
 
-    def _install_update(self, files: str, error: str):
-        version, page, _ = self.update_info
+    def _downloaded(self, files: str, error: str):
+        version = self.update_info[0]
         self.b_update.setEnabled(True)
-        self.b_update.setText(tr("Aggiorna\nv{0}").format(version))
-        if not files:
-            shutil.rmtree(update.FOLDER, ignore_errors=True)
-            if ui.message(self, tr("Download non riuscito: {0}").format(error), "warn",
-                          (tr("Apri la pagina della versione"), tr("Chiudi"))) == 0:
+        self.update_files = files
+        if files:
+            self.b_update.setText(tr("Installa\nv{0}").format(version))
+            self.b_update.setToolTip(tr("PDFlex {0} è scaricato: clicca per installarlo").format(version))
+        else:
+            self.b_update.setText(tr("Aggiorna\nv{0}").format(version))
+            self.b_update.setToolTip(tr("Download non riuscito ({0}): clicca per riprovare").format(error))
+
+    def get_update(self):
+        """The button: install what is downloaded, or download again after a failure, or open the page."""
+        version, page, zip_url = self.update_info
+        if not self.update_files:
+            if zip_url and getattr(sys, "frozen", False):
+                self._download_update()
+            else:
                 QDesktopServices.openUrl(QUrl(page))
             return
-        if i18n.saved() is None:
-            i18n.save(i18n.LANG)  # so the installer does not stop to ask the language
-        if not self.close():  # unsaved work and "Annulla": PDFlex stays open, the download goes
-            shutil.rmtree(update.FOLDER, ignore_errors=True)
+        if ui.message(self, tr("Installare PDFlex {0} adesso?").format(version), "ask",
+                      (tr("Installa"), tr("Più tardi")),
+                      note=tr("PDFlex si chiude, installa l'aggiornamento e si riapre da solo: bastano pochi "
+                              "secondi. I file scaricati vengono poi cancellati.")) != 0:
             return
-        update.start_install(Path(files))
+        if not self.close():  # unsaved work and "Annulla": PDFlex stays open, ready to install later
+            return
+        update.start_install(Path(self.update_files), tr("Aggiornamento di PDFlex {0} in corso…").format(version))
         QApplication.quit()
 
     def switch_language(self, lang: str):
@@ -204,6 +254,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.design.confirm_discard() and self.editor.confirm_discard():
             ui.save_json("finestra.json", {"geometria": base64.b64encode(bytes(self.saveGeometry())).decode()})
+            self.backups.stop()
+            recovery.clear()  # closed normally: nothing to pick up next time
             e.accept()
         else:
             e.ignore()
@@ -251,4 +303,10 @@ def main() -> None:
     w = MainWindow(next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), None))
     w.show()
     w.check_updates()
+    w.offer_recovery()
+    before = ui.load_json("versione.json", {}).get("versione")
+    if before != __version__:
+        ui.save_json("versione.json", {"versione": __version__})
+        if before:  # reopened after an update: say so
+            QTimer.singleShot(300, lambda: ui.message(w, tr("PDFlex è aggiornato alla versione {0}.").format(__version__)))
     sys.exit(app.exec())

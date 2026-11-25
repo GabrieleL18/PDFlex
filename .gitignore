@@ -9,3 +9,5 @@ __pycache__/
 *.pdflex-tmp
 build_out.log
 PDFlex-*.zip
+PDFlex-Setup-*.exe
+wizard-small.bmp
