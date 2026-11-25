@@ -9,6 +9,7 @@ import pymupdf
 
 from pdflex import open_pdf, write_atomic
 from pdflex.fields import clean_value
+from pdflex.i18n import tr
 
 TRUE_WORDS = {"1", "x", "s", "si", "sì", "yes", "y", "true", "vero", "ok"}
 
@@ -47,8 +48,8 @@ def read_table(path: str | Path) -> tuple[list[str], list[dict[str, str]]]:
             dialect = csv.excel
         rows = [[c.strip() for c in r] for r in csv.reader(io.StringIO(text), dialect)]
     if not rows:
-        raise ValueError("Il file non contiene dati.")
-    headers = [h or f"Colonna {i + 1}" for i, h in enumerate(rows[0])]
+        raise ValueError(tr("Il file non contiene dati."))
+    headers = [h or tr("Colonna {0}").format(i + 1) for i, h in enumerate(rows[0])]
     data = [dict(zip(headers, r + [""] * (len(headers) - len(r)))) for r in rows[1:] if any(r)]
     return headers, data
 
@@ -156,14 +157,14 @@ class BatchTab(QWidget):
         bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
-        bl.addWidget(QLabel("Compila in serie", objectName="H2"))
+        bl.addWidget(QLabel(tr("Compila in serie"), objectName="H2"))
         bl.addSpacing(10)
-        bl.addWidget(QLabel("Un PDF compilato per ogni riga del foglio Excel o CSV", objectName="Muted"))
+        bl.addWidget(QLabel(tr("Un PDF compilato per ogni riga del foglio Excel o CSV"), objectName="Muted"))
         bl.addStretch()
 
-        self.drop_pdf = ui.DropZone("Modulo PDF", "Trascina qui il modulo con i campi o clicca per sceglierlo", "form")
-        self.drop_table = ui.DropZone("Dati", "Trascina qui il file Excel o CSV o clicca per sceglierlo", "table",
-                                      exts=(".xlsx", ".xlsm", ".csv"), file_filter="Excel o CSV (*.xlsx *.xlsm *.csv)")
+        self.drop_pdf = ui.DropZone(tr("Modulo PDF"), tr("Trascina qui il modulo con i campi o clicca per sceglierlo"), "form")
+        self.drop_table = ui.DropZone(tr("Dati"), tr("Trascina qui il file Excel o CSV o clicca per sceglierlo"), "table",
+                                      exts=(".xlsx", ".xlsm", ".csv"), file_filter=tr("Excel o CSV (*.xlsx *.xlsm *.csv)"))
         self.drop_pdf.picked.connect(self._guard(self.set_template))
         self.drop_table.picked.connect(self._guard(self.set_table))
         zones = QHBoxLayout()
@@ -171,19 +172,19 @@ class BatchTab(QWidget):
         zones.addWidget(self.drop_pdf)
         zones.addWidget(self.drop_table)
 
-        self.match = QLabel("Le colonne vengono abbinate ai campi con lo stesso nome (maiuscole e spazi non contano).",
+        self.match = QLabel(tr("Le colonne vengono abbinate ai campi con lo stesso nome (maiuscole e spazi non contano)."),
                             objectName="Muted")
         self.match.setWordWrap(True)
         self.name_col = QComboBox()
-        self.flatten = ui.Toggle("Rendi i PDF non modificabili (i campi diventano testo)")
-        self.merge = ui.Toggle("Un solo PDF con tutti i moduli, uno dopo l'altro (da stampare)")
-        self.merge.setToolTip("I campi diventano testo: nello stesso PDF due campi con lo stesso nome "
-                              "avrebbero lo stesso valore")
+        self.flatten = ui.Toggle(tr("Rendi i PDF non modificabili (i campi diventano testo)"))
+        self.merge = ui.Toggle(tr("Un solo PDF con tutti i moduli, uno dopo l'altro (da stampare)"))
+        self.merge.setToolTip(tr("I campi diventano testo: nello stesso PDF due campi con lo stesso nome "
+                              "avrebbero lo stesso valore"))
         self.merge.toggled.connect(self._update)
-        self.b_run = button("Crea i PDF", "batch", "Primary")
+        self.b_run = button(tr("Crea i PDF"), "batch", "Primary")
         self.b_run.clicked.connect(self.ask_run)
         name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("Nome dei file dalla colonna"))
+        name_row.addWidget(QLabel(tr("Nome dei file dalla colonna")))
         name_row.addWidget(self.name_col, 1)
 
         panel = QFrame(objectName="Panel")
@@ -225,7 +226,7 @@ class BatchTab(QWidget):
                                    if w.field_type not in (pymupdf.PDF_WIDGET_TYPE_SIGNATURE,
                                                            pymupdf.PDF_WIDGET_TYPE_BUTTON)))
         if not names:
-            raise ValueError("questo PDF non ha campi da compilare. Aggiungili prima nella sezione Moduli.")
+            raise ValueError(tr("questo PDF non ha campi da compilare. Aggiungili prima nella sezione Moduli."))
         self.template, self.field_names = path, names
         self.drop_pdf.set_file(path)
         self._update()
@@ -234,7 +235,7 @@ class BatchTab(QWidget):
         self.headers, self.rows = read_table(path)
         self.drop_table.set_file(path)
         self.name_col.clear()
-        self.name_col.addItem("(numerati: modulo_001, modulo_002...)", None)
+        self.name_col.addItem(tr("(numerati: modulo_001, modulo_002...)"), None)
         for h in self.headers:
             self.name_col.addItem(h, h)
         self._update()
@@ -244,15 +245,15 @@ class BatchTab(QWidget):
         ready = bool(self.mapping and self.rows)
         if self.template and self.headers:
             missing = [n for n in self.field_names if n not in self.mapping]
-            text = f"{len(self.mapping)} campi su {len(self.field_names)} trovati tra le colonne, {len(self.rows)} righe."
+            text = tr("{0} campi su {1} trovati tra le colonne, {2} righe.").format(len(self.mapping), len(self.field_names), len(self.rows))
             if missing:
-                text += " Restano vuoti: " + ", ".join(missing[:12]) + ("..." if len(missing) > 12 else "")
+                text += tr(" Restano vuoti: ") + ", ".join(missing[:12]) + ("..." if len(missing) > 12 else "")
             if not self.mapping:
-                text = ("Nessuna colonna ha il nome di un campo. Rinomina le colonne come i campi: "
+                text = (tr("Nessuna colonna ha il nome di un campo. Rinomina le colonne come i campi: ")
                         + ", ".join(self.field_names[:12]))
             self.match.setText(text)
         merge = self.merge.isChecked()
-        self.b_run.setText("Crea il PDF" if merge else f"Crea {len(self.rows)} PDF" if ready else "Crea i PDF")
+        self.b_run.setText(tr("Crea il PDF") if merge else tr("Crea {0} PDF").format(len(self.rows)) if ready else tr("Crea i PDF"))
         self.b_run.setEnabled(ready)
         self.name_col.setEnabled(bool(self.headers) and not merge)
         self.flatten.setEnabled(not merge)
@@ -260,26 +261,26 @@ class BatchTab(QWidget):
     def ask_run(self):
         t = Path(self.template)
         if self.merge.isChecked():
-            out, _ = QFileDialog.getSaveFileName(self, "Salva il PDF con tutti i moduli",
-                                                 str(t.with_name(t.stem + "_tutti.pdf")), "PDF (*.pdf)")
+            out, _ = QFileDialog.getSaveFileName(self, tr("Salva il PDF con tutti i moduli"),
+                                                 str(t.with_name(t.stem + "_tutti.pdf")), tr("PDF (*.pdf)"))
         else:
-            out = QFileDialog.getExistingDirectory(self, "Cartella dove salvare i PDF", str(t.parent))
+            out = QFileDialog.getExistingDirectory(self, tr("Cartella dove salvare i PDF"), str(t.parent))
         if not out:
             return
         try:
             made = self.run(out)
         except (ValueError, OSError, RuntimeError) as e:
-            warn(self, f"Creazione non riuscita: {e}")
+            warn(self, tr("Creazione non riuscita: {0}").format(e))
             return
         if self.merge.isChecked():
             if made:
-                info(self, f"Salvato {out}: {len(self.rows)} moduli compilati, uno dopo l'altro.")
+                info(self, tr("Salvato {0}: {1} moduli compilati, uno dopo l'altro.").format(out, len(self.rows)))
         else:
-            info(self, f"Creati {len(made)} PDF in {out}")
+            info(self, tr("Creati {0} PDF in {1}").format(len(made), out))
 
     def run(self, out: str) -> list[Path]:
         """Make the PDFs into the folder `out`, or the single merged file `out`; returns the files made."""
-        dlg = QProgressDialog("Creo i PDF...", "Ferma", 0, len(self.rows), self)
+        dlg = QProgressDialog(tr("Creo i PDF..."), tr("Ferma"), 0, len(self.rows), self)
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(400)
 

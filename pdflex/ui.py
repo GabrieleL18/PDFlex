@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
     QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget,
 )
+from pdflex.i18n import tr
 
 INK = "#1D2633"  # on the page (always white paper) and as the light theme's text
 MUTED = "#5B6675"
@@ -444,7 +445,7 @@ class RecentFiles(QWidget):
         files = recent_files()
         if not files:
             return
-        self.lay.addWidget(QLabel("Aperti di recente", objectName="H2"))
+        self.lay.addWidget(QLabel(tr("Aperti di recente"), objectName="H2"))
         for p in files[:6]:
             b = button(f"{Path(p).name}   {Path(p).parent}", "clock", "Recent", tip=p)
             b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)  # a long path must not widen the window
@@ -456,7 +457,7 @@ class RecentFiles(QWidget):
 def keys_button(groups: list) -> QPushButton:
     """The keyboard shortcuts of a tab, behind a button and F1 (while the tab is the one shown).
     groups: [(title, [(keys, what it does)])]; keys like "Ctrl+Z", alternatives with " / "."""
-    b = button("Tasti rapidi", "help", "Ghost", "Tutti i tasti rapidi di questa sezione (F1)")
+    b = button(tr("Tasti rapidi"), "help", "Ghost", tr("Tutti i tasti rapidi di questa sezione (F1)"))
     b.clicked.connect(lambda: show_keys(b.window(), groups))
     QShortcut(QKeySequence("F1"), b, lambda: show_keys(b.window(), groups))
     return b
@@ -481,7 +482,7 @@ def _caps(keys: str) -> QWidget:
 
 def keys_dialog(parent, groups: list) -> QDialog:
     d = QDialog(parent)
-    d.setWindowTitle("Tasti rapidi")
+    d.setWindowTitle(tr("Tasti rapidi"))
     lay = QVBoxLayout(d)
     lay.setContentsMargins(28, 24, 28, 20)
     lay.setSpacing(18)
@@ -500,7 +501,7 @@ def keys_dialog(parent, groups: list) -> QDialog:
         g.setRowStretch(len(rows) + 1, 1)
         cols.addLayout(g, n // 2, n % 2)
     lay.addLayout(cols)
-    close = button("Chiudi", None, "Primary")
+    close = button(tr("Chiudi"), None, "Primary")
     close.clicked.connect(d.accept)
     lay.addWidget(close, alignment=Qt.AlignRight)
     return d
@@ -516,8 +517,8 @@ class DropZone(QFrame):
     """Big dashed target: click to choose a PDF, or drop one on it."""
     picked = Signal(str)
 
-    def __init__(self, title: str, hint: str = "Trascina qui il PDF o clicca per sceglierlo", glyph: str = "open",
-                 exts=(".pdf",), file_filter="PDF (*.pdf)"):
+    def __init__(self, title: str, hint: str = tr("Trascina qui il PDF o clicca per sceglierlo"), glyph: str = "open",
+                 exts=(".pdf",), file_filter=tr("PDF (*.pdf)")):
         super().__init__()
         self.exts, self.file_filter = exts, file_filter
         self.setObjectName("DropZone")
@@ -543,7 +544,7 @@ class DropZone(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         set_glyph(self.pic, "checkbox" if path else self.glyph, "green" if path else "accent", 44)
-        self.hint.setText(f"{Path(path).name}\nCaricato. Clicca per cambiarlo." if path else self.default_hint)
+        self.hint.setText(tr("{0}\nCaricato. Clicca per cambiarlo.").format(Path(path).name) if path else self.default_hint)
         self.hint.setStyleSheet(f"color: {color('green')}; font-weight: 600;" if path else "")
 
     def _hot(self, on):
@@ -552,7 +553,7 @@ class DropZone(QFrame):
         self.style().polish(self)
 
     def mousePressEvent(self, e):
-        path, _ = QFileDialog.getOpenFileName(self, "Scegli un file", "", self.file_filter)
+        path, _ = QFileDialog.getOpenFileName(self, tr("Scegli un file"), "", self.file_filter)
         if path:
             self.picked.emit(path)
 
@@ -678,7 +679,7 @@ def ask_text(parent, title: str, label: str, text: str = "") -> str | None:
     d.setLabelText(label)
     d.setTextValue(text)
     d.setOkButtonText("OK")
-    d.setCancelButtonText("Annulla")
+    d.setCancelButtonText(tr("Annulla"))
     return d.textValue().strip() if d.exec() else None
 
 
@@ -700,7 +701,7 @@ def progress(parent, text: str, total: int, cancel: bool = False):
 
     Yields set_value(done); on a modal dialog that also keeps the window painted. total=0: a moving bar.
     cancel=True adds an Annulla button: set_value then raises Cancelled once it is pressed."""
-    d = QProgressDialog(text, "Annulla", 0, total, parent)
+    d = QProgressDialog(text, tr("Annulla"), 0, total, parent)
     if not cancel:
         d.setCancelButton(None)
     d.setWindowTitle("PDFlex")

@@ -31,10 +31,11 @@ from pdflex.ui import (
     Toggle, add_recent, ask_text, info, load_json, message, recent_files, save_json, warn,
     ACCENT, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
+from pdflex.i18n import tr
 
-KIND_LABELS = {"text": "Testo", "multiline": "Testo lungo", "checkbox": "Casella di spunta",
-               "radio": "Scelta singola", "dropdown": "Menu a tendina", "date": "Data", "signature": "Firma",
-               "image": "Firma a mano", "button": "Pulsante"}
+KIND_LABELS = {"text": tr("Testo"), "multiline": tr("Testo lungo"), "checkbox": tr("Casella di spunta"),
+               "radio": tr("Scelta singola"), "dropdown": tr("Menu a tendina"), "date": tr("Data"), "signature": tr("Firma"),
+               "image": tr("Firma a mano"), "button": tr("Pulsante")}
 KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B", "radio": "#7A4FD1",
                "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633",
                "button": "#4A5568"}
@@ -142,17 +143,17 @@ class FieldItem(QGraphicsRectItem):
         if f.default and f.kind not in ("checkbox", "radio"):
             parts.append(f"«{f.default}»")
         if f.kind in ("checkbox", "radio") and f.default == "1":
-            parts.append("selezionata")
+            parts.append(tr("selezionata"))
         if f.fmt or f.kind == "date":
             parts.append(fmt_label(f.fmt, f.kind))
         if f.align:
-            parts.append({1: "centrato", 2: "a destra"}[f.align])
+            parts.append({1: tr("centrato"), 2: tr("a destra")}[f.align])
         if f.calc:
-            parts.append("somma di " + " + ".join(f.calc))
+            parts.append(tr("somma di ") + " + ".join(f.calc))
         if f.comb:
-            parts.append(f"{f.comb} caselle")
+            parts.append(tr("{0} caselle").format(f.comb))
         if f.kind == "dropdown":
-            parts.append(f"{len(f.options)} opzioni" if f.options else "nessuna opzione")
+            parts.append(tr("{0} opzioni").format(len(f.options)) if f.options else tr("nessuna opzione"))
         if f.font:
             parts.append(FONTS[f.font].split(" ")[0])
         if f.font_size:
@@ -360,8 +361,8 @@ class EditorTab(QWidget):
         palette.setMinimumWidth(180)
         pl = QVBoxLayout(palette)
         pl.setContentsMargins(12, 16, 12, 16)
-        pl.addWidget(QLabel("Campi", objectName="H2"))
-        hint = QLabel("Scegli un tipo, poi trascina sulla pagina per disegnarlo.", objectName="Muted")
+        pl.addWidget(QLabel(tr("Campi"), objectName="H2"))
+        hint = QLabel(tr("Scegli un tipo, poi trascina sulla pagina per disegnarlo."), objectName="Muted")
         hint.setWordWrap(True)
         pl.addWidget(hint)
         pl.addSpacing(6)
@@ -371,7 +372,7 @@ class EditorTab(QWidget):
         tl.setSpacing(2)
         self.mode_group = QButtonGroup(self)
         self.mode_buttons = {}
-        modes = [("select", "Seleziona e sposta"), *((k, v) for k, v in KIND_LABELS.items() if k not in ("image", "button"))]
+        modes = [("select", tr("Seleziona e sposta")), *((k, v) for k, v in KIND_LABELS.items() if k not in ("image", "button"))]
         for mode, label in modes:
             b = QToolButton()
             b.setText(label)
@@ -395,89 +396,89 @@ class EditorTab(QWidget):
         self.mode_buttons["select"].setChecked(True)
         pl.addWidget(tools)
         pl.addSpacing(12)
-        self.b_detect = button("Rileva campi", "wand", tip="Cerca righe ____, caselle e spazi vuoti e crea i campi")
+        self.b_detect = button(tr("Rileva campi"), "wand", tip=tr("Cerca righe ____, caselle e spazi vuoti e crea i campi"))
         self.b_detect.clicked.connect(self._detect_clicked)
         pl.addWidget(self.b_detect)
-        self.b_import = button("Importa campi da un PDF", "paste",
-                               tip="Copia qui tutti i campi di un altro modulo, alle stesse pagine e posizioni")
+        self.b_import = button(tr("Importa campi da un PDF"), "paste",
+                               tip=tr("Copia qui tutti i campi di un altro modulo, alle stesse pagine e posizioni"))
         self.b_import.clicked.connect(self._import_clicked)
         pl.addWidget(self.b_import)
-        self.b_sign = button("Firma a mano", "signature", tip="Disegna la firma col mouse o caricane l'immagine")
+        self.b_sign = button(tr("Firma a mano"), "signature", tip=tr("Disegna la firma col mouse o caricane l'immagine"))
         self.b_sign.clicked.connect(self.ask_signature)
         pl.addWidget(self.b_sign)
-        self.c_grid = Toggle("Griglia ogni 5 punti")
+        self.c_grid = Toggle(tr("Griglia ogni 5 punti"))
         self.c_grid.toggled.connect(self._grid_toggled)
         pl.addWidget(self.c_grid)
-        grid_hint = QLabel("Accesa la vedi sulla pagina e i campi scattano sulle sue linee. Spenta, si "
-                           "agganciano agli altri campi (linea rosa). Alt: movimento libero.", objectName="Muted")
+        grid_hint = QLabel(tr("Accesa la vedi sulla pagina e i campi scattano sulle sue linee. Spenta, si "
+                           "agganciano agli altri campi (linea rosa). Alt: movimento libero."), objectName="Muted")
         grid_hint.setWordWrap(True)
         pl.addWidget(grid_hint)
         pl.addSpacing(12)
-        pl.addWidget(QLabel("Blocchi salvati", objectName="H2"))
+        pl.addWidget(QLabel(tr("Blocchi salvati"), objectName="H2"))
         self.block_combo = QComboBox()
-        self.block_combo.setToolTip("Gruppi di campi salvati con \"Salva come blocco\", da riusare in altri moduli")
-        self.b_block = button("Inserisci blocco", "copy")
+        self.block_combo.setToolTip(tr("Gruppi di campi salvati con \"Salva come blocco\", da riusare in altri moduli"))
+        self.b_block = button(tr("Inserisci blocco"), "copy")
         self.b_block.clicked.connect(lambda: self.insert_block(self.block_combo.currentText()))
         pl.addWidget(self.block_combo)
         pl.addWidget(self.b_block)
         pl.addStretch()
         pl.addWidget(ui.keys_button([
-            ("Selezionare", [("Clic", "un campo"), ("Ctrl+Clic", "aggiungi o togli un campo dalla selezione"),
-                             ("Trascina", "sul vuoto: i campi dentro il riquadro")]),
-            ("Spostare", [("Frecce", "sposta di poco"), ("Maiusc+Frecce", "allinea al campo vicino"),
-                          ("Ctrl+Frecce", "scorri la pagina"), ("Ctrl+Rotellina", "ingrandisci o riduci la pagina")]),
-            ("Modificare", [("Ctrl+C / Ctrl+V", "copia e incolla, anche su un'altra pagina"), ("Ctrl+D", "duplica"),
-                            ("Canc", "elimina")]),
-            ("File", [("Ctrl+O", "apri un PDF"), ("Ctrl+S", "salva il modulo"), ("Ctrl+Maiusc+S", "esporta per gestionale"),
-                   ("Ctrl+W", "chiudi il documento"), ("Ctrl+Z", "annulla"),
-                   ("Ctrl+Y", "ripeti"), ("F11", "schermo intero"), ("F1", "questi tasti rapidi")]),
+            (tr("Selezionare"), [(tr("Clic"), tr("un campo")), (tr("Ctrl+Clic"), tr("aggiungi o togli un campo dalla selezione")),
+                             (tr("Trascina"), tr("sul vuoto: i campi dentro il riquadro"))]),
+            (tr("Spostare"), [(tr("Frecce"), tr("sposta di poco")), (tr("Maiusc+Frecce"), tr("allinea al campo vicino")),
+                          (tr("Ctrl+Frecce"), tr("scorri la pagina")), (tr("Ctrl+Rotellina"), tr("ingrandisci o riduci la pagina"))]),
+            (tr("Modificare"), [(tr("Ctrl+C / Ctrl+V"), tr("copia e incolla, anche su un'altra pagina")), (tr("Ctrl+D"), "duplica"),
+                            (tr("Canc"), "elimina")]),
+            (tr("File"), [(tr("Ctrl+O"), tr("apri un PDF")), (tr("Ctrl+S"), tr("salva il modulo")), (tr("Ctrl+Maiusc+S"), tr("esporta per gestionale")),
+                   (tr("Ctrl+W"), tr("chiudi il documento")), (tr("Ctrl+Z"), "annulla"),
+                   (tr("Ctrl+Y"), "ripeti"), ("F11", tr("schermo intero")), ("F1", tr("questi tasti rapidi"))]),
         ]), alignment=Qt.AlignLeft)
 
         # center: command bar + page
         bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
-        self.b_open = button("Apri", "open", tip="Apri un PDF (Ctrl+O)")
-        self.b_save = button("Salva modulo", "save", "Primary",
-                             "<b>Salva modulo</b> (Ctrl+S)<br>Il PDF con i campi come li vedi qui: bordi, colori, "
+        self.b_open = button(tr("Apri"), "open", tip=tr("Apri un PDF (Ctrl+O)"))
+        self.b_save = button(tr("Salva modulo"), "save", "Primary",
+                             tr("<b>Salva modulo</b> (Ctrl+S)<br>Il PDF con i campi come li vedi qui: bordi, colori, "
                              "valori iniziali e pulsanti. Lo riapri in PDFlex per modificarlo, o lo compila una "
-                             "persona con Acrobat o il browser.")
-        self.b_export = button("Esporta per gestionale", "export",
-                               tip="<b>Esporta per gestionale</b> (Ctrl+Maiusc+S)<br>Una copia per un programma "
+                             "persona con Acrobat o il browser."))
+        self.b_export = button(tr("Esporta per gestionale"), "export",
+                               tip=tr("<b>Esporta per gestionale</b> (Ctrl+Maiusc+S)<br>Una copia per un programma "
                                    "che riempie i campi da solo (paghe, contabilità...): campi vuoti, senza bordi né "
                                    "sfondo, senza pulsanti, così in stampa si vede solo il testo inserito.<br>"
-                                   "Il modulo che stai modificando non cambia.")
+                                   "Il modulo che stai modificando non cambia."))
         self.b_export.clicked.connect(self.ask_export)
-        self.b_list = button("Elenco campi", "list", tip="Mostra o nascondi l'elenco di tutti i campi")
+        self.b_list = button(tr("Elenco campi"), "list", tip=tr("Mostra o nascondi l'elenco di tutti i campi"))
         self.b_list.setCheckable(True)
-        self.b_preview = button("Anteprima", "eye", tip="Vedi il modulo compilato con dati di esempio")
-        self.b_fill = button("Compila", "text", tip="Riempi i campi a mano e salva una copia compilata")
+        self.b_preview = button(tr("Anteprima"), "eye", tip=tr("Vedi il modulo compilato con dati di esempio"))
+        self.b_fill = button(tr("Compila"), "text", tip=tr("Riempi i campi a mano e salva una copia compilata"))
         self.b_fill.clicked.connect(self.fill)
         self.b_open.clicked.connect(self.ask_open)
         self.b_save.clicked.connect(self.ask_save)
         self.b_list.toggled.connect(self._show_list)
         self.b_preview.clicked.connect(self.preview)
         self.file_label = ui.Elided(objectName="Muted")
-        self.b_pages = button("", "page", "Ghost", "Mostra o nascondi le miniature delle pagine")
+        self.b_pages = button("", "page", "Ghost", tr("Mostra o nascondi le miniature delle pagine"))
         self.b_pages.setCheckable(True)
         self.b_pages.setChecked(True)
-        self.b_prev = button("", "prev", "Ghost", "Pagina precedente")
-        self.b_next = button("", "next", "Ghost", "Pagina successiva")
+        self.b_prev = button("", "prev", "Ghost", tr("Pagina precedente"))
+        self.b_next = button("", "next", "Ghost", tr("Pagina successiva"))
         self.page_label = QLabel("")
-        self.page_label.setMinimumWidth(self.page_label.fontMetrics().horizontalAdvance("Pag. 999/999") + 4)
-        self.b_zout = button("", "zoom-out", "Ghost", "Riduci")
-        self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci")
-        self.zoom_label = button("", None, "Ghost", "Torna al 100%  (Ctrl+rotellina per ingrandire)")
+        self.page_label.setMinimumWidth(self.page_label.fontMetrics().horizontalAdvance(tr("Pag. 999/999")) + 4)
+        self.b_zout = button("", "zoom-out", "Ghost", tr("Riduci"))
+        self.b_zin = button("", "zoom-in", "Ghost", tr("Ingrandisci"))
+        self.zoom_label = button("", None, "Ghost", tr("Torna al 100%  (Ctrl+rotellina per ingrandire)"))
         self.zoom_label.setMinimumWidth(52)
         self.zoom_label.clicked.connect(lambda: self.set_zoom(1.0))
-        self.b_close = button("Chiudi", "close", "Ghost", "Chiudi il documento (Ctrl+W)")
+        self.b_close = button(tr("Chiudi"), "close", "Ghost", tr("Chiudi il documento (Ctrl+W)"))
         self.b_close.clicked.connect(self.close_doc)
         self.b_prev.clicked.connect(lambda: self.go_page(self.page_no - 1))
         self.b_next.clicked.connect(lambda: self.go_page(self.page_no + 1))
         self.b_zout.clicked.connect(lambda: self.set_zoom(self.zoom / 1.2))
         self.b_zin.clicked.connect(lambda: self.set_zoom(self.zoom * 1.2))
-        self.b_undo = button("", "undo", "Ghost", "Annulla (Ctrl+Z)")
-        self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
+        self.b_undo = button("", "undo", "Ghost", tr("Annulla (Ctrl+Z)"))
+        self.b_redo = button("", "redo", "Ghost", tr("Ripeti (Ctrl+Y)"))
         self.b_undo.clicked.connect(self.undo)
         self.b_redo.clicked.connect(self.redo)
         for w in (self.b_open, self.b_save, self.b_export, self.b_undo, self.b_redo, self.b_close):
@@ -495,7 +496,7 @@ class EditorTab(QWidget):
         self.scene.selectionChanged.connect(self._selection_changed)
         self.view = PageView(self.scene, self)
         self.view.drawn.connect(self._drawn)
-        self.drop = DropZone("Apri un PDF per aggiungere i campi", glyph="form")
+        self.drop = DropZone(tr("Apri un PDF per aggiungere i campi"), glyph="form")
         self.drop.picked.connect(self.open)
         empty = QWidget()
         el = QVBoxLayout(empty)
@@ -540,14 +541,14 @@ class EditorTab(QWidget):
         lp.setContentsMargins(0, 16, 0, 0)
         head = QHBoxLayout()
         head.setContentsMargins(14, 0, 8, 0)
-        self.list_title = QLabel("Campi e ordine Tab", objectName="H2")
+        self.list_title = QLabel(tr("Campi e ordine Tab"), objectName="H2")
         self.b_stack = button("", "rows", "Ghost")
         self.b_stack.clicked.connect(lambda: self.set_stacked(self.side.orientation() == Qt.Horizontal))
         head.addWidget(self.list_title, 1)
         head.addWidget(self.b_stack)
         lp.addLayout(head)
-        tip = QLabel("Chi compila passa da un campo al successivo con Tab in questo ordine. "
-                     "Trascina per cambiarlo.", objectName="Muted")
+        tip = QLabel(tr("Chi compila passa da un campo al successivo con Tab in questo ordine. "
+                     "Trascina per cambiarlo."), objectName="Muted")
         tip.setWordWrap(True)
         tip.setContentsMargins(14, 0, 14, 4)
         lp.addWidget(tip)
@@ -555,17 +556,17 @@ class EditorTab(QWidget):
         filters.setContentsMargins(10, 2, 10, 2)
         filters.setSpacing(4)
         self.f_page, self.f_kind = QComboBox(), QComboBox()
-        self.f_page.setToolTip("Mostra solo i campi di una pagina")
-        self.f_kind.setToolTip("Mostra solo un tipo di campo")
-        self.f_kind.addItem("Tutti i tipi", "")
+        self.f_page.setToolTip(tr("Mostra solo i campi di una pagina"))
+        self.f_kind.setToolTip(tr("Mostra solo un tipo di campo"))
+        self.f_kind.addItem(tr("Tutti i tipi"), "")
         for k, label in KIND_LABELS.items():
             self.f_kind.addItem(dot(KIND_COLORS[k]), label, k)
         for c in (self.f_page, self.f_kind):
             c.currentIndexChanged.connect(self._filter_list)
             filters.addWidget(c)
         lp.addLayout(filters)
-        self.b_sort = button("Ordina per posizione", "list", "Ghost",
-                             "Ordine Tab da sinistra a destra, dall'alto in basso, pagina per pagina")
+        self.b_sort = button(tr("Ordina per posizione"), "list", "Ghost",
+                             tr("Ordine Tab da sinistra a destra, dall'alto in basso, pagina per pagina"))
         self.b_sort.clicked.connect(self.sort_by_position)
         sort_row = QHBoxLayout()
         sort_row.setContentsMargins(8, 0, 8, 4)
@@ -584,8 +585,8 @@ class EditorTab(QWidget):
         props = QFrame(objectName="Panel")
         pr = QVBoxLayout(props)
         pr.setContentsMargins(16, 16, 16, 16)
-        pr.addWidget(QLabel("Proprietà", objectName="H2"))
-        self.kind_label = QLabel("Seleziona un campo sulla pagina per modificarlo.", objectName="Muted")
+        pr.addWidget(QLabel(tr("Proprietà"), objectName="H2"))
+        self.kind_label = QLabel(tr("Seleziona un campo sulla pagina per modificarlo."), objectName="Muted")
         self.kind_label.setWordWrap(True)
         pr.addWidget(self.kind_label)
         pr.addSpacing(8)
@@ -594,8 +595,8 @@ class EditorTab(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         form.setVerticalSpacing(6)
-        self.p_name, self.p_required, self.p_default = QLineEdit(), Toggle("Obbligatorio"), QLineEdit()
-        self.p_checked, self.p_size = Toggle("Selezionata all'apertura"), QLineEdit()
+        self.p_name, self.p_required, self.p_default = QLineEdit(), Toggle(tr("Obbligatorio")), QLineEdit()
+        self.p_checked, self.p_size = Toggle(tr("Selezionata all'apertura")), QLineEdit()
         self.p_options, self.p_value = QPlainTextEdit(), QLineEdit()
         self.p_fmt, self.p_calc, self.p_font = QComboBox(), QLineEdit(), QComboBox()
         for key, label in FORMATS.items():
@@ -605,42 +606,42 @@ class EditorTab(QWidget):
         self.p_dec = QComboBox()
         for n in range(5):
             self.p_dec.addItem(str(n), n)
-        self.p_thousands = Toggle("Separatore delle migliaia (1.234)")
+        self.p_thousands = Toggle(tr("Separatore delle migliaia (1.234)"))
         self.p_pattern = QComboBox()  # date or time layout, filled for the format in use
         self.p_align = QComboBox()
         for key, label in ALIGN.items():
             self.p_align.addItem(label, key)
-        self.p_color = button("Nero", None, tip="Colore del testo")
+        self.p_color = button(tr("Nero"), None, tip=tr("Colore del testo"))
         self.p_color.setProperty("value", "")
         self.p_color.clicked.connect(self._pick_color)
-        self.p_font.setToolTip("Courier dà a ogni lettera la stessa larghezza: utile per codici e caselle")
+        self.p_font.setToolTip(tr("Courier dà a ogni lettera la stessa larghezza: utile per codici e caselle"))
         for c in (self.p_fmt, self.p_font, self.p_pattern, self.p_align):  # narrow panel: combos follow
             c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             c.setMinimumContentsLength(6)
-        self.p_calc.setPlaceholderText("es. importo_1, importo_2")
-        self.p_calc.setToolTip("Il campo mostra la somma di questi campi e non si può scrivere a mano")
-        self.p_options.setPlaceholderText("Roma\nMilano\nNapoli")
-        self.p_default.setPlaceholderText("Vuoto")
-        self.p_size.setPlaceholderText("Automatica")
+        self.p_calc.setPlaceholderText(tr("es. importo_1, importo_2"))
+        self.p_calc.setToolTip(tr("Il campo mostra la somma di questi campi e non si può scrivere a mano"))
+        self.p_options.setPlaceholderText(tr("Roma\nMilano\nNapoli"))
+        self.p_default.setPlaceholderText(tr("Vuoto"))
+        self.p_size.setPlaceholderText(tr("Automatica"))
         self.p_size.setValidator(QIntValidator(0, 72, self.p_size))
         self.p_comb = QLineEdit()
         self.p_comb.setPlaceholderText("No")
         self.p_comb.setValidator(QIntValidator(0, 99, self.p_comb))
-        self.p_comb.setToolTip("Divide il campo in caselle, una lettera ciascuna (es. 16 per il codice fiscale)")
-        form.addRow("Nome del campo", self.p_name)
-        form.addRow("Valore iniziale", self.p_default)
-        form.addRow("Opzioni, una per riga", self.p_options)
-        form.addRow("Valore di questa scelta", self.p_value)
-        form.addRow("Formato", self.p_fmt)
-        form.addRow("Decimali", self.p_dec)
+        self.p_comb.setToolTip(tr("Divide il campo in caselle, una lettera ciascuna (es. 16 per il codice fiscale)"))
+        form.addRow(tr("Nome del campo"), self.p_name)
+        form.addRow(tr("Valore iniziale"), self.p_default)
+        form.addRow(tr("Opzioni, una per riga"), self.p_options)
+        form.addRow(tr("Valore di questa scelta"), self.p_value)
+        form.addRow(tr("Formato"), self.p_fmt)
+        form.addRow(tr("Decimali"), self.p_dec)
         form.addRow(self.p_thousands)
-        form.addRow("Come si scrive", self.p_pattern)
-        form.addRow("Somma dei campi (facoltativo)", self.p_calc)
-        form.addRow("Carattere", self.p_font)
-        form.addRow("Dimensione testo (pt)", self.p_size)
-        form.addRow("Colore del testo", self.p_color)
-        form.addRow("Allineamento", self.p_align)
-        form.addRow("Caselle, una lettera ciascuna", self.p_comb)
+        form.addRow(tr("Come si scrive"), self.p_pattern)
+        form.addRow(tr("Somma dei campi (facoltativo)"), self.p_calc)
+        form.addRow(tr("Carattere"), self.p_font)
+        form.addRow(tr("Dimensione testo (pt)"), self.p_size)
+        form.addRow(tr("Colore del testo"), self.p_color)
+        form.addRow(tr("Allineamento"), self.p_align)
+        form.addRow(tr("Caselle, una lettera ciascuna"), self.p_comb)
         form.addRow(self.p_checked)
         form.addRow(self.p_required)
         for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc, self.p_comb):
@@ -653,8 +654,8 @@ class EditorTab(QWidget):
         self.p_options.textChanged.connect(self._props_edited)
         pr.addWidget(self.props)
         actions = QHBoxLayout()
-        self.b_dup = button("Duplica", "copy")
-        self.b_del = button("Elimina", "trash", "Danger")
+        self.b_dup = button(tr("Duplica"), "copy")
+        self.b_del = button(tr("Elimina"), "trash", "Danger")
         self.b_dup.clicked.connect(self.duplicate_selected)
         self.b_del.clicked.connect(self.delete_selected)
         actions.addWidget(self.b_dup)
@@ -667,12 +668,12 @@ class EditorTab(QWidget):
         grid = QGridLayout(self.multi_box)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(6)
-        rows = (("Allinea", (("left", "A sinistra"), ("hcenter", "Al centro, in orizzontale"), ("right", "A destra"),
-                             ("top", "In alto"), ("vcenter", "Al centro, in verticale"), ("bottom", "In basso"))),
-                ("Misure e spazi", (("same_width", "Stessa larghezza del primo selezionato"),
-                                    ("same_height", "Stessa altezza del primo selezionato"),
-                                    ("distribute_h", "Stessa distanza tra loro, in orizzontale"),
-                                    ("distribute_v", "Stessa distanza tra loro, in verticale"))))
+        rows = ((tr("Allinea"), (("left", "A sinistra"), ("hcenter", tr("Al centro, in orizzontale")), ("right", "A destra"),
+                             ("top", tr("In alto")), ("vcenter", tr("Al centro, in verticale")), ("bottom", tr("In basso")))),
+                (tr("Misure e spazi"), (("same_width", tr("Stessa larghezza del primo selezionato")),
+                                    ("same_height", tr("Stessa altezza del primo selezionato")),
+                                    ("distribute_h", tr("Stessa distanza tra loro, in orizzontale")),
+                                    ("distribute_v", tr("Stessa distanza tra loro, in verticale")))))
         for r, (title, items) in enumerate(rows):  # icons, as in the Editor: quicker to read than words
             grid.addWidget(QLabel(title, objectName="Muted"), 2 * r, 0, 1, 2)
             line = QHBoxLayout()
@@ -684,10 +685,10 @@ class EditorTab(QWidget):
                 line.addWidget(b)
             line.addStretch()
             grid.addLayout(line, 2 * r + 1, 0, 1, 2)
-        b_block_many = button("Salva come blocco", "copy", tip="Riusa questi campi in altri moduli")
+        b_block_many = button(tr("Salva come blocco"), "copy", tip=tr("Riusa questi campi in altri moduli"))
         b_block_many.clicked.connect(self.ask_save_block)
         grid.addWidget(b_block_many, 4, 0, 1, 2)
-        b_del_all = button("Elimina selezionati", "trash", "Danger")
+        b_del_all = button(tr("Elimina selezionati"), "trash", "Danger")
         b_del_all.clicked.connect(self.delete_selected)
         grid.addWidget(b_del_all, 5, 0, 1, 2)
         pr.addWidget(self.multi_box)
@@ -717,13 +718,13 @@ class EditorTab(QWidget):
         self.set_stacked(bool(load_json("layout.json", {}).get("stacked")))
 
         QShortcut(QKeySequence.Delete, self.view, self.delete_selected)
-        QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
+        QShortcut(QKeySequence(tr("Ctrl+D")), self, self.duplicate_selected)
         QShortcut(QKeySequence.Copy, self, self.copy_selected)  # in a text box Ctrl+C/V stay the box's own
         QShortcut(QKeySequence.Paste, self, self.paste)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
-        QShortcut(QKeySequence("Ctrl+Shift+S"), self, self.ask_export)
-        QShortcut(QKeySequence("Ctrl+W"), self, self.close_doc)
+        QShortcut(QKeySequence(tr("Ctrl+Shift+S")), self, self.ask_export)
+        QShortcut(QKeySequence(tr("Ctrl+W")), self, self.close_doc)
         QShortcut(QKeySequence.Undo, self, self.undo)
         QShortcut(QKeySequence.Redo, self, self.redo)  # Ctrl+Y and Ctrl+Shift+Z (a second Ctrl+Y made both dead)
         self.view.setDragMode(QGraphicsView.RubberBandDrag)
@@ -744,14 +745,14 @@ class EditorTab(QWidget):
         """True when it is fine to drop the current fields (saved, discarded, or nothing to lose)."""
         if not self.dirty:
             return True
-        r = message(self, "Hai modifiche non salvate. Vuoi salvarle prima?", "ask",
-                    ("Salva", "Non salvare", "Annulla"), note="Se non salvi, i campi aggiunti o cambiati vanno persi.")
+        r = message(self, tr("Hai modifiche non salvate. Vuoi salvarle prima?"), "ask",
+                    (tr("Salva"), tr("Non salvare"), tr("Annulla")), note=tr("Se non salvi, i campi aggiunti o cambiati vanno persi."))
         if r == 0:
             return self.ask_save()
         return r == 1
 
     def ask_open(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Apri PDF", "", "PDF (*.pdf)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Apri PDF"), "", tr("PDF (*.pdf)"))
         if path:
             self.open(path)
 
@@ -803,7 +804,7 @@ class EditorTab(QWidget):
         """Field list above the properties (on) or beside them; remembered for next time."""
         self.side.setOrientation(Qt.Vertical if on else Qt.Horizontal)
         self.b_stack.setIcon(icon("columns" if on else "rows"))
-        self.b_stack.setToolTip("Affianca elenco e proprietà" if on else "Metti l'elenco sopra le proprietà")
+        self.b_stack.setToolTip(tr("Affianca elenco e proprietà") if on else tr("Metti l'elenco sopra le proprietà"))
         save_json("layout.json", {"stacked": on})
 
     def _show_list(self, on: bool):
@@ -817,13 +818,13 @@ class EditorTab(QWidget):
         if not self.doc:
             return False
         self._props_edited()  # a value still being typed (Ctrl+S keeps the focus there) counts too
-        path, _ = QFileDialog.getSaveFileName(self, "Salva modulo", suggest_save_path(self.path), "PDF (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva modulo"), suggest_save_path(self.path), tr("PDF (*.pdf)"))
         if not path:
             return False
         try:
             self.save(path)
         except (ValueError, OSError) as e:
-            warn(self, f"Salvataggio non riuscito: {e}")
+            warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return False
         return True
 
@@ -834,30 +835,29 @@ class EditorTab(QWidget):
         self._props_edited()
         p = Path(self.path)
         default = str(p.with_name(p.stem.removesuffix("_modulo") + "_da_compilare.pdf"))
-        path, _ = QFileDialog.getSaveFileName(self, "Esporta per gestionale", default, "PDF (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Esporta per gestionale"), default, tr("PDF (*.pdf)"))
         if not path:
             return False
         if Path(path).resolve() == p.resolve():
-            warn(self, "Scegli un altro nome: questo è il file che stai modificando, "
-                       "e perderebbe bordi e valori iniziali.")
+            warn(self, tr("Scegli un altro nome: questo è il file che stai modificando, "
+                       "e perderebbe bordi e valori iniziali."))
             return False
         try:
             self.export(path)
         except (ValueError, OSError) as e:
-            warn(self, f"Salvataggio non riuscito: {e}")
+            warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return False
-        info(self, f"Salvato in {path}.\nI campi sono invisibili e vuoti, con nomi, formati e caratteri: "
-                   "pronti per essere compilati da un altro programma.")
+        info(self, tr("Salvato in {0}.\nI campi sono invisibili e vuoti, con nomi, formati e caratteri: pronti per essere compilati da un altro programma.").format(path))
         return True
 
     def export(self, path: str) -> None:
-        with ui.progress(self, "Preparo la copia per la compilazione...", len(self.fields)) as step:
+        with ui.progress(self, tr("Preparo la copia per la compilazione..."), len(self.fields)) as step:
             save_with_fields(self.path, self.fields, path, blank=True, step=step)
 
     def save(self, path: str) -> None:
         self.doc.close()  # Windows will not replace a file that is still open
         try:
-            with ui.progress(self, "Salvo il modulo...", len(self.fields)) as step:
+            with ui.progress(self, tr("Salvo il modulo..."), len(self.fields)) as step:
                 save_with_fields(self.path, self.fields, path, step=step)
         except Exception:
             self.doc = open_pdf(self.path)
@@ -876,15 +876,15 @@ class EditorTab(QWidget):
             return
         self._props_edited()
         try:
-            with ui.progress(self, "Preparo l'anteprima...", len(self.fields)) as step:
+            with ui.progress(self, tr("Preparo l'anteprima..."), len(self.fields)) as step:
                 doc = build_pdf(self.path, self.fields, step=step)
                 fill_sample(doc)
         except ValueError as e:
             warn(self, str(e))
             return
-        ui.show_doc(self, doc, "Anteprima con dati di esempio",
-                    "Così vedrà il modulo chi lo compila. Valori iniziali e caselle sono come li hai impostati; "
-                    "i campi vuoti hanno dati di esempio, che non vengono salvati.")
+        ui.show_doc(self, doc, tr("Anteprima con dati di esempio"),
+                    tr("Così vedrà il modulo chi lo compila. Valori iniziali e caselle sono come li hai impostati; "
+                    "i campi vuoti hanno dati di esempio, che non vengono salvati."))
 
     def fill(self):
         """Fill the form by hand (fields as they are now, saved or not) into a separate copy."""
@@ -892,7 +892,7 @@ class EditorTab(QWidget):
             return
         self._props_edited()
         try:
-            with ui.progress(self, "Preparo il modulo da compilare...", len(self.fields)) as step:
+            with ui.progress(self, tr("Preparo il modulo da compilare..."), len(self.fields)) as step:
                 doc = build_pdf(self.path, self.fields, step=step)
         except ValueError as e:
             warn(self, str(e))
@@ -902,7 +902,7 @@ class EditorTab(QWidget):
         if d.inputs:
             d.exec()
         else:
-            info(self, "Questo PDF non ha campi da compilare: aggiungili o premi Rileva campi.")
+            info(self, tr("Questo PDF non ha campi da compilare: aggiungili o premi Rileva campi."))
         d.deleteLater()
 
     # ---- undo / redo: whole snapshots of the field list (forms have tens of fields, not thousands)
@@ -1137,7 +1137,7 @@ class EditorTab(QWidget):
         """Add the fields detect_fields finds on every page; returns how many."""
         from pdflex.detect import detect_fields
         found = []
-        with ui.progress(self, "Cerco i campi nelle pagine...", self.doc.page_count) as step:
+        with ui.progress(self, tr("Cerco i campi nelle pagine..."), self.doc.page_count) as step:
             for page in self.doc:
                 step(page.number)
                 found += detect_fields(page, self.fields + found)
@@ -1184,10 +1184,10 @@ class EditorTab(QWidget):
         self._fill_blocks()
 
     def ask_save_block(self):
-        name = ask_text(self, "Salva come blocco", "Nome del blocco (es. Dati anagrafici):")
+        name = ask_text(self, tr("Salva come blocco"), tr("Nome del blocco (es. Dati anagrafici):"))
         if name:
             self.save_block(name)
-            info(self, f'Blocco "{name}" salvato: lo trovi a sinistra, sotto "Blocchi salvati".')
+            info(self, tr("Blocco \"{0}\" salvato: lo trovi a sinistra, sotto \"Blocchi salvati\".").format(name))
 
     def insert_block(self, name: str) -> list[Field]:
         block = load_json("blocchi.json", {}).get(name)
@@ -1263,7 +1263,7 @@ class EditorTab(QWidget):
     def _import_clicked(self):
         if not self.doc:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Importa campi da", "", "PDF (*.pdf)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Importa campi da"), "", tr("PDF (*.pdf)"))
         if not path:
             return
         try:
@@ -1271,17 +1271,16 @@ class EditorTab(QWidget):
         except ValueError as e:
             return warn(self, str(e))
         if not made:
-            return info(self, "Quel PDF non ha campi da importare.")
-        more = f" {left} erano su pagine che qui non ci sono." if left else ""
-        info(self, f"Importati {len(made)} campi; quelli di questa pagina sono selezionati, da spostare insieme se serve. "
-                   f"Ctrl+Z li toglie.{more}")
+            return info(self, tr("Quel PDF non ha campi da importare."))
+        more = tr(" {0} erano su pagine che qui non ci sono.").format(left) if left else ""
+        info(self, tr("Importati {0} campi; quelli di questa pagina sono selezionati, da spostare insieme se serve. Ctrl+Z li toglie.{1}").format(len(made), more))
 
     def _detect_clicked(self):
         if not self.doc:
             return
         n = self.detect()
-        info(self, f"Trovati {n} campi. Controlla nomi e posizioni; Ctrl+Z li toglie."
-                                if n else "Nessun nuovo campo trovato: disegnali dalla tavolozza.")
+        info(self, tr("Trovati {0} campi. Controlla nomi e posizioni; Ctrl+Z li toglie.").format(n)
+                                if n else tr("Nessun nuovo campo trovato: disegnali dalla tavolozza."))
 
     def duplicate_selected(self):
         if not self.selected or self.selected.kind == "button":  # its script can't be copied
@@ -1351,7 +1350,9 @@ class EditorTab(QWidget):
             counts = Counter(f.page for f in self.fields)
             self.thumbs.blockSignals(True)
             for i in range(self.thumbs.count()):
-                self.thumbs.item(i).setText(f"{i + 1}" + (f"  ·  {counts[i]} camp{'o' if counts[i] == 1 else 'i'}" if counts[i] else ""))
+                self.thumbs.item(i).setText(f"{i + 1}" + ("  ·  " + (tr("1 campo") if counts[i] == 1 else
+                                                                    tr("{0} campi").format(counts[i]))
+                                                     if counts[i] else ""))
             self.thumbs.setCurrentRow(self.page_no)
             self.thumbs.blockSignals(False)
         self._fill_blocks()
@@ -1359,7 +1360,7 @@ class EditorTab(QWidget):
         self.b_redo.setEnabled(bool(self._redo))
         if has:
             self.file_label.setText(Path(self.path).name + ("  (modificato)" if self.dirty else ""))
-            self.page_label.setText(f"Pag. {self.page_no + 1}/{self.doc.page_count}")
+            self.page_label.setText(tr("Pag. {0}/{1}").format(self.page_no + 1, self.doc.page_count))
             self.zoom_label.setText(f"{round(self.zoom * 100)}%")
             self.b_prev.setEnabled(self.page_no > 0)
             self.b_next.setEnabled(self.page_no < self.doc.page_count - 1)
@@ -1402,25 +1403,25 @@ class EditorTab(QWidget):
                 r = pymupdf.Rect(w.rect) * page.rotation_matrix
                 item = self.scene.addRect(r.x0 * z, r.y0 * z, r.width * z, r.height * z,
                                           QPen(QColor("#8A94A6"), 1, Qt.DotLine), QBrush(QColor(138, 148, 166, 40)))
-                item.setToolTip(f"{w.field_name}: campo non modificabile con PDFlex, resta com'è")
+                item.setToolTip(tr("{0}: campo non modificabile con PDFlex, resta com'è").format(w.field_name))
 
     def _fill_list(self):
         scroll = self.field_list.verticalScrollBar().value()  # rebuilding must not jump back to the top
         self.field_list.clear()
-        self.list_title.setText(f"Campi e ordine Tab ({len(self.fields)})")
+        self.list_title.setText(tr("Campi e ordine Tab ({0})").format(len(self.fields)))
         pages = self.doc.page_count if self.doc else 0
         if self.f_page.count() != pages + 1:
             self.f_page.blockSignals(True)
             self.f_page.clear()
-            self.f_page.addItem("Tutte le pagine", -1)
+            self.f_page.addItem(tr("Tutte le pagine"), -1)
             for i in range(pages):
-                self.f_page.addItem(f"Pagina {i + 1}", i)
+                self.f_page.addItem(tr("Pagina {0}").format(i + 1), i)
             self.f_page.blockSignals(False)
         chosen_ids = {id(s) for s in self.selection}
         for n, f in enumerate(self.fields, 1):
             label = f.name + (f" = {f.value}" if f.kind == "radio" else "") + (" *" if f.required else "")
             item = QListWidgetItem(dot(KIND_COLORS[f.kind]),
-                                   f"{n}. {label}\n{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
+                                   f"{n}. {label}\n" + tr("{0}, pagina {1}").format(KIND_LABELS[f.kind], f.page + 1))
             item.setData(Qt.UserRole, id(f))
             self.field_list.addItem(item)
             if id(f) in chosen_ids:
@@ -1473,12 +1474,12 @@ class EditorTab(QWidget):
         self.props.setVisible(f is not None)
         self.actions_box.setVisible(f is not None)
         if many:
-            self.kind_label.setText(f"{len(self.selection)} campi selezionati")
+            self.kind_label.setText(tr("{0} campi selezionati").format(len(self.selection)))
             self.kind_label.setStyleSheet(f"color: white; background: {ACCENT}; border-radius: 6px;"
                                           "padding: 4px 8px; font-weight: 600;")
             return
         if not f:
-            self.kind_label.setText("Seleziona un campo sulla pagina per modificarlo.")
+            self.kind_label.setText(tr("Seleziona un campo sulla pagina per modificarlo."))
             self.kind_label.setStyleSheet("")
             return
         self._kind_label(f)
@@ -1504,18 +1505,18 @@ class EditorTab(QWidget):
         self._loading = False
 
     def _kind_label(self, f: Field):
-        self.kind_label.setText(f"{KIND_LABELS[f.kind]}, pagina {f.page + 1}")
+        self.kind_label.setText(tr("{0}, pagina {1}").format(KIND_LABELS[f.kind], f.page + 1))
         self.kind_label.setStyleSheet(f"color: white; background: {KIND_COLORS[f.kind]}; border-radius: 6px;"
                                       "padding: 4px 8px; font-weight: 600;")
 
     def _show_color(self, color: str):
         self.p_color.setProperty("value", color)
-        self.p_color.setText(color.upper() if color else "Nero")
+        self.p_color.setText(color.upper() if color else tr("Nero"))
         self.p_color.setIcon(dot(color or "#000000"))
 
     def _pick_color(self):
         from PySide6.QtWidgets import QColorDialog
-        chosen = QColorDialog.getColor(QColor(self.p_color.property("value") or "#000000"), self, "Colore del testo")
+        chosen = QColorDialog.getColor(QColor(self.p_color.property("value") or "#000000"), self, tr("Colore del testo"))
         if chosen.isValid():
             self._show_color("" if chosen.name() == "#000000" else chosen.name())
             self._props_edited()
@@ -1558,7 +1559,7 @@ class EditorTab(QWidget):
                       self.p_fmt, self.p_calc, self.p_comb, self.p_font, self.p_dec, self.p_thousands,
                       self.p_pattern):
                 self.form.setRowVisible(w, False)
-            self.form.labelForField(self.p_name).setText("Nome")
+            self.form.labelForField(self.p_name).setText(tr("Nome"))
             return
         self.form.setRowVisible(self.p_default, k in ("text", "multiline", "date", "dropdown"))
         self.form.setRowVisible(self.p_checked, k in ("checkbox", "radio"))
@@ -1570,10 +1571,10 @@ class EditorTab(QWidget):
         self.form.setRowVisible(self.p_fmt, k in ("text", "multiline", "date"))
         self.form.setRowVisible(self.p_calc, k == "text" and base in ("number", "amount"))
         self.form.setRowVisible(self.p_comb, k == "text")
-        self.form.labelForField(self.p_name).setText("Nome del gruppo" if k == "radio" else "Nome del campo")
+        self.form.labelForField(self.p_name).setText(tr("Nome del gruppo") if k == "radio" else tr("Nome del campo"))
         self.p_default.setPlaceholderText(sample_value(f.fmt if k != "date" else f"{base}|{args[0]}", "")
-                                          if base and base != "email" else "Una delle opzioni" if k == "dropdown"
-                                          else "Vuoto")
+                                          if base and base != "email" else tr("Una delle opzioni") if k == "dropdown"
+                                          else tr("Vuoto"))
 
     def _props_edited(self, *_):
         f = self.selected

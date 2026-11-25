@@ -18,23 +18,24 @@ from PySide6.QtWidgets import (
 from pdflex import design, open_pdf, ui, write_atomic
 from pdflex.editor import PAGE_MARGIN, THUMB_W
 from pdflex.ui import ACCENT, DropZone, button, page_shadow, pdf_from_drop, render_page
+from pdflex.i18n import tr
 
-KINDS = {"line": "Linea", "rect": "Rettangolo", "shape": "Forma", "image": "Immagine", "text": "Testo"}
-TOOLS = [("select", "Seleziona e sposta"), ("text", "Testo"), ("line", "Linea"), ("rect", "Rettangolo"),
-         ("image", "Immagine")]
+KINDS = {"line": tr("Linea"), "rect": tr("Rettangolo"), "shape": tr("Forma"), "image": tr("Immagine"), "text": tr("Testo")}
+TOOLS = [("select", tr("Seleziona e sposta")), ("text", tr("Testo")), ("line", tr("Linea")), ("rect", tr("Rettangolo")),
+         ("image", tr("Immagine"))]
 HANDLE = 10  # px
 # a box's handles, as fractions of its width and height: corners and middles of the sides, clockwise from top left
 SPOTS = [(0, 0), (0.5, 0), (1, 0), (1, 0.5), (1, 1), (0.5, 1), (0, 1), (0, 0.5)]
 CURSORS = [Qt.SizeFDiagCursor, Qt.SizeVerCursor, Qt.SizeBDiagCursor, Qt.SizeHorCursor] * 2
 UNDO_MAX = 30  # copies of the document kept for Annulla
-AS_SHAPES = ": testo disegnato come forme, si sposta e si ridimensiona ma le parole non si cambiano"
+AS_SHAPES = tr(": testo disegnato come forme, si sposta e si ridimensiona ma le parole non si cambiano")
 GLYPHS = {"line": "line", "rect": "rect", "shape": "rect", "image": "image", "text": "text"}
 COPY_OFFSET = 10  # pt: where a copy goes, right and down from the original
-HELVETICA = "Il carattere di questo testo non ha le lettere: {}. Uso Helvetica per questo testo?"
+HELVETICA = tr("Il carattere di questo testo non ha le lettere: {}. Uso Helvetica per questo testo?")
 TURN = 24  # px: the turning handle, above the box
 SNAP = 6  # px: how close an edge or a middle comes before it catches another
 MARKS = "PDFlexEditor"  # the Editor's own notes in the PDF: groups and locked objects, by page
-DASHES = ["Continuo", "Tratteggiato", "Punteggiato"]
+DASHES = [tr("Continuo"), tr("Tratteggiato"), tr("Punteggiato")]
 
 
 def _marks(doc) -> dict:
@@ -90,10 +91,10 @@ def _label(o: design.Obj) -> str:
     """A row of the list of objects: what it is, and enough to tell it from the others."""
     if o.kind == "text":
         words = "".join(s["text"] for s in o.data["spans"]).strip()
-        text = f'Testo "{words[:40]}{"…" if len(words) > 40 else ""}"'
+        text = tr("Testo \"{0}{1}\"").format(words[:40], "…" if len(words) > 40 else "")
     else:
         r = pymupdf.Rect(o.rect)
-        text = f"{'Testo disegnato' if o.state == 'move' else KINDS[o.kind]}  {r.width:.0f} × {r.height:.0f} pt"
+        text = f"{tr('Testo disegnato') if o.state == 'move' else KINDS[o.kind]}  {r.width:.0f} × {r.height:.0f} pt"
     return ("🔒 " if o.state == "locked" else "📌 " if o.data.get("pinned") else "") + text
 
 
@@ -125,7 +126,7 @@ class ObjItem(QGraphicsRectItem):
                 self.setCursor(Qt.ForbiddenCursor)
         elif obj.data.get("pinned"):  # locked by the user: it can be selected, to unlock it
             self.setFlags(QGraphicsItem.ItemIsSelectable)
-            self.setToolTip("📌 Bloccato: sbloccalo per spostarlo o cambiarlo")
+            self.setToolTip(tr("📌 Bloccato: sbloccalo per spostarlo o cambiarlo"))
         else:
             self.setFlags(QGraphicsItem.ItemIsSelectable | (QGraphicsItem.GraphicsItemFlag(0) if big
                                                             else QGraphicsItem.ItemIsMovable))
@@ -240,7 +241,7 @@ class ObjItem(QGraphicsRectItem):
             if e.modifiers() & Qt.ShiftModifier:  # by 15 degrees
                 a = round(a / 15) * 15
             self.setRotation(a)
-            self.tab.kind_label.setText(f"Rotazione: {a:.0f}° (Maiusc: a scatti di 15°)")
+            self.tab.kind_label.setText(tr("Rotazione: {0:.0f}° (Maiusc: a scatti di 15°)").format(a))
             return
         if self.grab is None:
             super().mouseMoveEvent(e)
@@ -369,8 +370,8 @@ class DesignTab(QWidget):
         palette.setMinimumWidth(180)
         pl = QVBoxLayout(palette)
         pl.setContentsMargins(12, 16, 12, 16)
-        pl.addWidget(QLabel("Strumenti", objectName="H2"))
-        hint = QLabel("Prendi e sposta linee, forme, immagini e testi della pagina, o aggiungine di nuovi.",
+        pl.addWidget(QLabel(tr("Strumenti"), objectName="H2"))
+        hint = QLabel(tr("Prendi e sposta linee, forme, immagini e testi della pagina, o aggiungine di nuovi."),
                       objectName="Muted")
         hint.setWordWrap(True)
         pl.addWidget(hint)
@@ -396,7 +397,7 @@ class DesignTab(QWidget):
         self.mode_buttons["select"].setChecked(True)
         pl.addWidget(tools)
         pl.addSpacing(10)
-        pl.addWidget(QLabel("Oggetti della pagina", objectName="H2"))
+        pl.addWidget(QLabel(tr("Oggetti della pagina"), objectName="H2"))
         self.layers = QListWidget(objectName="Layers")  # every object, top to bottom: also the small or hidden ones
         self.layers.setSelectionMode(QListWidget.ExtendedSelection)
         self.layers.setIconSize(QSize(16, 16))
@@ -408,37 +409,37 @@ class DesignTab(QWidget):
         self.rows: list[design.Obj] = []
         pl.addWidget(self.layers, 1)
         pl.addWidget(ui.keys_button([
-            ("Selezionare", [("Clic", "un oggetto"), ("Ctrl+Clic", "aggiungi o togli un oggetto dalla selezione"),
-                             ("Trascina", "sul vuoto: tutto quello che sta nel riquadro")]),
-            ("Spostare e disegnare", [("Frecce", "sposta di 1 pt"), ("Maiusc+Frecce", "sposta di 10 pt"),
-                                      ("Alt", "tenuto mentre trascini: senza guide"),
-                                      ("Maiusc", "tenuto mentre disegni: linea dritta"),
-                                      ("Maiusc", "tenuto mentre ruoti: a scatti di 15°"),
-                                      ("Ctrl+Rotellina", "ingrandisci o riduci la pagina")]),
-            ("Modificare", [("Ctrl+C / Ctrl+V", "copia e incolla, anche su un'altra pagina"), ("Ctrl+D", "duplica"),
-                            ("Canc", "elimina"), ("Ctrl+G", "raggruppa o separa"), ("Ctrl+L", "blocca o sblocca"),
-                            ("Ctrl+H", "trova e sostituisci in tutto il PDF")]),
-            ("File", [("Ctrl+O", "apri un PDF"), ("Ctrl+S", "salva il PDF"), ("Ctrl+Z", "annulla"),
-                   ("Ctrl+Y", "ripeti"), ("F11", "schermo intero"), ("F1", "questi tasti rapidi")]),
+            (tr("Selezionare"), [(tr("Clic"), tr("un oggetto")), (tr("Ctrl+Clic"), tr("aggiungi o togli un oggetto dalla selezione")),
+                             (tr("Trascina"), tr("sul vuoto: tutto quello che sta nel riquadro"))]),
+            (tr("Spostare e disegnare"), [(tr("Frecce"), tr("sposta di 1 pt")), (tr("Maiusc+Frecce"), tr("sposta di 10 pt")),
+                                      (tr("Alt"), tr("tenuto mentre trascini: senza guide")),
+                                      (tr("Maiusc"), tr("tenuto mentre disegni: linea dritta")),
+                                      (tr("Maiusc"), tr("tenuto mentre ruoti: a scatti di 15°")),
+                                      (tr("Ctrl+Rotellina"), tr("ingrandisci o riduci la pagina"))]),
+            (tr("Modificare"), [(tr("Ctrl+C / Ctrl+V"), tr("copia e incolla, anche su un'altra pagina")), (tr("Ctrl+D"), "duplica"),
+                            (tr("Canc"), "elimina"), (tr("Ctrl+G"), tr("raggruppa o separa")), (tr("Ctrl+L"), tr("blocca o sblocca")),
+                            (tr("Ctrl+H"), tr("trova e sostituisci in tutto il PDF"))]),
+            (tr("File"), [(tr("Ctrl+O"), tr("apri un PDF")), (tr("Ctrl+S"), tr("salva il PDF")), (tr("Ctrl+Z"), "annulla"),
+                   (tr("Ctrl+Y"), "ripeti"), ("F11", tr("schermo intero")), ("F1", tr("questi tasti rapidi"))]),
         ]), alignment=Qt.AlignLeft)
 
         # center: bar, warnings, page
         bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
-        self.b_open = button("Apri", "open", tip="Apri un PDF (Ctrl+O)")
-        self.b_save = button("Salva PDF", "save", "Primary", "Salva il PDF modificato in un nuovo file (Ctrl+S). "
-                                                             "Campi e pulsanti restano come erano.")
-        self.b_forms = button("Apri in Moduli", "form", tip="Passa il PDF a Moduli per sistemare i campi")
-        self.b_undo = button("", "undo", "Ghost", "Annulla (Ctrl+Z)")
-        self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
+        self.b_open = button(tr("Apri"), "open", tip=tr("Apri un PDF (Ctrl+O)"))
+        self.b_save = button(tr("Salva PDF"), "save", "Primary", tr("Salva il PDF modificato in un nuovo file (Ctrl+S). "
+                                                             "Campi e pulsanti restano come erano."))
+        self.b_forms = button(tr("Apri in Moduli"), "form", tip=tr("Passa il PDF a Moduli per sistemare i campi"))
+        self.b_undo = button("", "undo", "Ghost", tr("Annulla (Ctrl+Z)"))
+        self.b_redo = button("", "redo", "Ghost", tr("Ripeti (Ctrl+Y)"))
         self.file_label = ui.Elided(objectName="Muted")
-        self.b_prev = button("", "prev", "Ghost", "Pagina precedente")
-        self.b_next = button("", "next", "Ghost", "Pagina successiva")
+        self.b_prev = button("", "prev", "Ghost", tr("Pagina precedente"))
+        self.b_next = button("", "next", "Ghost", tr("Pagina successiva"))
         self.page_label = QLabel("")
-        self.page_label.setMinimumWidth(self.page_label.fontMetrics().horizontalAdvance("Pag. 999/999") + 4)
-        self.b_zout = button("", "zoom-out", "Ghost", "Riduci")
-        self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci")
+        self.page_label.setMinimumWidth(self.page_label.fontMetrics().horizontalAdvance(tr("Pag. 999/999")) + 4)
+        self.b_zout = button("", "zoom-out", "Ghost", tr("Riduci"))
+        self.b_zin = button("", "zoom-in", "Ghost", tr("Ingrandisci"))
         self.b_open.clicked.connect(self.ask_open)
         self.b_save.clicked.connect(self.ask_save)
         self.b_forms.clicked.connect(self.to_forms)
@@ -448,9 +449,9 @@ class DesignTab(QWidget):
         self.b_next.clicked.connect(lambda: self.go_page(self.page_no + 1))
         self.b_zout.clicked.connect(lambda: self.set_zoom(self.zoom / 1.2))
         self.b_zin.clicked.connect(lambda: self.set_zoom(self.zoom * 1.2))
-        self.b_paste = button("", "paste", "Ghost", "Incolla gli oggetti copiati (Ctrl+V)")
+        self.b_paste = button("", "paste", "Ghost", tr("Incolla gli oggetti copiati (Ctrl+V)"))
         self.b_paste.clicked.connect(self.paste)
-        self.b_find = button("", "search", "Ghost", "Trova e sostituisci un testo in tutto il PDF (Ctrl+H)")
+        self.b_find = button("", "search", "Ghost", tr("Trova e sostituisci un testo in tutto il PDF (Ctrl+H)"))
         self.b_find.clicked.connect(self.find_replace)
         for w in (self.b_open, self.b_save, self.b_forms, self.b_undo, self.b_redo, self.b_paste, self.b_find):
             bl.addWidget(w)
@@ -464,7 +465,7 @@ class DesignTab(QWidget):
         self.scene = QGraphicsScene(self)
         self.scene.selectionChanged.connect(self._selection_changed)
         self.view = PageView(self.scene, self)
-        self.drop = DropZone("Apri un PDF per modificarne la grafica", glyph="page")
+        self.drop = DropZone(tr("Apri un PDF per modificarne la grafica"), glyph="page")
         self.drop.picked.connect(self.open)
         empty = QWidget(objectName="Desk")
         el = QVBoxLayout(empty)
@@ -502,7 +503,7 @@ class DesignTab(QWidget):
         props = QFrame(objectName="Panel")
         pr = QVBoxLayout(props)
         pr.setContentsMargins(16, 16, 16, 16)
-        pr.addWidget(QLabel("Proprietà", objectName="H2"))
+        pr.addWidget(QLabel(tr("Proprietà"), objectName="H2"))
         self.kind_label = QLabel(objectName="Muted")
         self.kind_label.setWordWrap(True)
         pr.addWidget(self.kind_label)
@@ -531,10 +532,10 @@ class DesignTab(QWidget):
         self.p_size.editingFinished.connect(self._size_edited)
         self.p_font = QComboBox()
         self.p_font.addItems(list(design.FONTS))
-        self.p_font.setPlaceholderText("Font del PDF")  # shown when the text's own font is none of these
+        self.p_font.setPlaceholderText(tr("Font del PDF"))  # shown when the text's own font is none of these
         self.p_font.activated.connect(self._font_edited)
-        self.p_bold = button("Grassetto", None, tip="Grassetto")
-        self.p_italic = button("Corsivo", None, tip="Corsivo")
+        self.p_bold = button(tr("Grassetto"), None, tip=tr("Grassetto"))
+        self.p_italic = button(tr("Corsivo"), None, tip=tr("Corsivo"))
         self.p_looks = QHBoxLayout()
         for b in (self.p_bold, self.p_italic):
             b.setCheckable(True)
@@ -543,52 +544,52 @@ class DesignTab(QWidget):
         self.p_width = QLineEdit()
         self.p_width.setValidator(QDoubleValidator(0, 100, 1, self.p_width))
         self.p_width.editingFinished.connect(self._width_edited)
-        self.p_color = button("", None, tip="Colore del tratto o del testo")
-        self.p_fill = button("", None, tip="Colore di riempimento")
+        self.p_color = button("", None, tip=tr("Colore del tratto o del testo"))
+        self.p_fill = button("", None, tip=tr("Colore di riempimento"))
         self.p_color.clicked.connect(lambda: self._pick("color"))
         self.p_fill.clicked.connect(lambda: self._pick("fill"))
-        self.form.addRow("Testo", self.p_text)
-        self.form.addRow("Dimensione (pt)", self.p_size)
-        self.form.addRow("Font", self.p_font)
-        self.form.addRow("Stile", self.p_looks)
+        self.form.addRow(tr("Testo"), self.p_text)
+        self.form.addRow(tr("Dimensione (pt)"), self.p_size)
+        self.form.addRow(tr("Font"), self.p_font)
+        self.form.addRow(tr("Stile"), self.p_looks)
         self.p_anchor = QHBoxLayout()
         self.anchor = 0.0  # what stays in place when a text gets wider or narrower: 0 left edge, 0.5 middle, 1 right
         anchors = QButtonGroup(self)
-        for k, glyph, tip in ((0.0, "text-left", "A sinistra"), (0.5, "text-center", "Al centro"),
+        for k, glyph, tip in ((0.0, "text-left", "A sinistra"), (0.5, "text-center", tr("Al centro")),
                               (1.0, "text-right", "A destra")):
-            b = button("", glyph, "Ghost", tip + ": quando cambi parole, font o dimensione resta fermo questo lato")
+            b = button("", glyph, "Ghost", tip + tr(": quando cambi parole, font o dimensione resta fermo questo lato"))
             b.setCheckable(True)
             b.setChecked(k == 0)
             b.clicked.connect(lambda _=False, k=k: setattr(self, "anchor", k))
             anchors.addButton(b)
             self.p_anchor.addWidget(b)
         self.p_anchor.addStretch()
-        self.form.addRow("Allineamento", self.p_anchor)
-        self.form.addRow("Spessore (pt)", self.p_width)
-        self.form.addRow("Colore", self.p_color)
-        self.form.addRow("Riempimento", self.p_fill)
+        self.form.addRow(tr("Allineamento"), self.p_anchor)
+        self.form.addRow(tr("Spessore (pt)"), self.p_width)
+        self.form.addRow(tr("Colore"), self.p_color)
+        self.form.addRow(tr("Riempimento"), self.p_fill)
         self.p_alpha = QLineEdit()
         self.p_alpha.setValidator(QDoubleValidator(0, 100, 0, self.p_alpha))
         self.p_alpha.editingFinished.connect(self._alpha_edited)
-        self.form.addRow("Opacità (%)", self.p_alpha)
+        self.form.addRow(tr("Opacità (%)"), self.p_alpha)
         self.p_dash = QComboBox()
         self.p_dash.addItems(DASHES)
         self.p_dash.activated.connect(self._dash_edited)
-        self.form.addRow("Tratto", self.p_dash)
+        self.form.addRow(tr("Tratto"), self.p_dash)
         self.p_heads = QHBoxLayout()
-        self.p_head0 = button("All'inizio", None, tip="Una punta di freccia sul primo estremo")
-        self.p_head1 = button("Alla fine", None, tip="Una punta di freccia sul secondo estremo")
+        self.p_head0 = button(tr("All'inizio"), None, tip=tr("Una punta di freccia sul primo estremo"))
+        self.p_head1 = button(tr("Alla fine"), None, tip=tr("Una punta di freccia sul secondo estremo"))
         for b in (self.p_head0, self.p_head1):
             b.setCheckable(True)
             b.clicked.connect(self._heads_edited)
             self.p_heads.addWidget(b)
-        self.form.addRow("Frecce", self.p_heads)
+        self.form.addRow(tr("Frecce"), self.p_heads)
         self.p_round = QLineEdit()
         self.p_round.setValidator(QDoubleValidator(0, 1000, 1, self.p_round))
         self.p_round.editingFinished.connect(self._round_edited)
-        self.form.addRow("Angoli arrotondati (pt)", self.p_round)
-        self.p_image = button("Sostituisci immagine…", "image", tip="Un'altra immagine al suo posto, nelle sue "
-                                                                  "proporzioni")
+        self.form.addRow(tr("Angoli arrotondati (pt)"), self.p_round)
+        self.p_image = button(tr("Sostituisci immagine…"), "image", tip=tr("Un'altra immagine al suo posto, nelle sue "
+                                                                  "proporzioni"))
         self.p_image.clicked.connect(self.replace_image)
         self.form.addRow(self.p_image)
         pr.addWidget(self.props)
@@ -596,11 +597,11 @@ class DesignTab(QWidget):
         self.arrange = QWidget()
         al = QVBoxLayout(self.arrange)
         al.setContentsMargins(0, 8, 0, 0)
-        al.addWidget(_muted("Allinea"))
+        al.addWidget(_muted(tr("Allinea")))
         aligns = QHBoxLayout()
-        for how, tip in (("left", "A sinistra"), ("hcenter", "Al centro"), ("right", "A destra"),
-                         ("top", "In alto"), ("vcenter", "In mezzo"), ("bottom", "In basso")):
-            b = button("", "align-" + how, "Ghost", tip + " (un oggetto solo: rispetto alla pagina)")
+        for how, tip in (("left", "A sinistra"), ("hcenter", tr("Al centro")), ("right", "A destra"),
+                         ("top", tr("In alto")), ("vcenter", tr("In mezzo")), ("bottom", tr("In basso"))):
+            b = button("", "align-" + how, "Ghost", tip + tr(" (un oggetto solo: rispetto alla pagina)"))
             b.clicked.connect(lambda _=False, how=how: self.align_selected(how))
             aligns.addWidget(b)
         aligns.addStretch()
@@ -608,24 +609,24 @@ class DesignTab(QWidget):
         self.spread = QWidget()
         sl = QHBoxLayout(self.spread)
         sl.setContentsMargins(0, 0, 0, 0)
-        for axis, tip in (("h", "Stessa distanza tra loro, in orizzontale"), ("v", "Stessa distanza tra loro, "
-                                                                                    "in verticale")):
-            b = button("", "distribute-" + axis, "Ghost", tip + " (tre oggetti o più)")
+        for axis, tip in (("h", tr("Stessa distanza tra loro, in orizzontale")), ("v", tr("Stessa distanza tra loro, "
+                                                                                    "in verticale"))):
+            b = button("", "distribute-" + axis, "Ghost", tip + tr(" (tre oggetti o più)"))
             b.clicked.connect(lambda _=False, axis=axis: self.distribute_selected(axis))
             sl.addWidget(b)
         sl.addStretch()
         al.addWidget(self.spread)
-        al.addWidget(_muted("Ruota (gradi, in senso orario)"))
+        al.addWidget(_muted(tr("Ruota (gradi, in senso orario)")))
         turns = QHBoxLayout()
         self.p_turn = QLineEdit()
         self.p_turn.setValidator(QDoubleValidator(-360, 360, 1, self.p_turn))
         self.p_turn.setPlaceholderText("es. 15")
         self.p_turn.setMaximumWidth(64)
         self.p_turn.returnPressed.connect(self._turn_edited)
-        b_turn = button("Ruota", None, tip="Ruota della quantità scritta (negativa: in senso antiorario)")
+        b_turn = button(tr("Ruota"), None, tip=tr("Ruota della quantità scritta (negativa: in senso antiorario)"))
         b_turn.clicked.connect(self._turn_edited)
-        b_left = button("", "rotate-left", "Ghost", "Ruota di 90° in senso antiorario")
-        b_right = button("", "rotate-right", "Ghost", "Ruota di 90° in senso orario")
+        b_left = button("", "rotate-left", "Ghost", tr("Ruota di 90° in senso antiorario"))
+        b_right = button("", "rotate-right", "Ghost", tr("Ruota di 90° in senso orario"))
         b_left.clicked.connect(lambda: self.rotate_selected(-90))
         b_right.clicked.connect(lambda: self.rotate_selected(90))
         for w in (self.p_turn, b_turn, b_left, b_right):
@@ -635,11 +636,11 @@ class DesignTab(QWidget):
         self.layers_box = QWidget()
         ll = QVBoxLayout(self.layers_box)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.addWidget(_muted("Sopra o sotto gli altri"))
-        for row in ((("front", "Primo piano", "In primo piano: sopra a tutto"),
-                     ("forward", "Avanti", "Porta avanti: sopra all'oggetto che gli sta sopra")),
-                    (("backward", "Indietro", "Porta indietro: sotto all'oggetto che gli sta sotto"),
-                     ("back", "In fondo", "Sotto a tutto (anche allo sfondo bianco, se la pagina ne ha uno)"))):
+        ll.addWidget(_muted(tr("Sopra o sotto gli altri")))
+        for row in ((("front", tr("Primo piano"), tr("In primo piano: sopra a tutto")),
+                     ("forward", tr("Avanti"), tr("Porta avanti: sopra all'oggetto che gli sta sopra"))),
+                    (("backward", tr("Indietro"), tr("Porta indietro: sotto all'oggetto che gli sta sotto")),
+                     ("back", tr("In fondo"), tr("Sotto a tutto (anche allo sfondo bianco, se la pagina ne ha uno)")))):
             line = QHBoxLayout()
             for where, text, tip in row:
                 b = button(text, None, tip=tip)
@@ -648,20 +649,20 @@ class DesignTab(QWidget):
             ll.addLayout(line)
         al.addWidget(self.layers_box)
         marks = QHBoxLayout()
-        self.b_group = button("Raggruppa", None, tip="Si selezionano, si spostano e si copiano insieme (Ctrl+G)")
+        self.b_group = button(tr("Raggruppa"), None, tip=tr("Si selezionano, si spostano e si copiano insieme (Ctrl+G)"))
         self.b_group.clicked.connect(self.group_selected)
-        self.b_pin = button("Blocca", None, tip="Non si sposta e non si cambia per sbaglio (Ctrl+L)")
+        self.b_pin = button(tr("Blocca"), None, tip=tr("Non si sposta e non si cambia per sbaglio (Ctrl+L)"))
         self.b_pin.clicked.connect(self.pin_selected)
         marks.addWidget(self.b_group)
         marks.addWidget(self.b_pin)
         al.addLayout(marks)
         pr.addWidget(self.arrange)
-        self.b_dup = button("Duplica", "copy", tip="Una copia accanto all'originale (Ctrl+D)")
+        self.b_dup = button(tr("Duplica"), "copy", tip=tr("Una copia accanto all'originale (Ctrl+D)"))
         self.b_dup.clicked.connect(self.duplicate_selected)
-        self.b_del = button("Elimina", "trash", "Danger")
+        self.b_del = button(tr("Elimina"), "trash", "Danger")
         self.b_del.clicked.connect(self.delete_selected)
         acts = QHBoxLayout()
-        self.b_copy = button("Copia", "copy", tip="Copia, per incollarlo anche su un'altra pagina (Ctrl+C)")
+        self.b_copy = button(tr("Copia"), "copy", tip=tr("Copia, per incollarlo anche su un'altra pagina (Ctrl+C)"))
         self.b_copy.clicked.connect(self.copy_selected)
         acts.addWidget(self.b_dup)
         acts.addWidget(self.b_copy)
@@ -686,12 +687,12 @@ class DesignTab(QWidget):
         root.addWidget(main)
 
         QShortcut(QKeySequence.Delete, self.view, self.delete_selected)
-        QShortcut(QKeySequence("Ctrl+D"), self, self.duplicate_selected)
+        QShortcut(QKeySequence(tr("Ctrl+D")), self, self.duplicate_selected)
         QShortcut(QKeySequence.Copy, self, self.copy_selected)
         QShortcut(QKeySequence.Paste, self, self.paste)
-        QShortcut(QKeySequence("Ctrl+G"), self, self.group_selected)
-        QShortcut(QKeySequence("Ctrl+L"), self, self.pin_selected)
-        QShortcut(QKeySequence("Ctrl+H"), self, self.find_replace)
+        QShortcut(QKeySequence(tr("Ctrl+G")), self, self.group_selected)
+        QShortcut(QKeySequence(tr("Ctrl+L")), self, self.pin_selected)
+        QShortcut(QKeySequence(tr("Ctrl+H")), self, self.find_replace)
         QShortcut(QKeySequence.Open, self, self.ask_open)
         QShortcut(QKeySequence.Save, self, self.ask_save)
         QShortcut(QKeySequence.Undo, self, self.undo)
@@ -712,12 +713,12 @@ class DesignTab(QWidget):
     def confirm_discard(self) -> bool:
         if not self.dirty:
             return True
-        r = ui.message(self, "Nell'Editor ci sono modifiche non salvate. Vuoi salvarle prima?", "ask",
-                       ("Salva", "Non salvare", "Annulla"))
+        r = ui.message(self, tr("Nell'Editor ci sono modifiche non salvate. Vuoi salvarle prima?"), "ask",
+                       (tr("Salva"), tr("Non salvare"), tr("Annulla")))
         return self.ask_save() if r == 0 else r == 1
 
     def ask_open(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Apri PDF", "", "PDF (*.pdf)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Apri PDF"), "", tr("PDF (*.pdf)"))
         if path:
             self.open(path)
 
@@ -745,13 +746,13 @@ class DesignTab(QWidget):
             return False
         p = Path(self.path)
         suggested = str(p if p.stem.endswith("_modificato") else p.with_name(f"{p.stem}_modificato.pdf"))
-        path, _ = QFileDialog.getSaveFileName(self, "Salva PDF", suggested, "PDF (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva PDF"), suggested, tr("PDF (*.pdf)"))
         if not path:
             return False
         try:
             self.save(path)
         except OSError as e:
-            ui.warn(self, f"Salvataggio non riuscito: {e}")
+            ui.warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return False
         return True
 
@@ -802,7 +803,7 @@ class DesignTab(QWidget):
         self.objects, warnings = design.page_objects(self.doc[self.page_no]) if self.doc else ([], [])
         self._apply_marks()
         self.selection = [o for o in self.objects if o.state != "locked" and any(_kept(o, r) for r in keep)]
-        self.banner.setText(f"Pagina {self.page_no + 1}: " + " ".join(warnings) if warnings else "")
+        self.banner.setText(tr("Pagina {0}: ").format(self.page_no + 1) + " ".join(warnings) if warnings else "")
         self.banner.setVisible(bool(warnings))
         self.refresh()
 
@@ -1020,7 +1021,7 @@ class DesignTab(QWidget):
         objs = self._targets()
         if len(objs) != 1 or objs[0].kind != "image":
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Scegli un'immagine", "", "Immagini (*.png *.jpg *.jpeg)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Scegli un'immagine"), "", tr("Immagini (*.png *.jpg *.jpeg)"))
         if path:
             o = objs[0]
             self._edit(design.replace_image, o, Path(path).read_bytes(), keep=[(*o.rect, "image")], follow=[o])
@@ -1029,16 +1030,16 @@ class DesignTab(QWidget):
         self.view.flush_nudge()
         if not self.doc:
             return
-        find = ui.ask_text(self, "Trova e sostituisci", "Testo da cercare in tutto il PDF:")
+        find = ui.ask_text(self, tr("Trova e sostituisci"), tr("Testo da cercare in tutto il PDF:"))
         if not find:
             return
-        repl = ui.ask_text(self, "Trova e sostituisci", f'Sostituisci "{find}" con:')
+        repl = ui.ask_text(self, tr("Trova e sostituisci"), tr("Sostituisci \"{0}\" con:").format(find))
         if repl is None:
             return
         done, failed = self.replace_all(find, repl)
         if not done and not failed:
-            return ui.info(self, f'"{find}" non c\'è nel testo del PDF.')
-        ui.info(self, f"Righe cambiate: {done}." + (f" Non cambiate: {failed} (PDFlex non riesce a riscriverle)."
+            return ui.info(self, tr("\"{0}\" non c'è nel testo del PDF.").format(find))
+        ui.info(self, tr("Righe cambiate: {0}.").format(done) + (tr(" Non cambiate: {0} (PDFlex non riesce a riscriverle).").format(failed)
                                                      if failed else ""))
 
     def replace_all(self, find: str, repl: str) -> tuple[int, int]:
@@ -1116,7 +1117,7 @@ class DesignTab(QWidget):
             missing = "".join(dict.fromkeys("".join(design.missing_letters(page, o, _words(o)) for o in objs
                                                      if o.kind == "text")))
             if missing:
-                if ui.message(self, HELVETICA.format(missing), "ask", ["Usa Helvetica", "Annulla"]) != 0:
+                if ui.message(self, HELVETICA.format(missing), "ask", [tr("Usa Helvetica"), tr("Annulla")]) != 0:
                     return self.refresh()
                 style["fontname"] = ""
         self._edit(lambda page: design.restyle(page, objs, **style), keep=[o.rect for o in objs], follow=objs)
@@ -1128,7 +1129,7 @@ class DesignTab(QWidget):
         if not o or o.kind != "text" or not text or text == _words(o):
             return
         missing = design.missing_letters(self.doc[self.page_no], o, text)
-        if missing and ui.message(self, HELVETICA.format(missing), "ask", ["Usa Helvetica", "Annulla"]) != 0:
+        if missing and ui.message(self, HELVETICA.format(missing), "ask", [tr("Usa Helvetica"), tr("Annulla")]) != 0:
             return self.refresh()
         self._edit(lambda page: design.set_text(page, o, text, fallback=bool(missing), anchor=self.anchor),
                    keep=[o.rect], follow=[o])
@@ -1148,11 +1149,11 @@ class DesignTab(QWidget):
             if r.width >= 2 and r.height >= 2:
                 self._edit(design.add_rect, tuple(r))
         elif mode == "text":
-            text = ui.ask_text(self, "Testo", "Scrivi il testo da aggiungere:")
+            text = ui.ask_text(self, tr("Testo"), tr("Scrivi il testo da aggiungere:"))
             if text:
                 self._edit(design.add_text, (x0, y0 + 11), text)
         elif mode == "image":
-            path, _ = QFileDialog.getOpenFileName(self, "Scegli un'immagine", "", "Immagini (*.png *.jpg *.jpeg)")
+            path, _ = QFileDialog.getOpenFileName(self, tr("Scegli un'immagine"), "", tr("Immagini (*.png *.jpg *.jpeg)"))
             if path:
                 r = pymupdf.Rect(rect).normalize()
                 if r.width < 10 or r.height < 10:  # a click: 120 pt wide, in its own proportions
@@ -1241,7 +1242,7 @@ class DesignTab(QWidget):
         o = objs[0]
         now = (pymupdf.sRGB_to_pdf(o.data["spans"][0]["color"]) if o.kind == "text"
                else o.data.get("drawing", {}).get(key)) or (0, 0, 0)
-        c = QColorDialog.getColor(QColor.fromRgbF(*now), self, "Scegli il colore")
+        c = QColorDialog.getColor(QColor.fromRgbF(*now), self, tr("Scegli il colore"))
         if c.isValid():
             self._restyle(**{key: (c.redF(), c.greenF(), c.blueF())})
 
@@ -1260,18 +1261,18 @@ class DesignTab(QWidget):
         self.layers_box.setVisible(len(free) == 1 and len(self.selection) == 1)
         self.spread.setVisible(len(free) >= 3)
         grouped = any(o is s for g in self.groups for o in g for s in self.selection)
-        self.b_group.setText("Separa" if grouped else "Raggruppa")
+        self.b_group.setText(tr("Separa") if grouped else tr("Raggruppa"))
         self.b_group.setEnabled(grouped or len(self.selection) > 1)
-        self.b_pin.setText("Sblocca" if self.selection and all(o.data.get("pinned") for o in self.selection)
-                           else "Blocca")
+        self.b_pin.setText(tr("Sblocca") if self.selection and all(o.data.get("pinned") for o in self.selection)
+                           else tr("Blocca"))
         if not self.selection:
-            self.kind_label.setText("Seleziona un oggetto sulla pagina, o scegli uno strumento per aggiungerne uno.")
+            self.kind_label.setText(tr("Seleziona un oggetto sulla pagina, o scegli uno strumento per aggiungerne uno."))
             return
         if any(o.data.get("pinned") for o in self.selection):
-            self.kind_label.setText("Bloccato: sbloccalo per spostarlo o cambiarlo.")
+            self.kind_label.setText(tr("Bloccato: sbloccalo per spostarlo o cambiarlo."))
         elif len(self.selection) > 1:
-            self.kind_label.setText(f"{len(self.selection)} oggetti selezionati: trascinali o usa le frecce."
-                                    + (" Le proprietà qui sotto cambiano tutti insieme." if objs else ""))
+            self.kind_label.setText(tr("{0} oggetti selezionati: trascinali o usa le frecce.").format(len(self.selection))
+                                    + (tr(" Le proprietà qui sotto cambiano tutti insieme.") if objs else ""))
         else:
             o = self.selection[0]
             self.kind_label.setText(KINDS[o.kind] + ("" if o.state == "edit" else AS_SHAPES))
@@ -1298,7 +1299,7 @@ class DesignTab(QWidget):
             line = one.kind == "line"
             r = pymupdf.Rect(one.rect)
             values = [*one.data["p1"], *one.data["p2"]] if line else [r.x0, r.y0, r.width, r.height]
-            for lab, text in zip(self.p_labels, ("X1", "Y1", "X2", "Y2") if line else ("X", "Y", "Larg.", "Alt.")):
+            for lab, text in zip(self.p_labels, ("X1", "Y1", "X2", "Y2") if line else ("X", "Y", tr("Larg."), tr("Alt."))):
                 lab.setText(text)
             for e, v in zip(self.p_box, values):
                 e.setText(f"{v:.1f}")
@@ -1327,7 +1328,7 @@ class DesignTab(QWidget):
 
     @staticmethod
     def _swatch(b, hex_color: str):
-        b.setText(hex_color.upper() if hex_color else "Nessuno")
+        b.setText(hex_color.upper() if hex_color else tr("Nessuno"))
         b.setIcon(ui.dot(hex_color) if hex_color else QIcon())
 
     # ---- drawing the page
@@ -1361,7 +1362,7 @@ class DesignTab(QWidget):
                 it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
                 it.setToolTip(f"🔒 {o.reason}")
             elif o.state == "move":
-                it.setToolTip("Testo disegnato come forme: si sposta, ma le parole non si possono cambiare")
+                it.setToolTip(tr("Testo disegnato come forme: si sposta, ma le parole non si possono cambiare"))
             self.layers.addItem(it)
         self.layers.blockSignals(False)
         self._mark_layers()
@@ -1424,7 +1425,7 @@ class DesignTab(QWidget):
         self.b_redo.setEnabled(bool(self._redo))
         if has:
             self.file_label.setText(Path(self.path).name + ("  (modificato)" if self.dirty else ""))
-            self.page_label.setText(f"Pag. {self.page_no + 1}/{self.doc.page_count}")
+            self.page_label.setText(tr("Pag. {0}/{1}").format(self.page_no + 1, self.doc.page_count))
             self.b_prev.setEnabled(self.page_no > 0)
             self.b_next.setEnabled(self.page_no < self.doc.page_count - 1)
             self.thumbs.blockSignals(True)

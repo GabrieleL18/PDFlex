@@ -13,11 +13,12 @@ from pathlib import Path
 import pymupdf
 
 from . import content
+from pdflex.i18n import tr
 
 THIN = 2.0  # pt: a filled box thinner than this is a line
 GLYPH = 18.0  # pt: filled shapes up to this size, side by side, are letters drawn as shapes
 GLYPH_GAP = 6.0  # pt between two letters of the same word / line
-ROTATED = "Pagina ruotata: per modificarla, raddrizzala prima nella sezione Pagine."
+ROTATED = tr("Pagina ruotata: per modificarla, raddrizzala prima nella sezione Pagine.")
 
 
 def _image_info(page) -> list[dict]:
@@ -170,8 +171,8 @@ def _group_glyphs(glyphs: list[dict]) -> list[Obj]:
         r = pymupdf.Rect(group[0]["rect"])
         for d in group[1:]:
             r |= d["rect"]
-        objs.append(Obj("shape", tuple(r), "move", "Testo disegnato come forme: si sposta e si ridimensiona, "
-                        "le parole non si cambiano", {"drawings": group}))
+        objs.append(Obj("shape", tuple(r), "move", tr("Testo disegnato come forme: si sposta e si ridimensiona, "
+                        "le parole non si cambiano"), {"drawings": group}))
     return objs
 
 
@@ -234,12 +235,12 @@ def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
     for d in plain:
         if not _inside(pymupdf.Rect(d["rect"]), clips.get(d["seqno"], [])):
             o = _shape(_full(d))
-            o.state, o.reason = "locked", "Ritagliato: resta com'è"
+            o.state, o.reason = "locked", tr("Ritagliato: resta com'è")
             objs.append(o)
             locked += 1
         elif _key(d) in stuck and d["seqno"] not in own:
             o = _shape(_full(d))
-            o.state, o.reason = "locked", "PDFlex non riesce a staccarlo dalla pagina: resta com'è"
+            o.state, o.reason = "locked", tr("PDFlex non riesce a staccarlo dalla pagina: resta com'è")
             objs.append(o)
             locked += 1
         elif _glyph(d):
@@ -250,7 +251,7 @@ def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
     for info in _images(page):
         o = Obj("image", tuple(pymupdf.Rect(info["bbox"])), data={"xref": info["xref"], "transform": info["transform"]})
         if not info["xref"]:
-            o.state, o.reason = "locked", "Immagine incorporata nel testo della pagina: resta com'è"
+            o.state, o.reason = "locked", tr("Immagine incorporata nel testo della pagina: resta com'è")
             locked += 1
         objs.append(o)
     fonts = {f[3].split("+")[-1]: f[0] for f in page.get_fonts()}
@@ -266,11 +267,9 @@ def page_objects(page: pymupdf.Page) -> tuple[list[Obj], list[str]]:
                                                     "dir": tuple(line["dir"])}))
     warnings = []
     if glyphs:
-        warnings.append("Testo disegnato come forme: si sposta, ma le parole non si possono cambiare "
-                        f"({len(glyphs)} forme).")
+        warnings.append(tr("Testo disegnato come forme: si sposta, ma le parole non si possono cambiare ({0} forme).").format(len(glyphs)))
     if locked:
-        warnings.append(f"{locked} oggetti restano come sono (sfumature, ritagli o forme che "
-                        "PDFlex non riesce a staccare dalla pagina).")
+        warnings.append(tr("{0} oggetti restano come sono (sfumature, ritagli o forme che PDFlex non riesce a staccare dalla pagina).").format(locked))
     if page.rotation:
         for o in objs:
             o.state, o.reason = "locked", ROTATED
@@ -384,9 +383,9 @@ def _shape_margin(page, areas: list[pymupdf.Rect], targets: Counter, before: lis
                 return m
             cut = True
     if taken and cut:
-        raise EditError("Questa forma è intrecciata con un'altra grande forma della pagina: PDFlex non riesce a "
-                        "modificarla da sola, e resta com'è.")
-    raise EditError("PDFlex non riesce a staccare questa forma dalla pagina: resta com'è.")
+        raise EditError(tr("Questa forma è intrecciata con un'altra grande forma della pagina: PDFlex non riesce a "
+                        "modificarla da sola, e resta com'è."))
+    raise EditError(tr("PDFlex non riesce a staccare questa forma dalla pagina: resta com'è."))
 
 
 def _mapping(old: pymupdf.Rect, new: pymupdf.Rect) -> pymupdf.Matrix:
@@ -455,7 +454,7 @@ def _draw_items(shape, items, m: pymupdf.Matrix) -> None:
         elif it[0] == "c":
             shape.draw_bezier(P(it[1]) * m, P(it[2]) * m, P(it[3]) * m, P(it[4]) * m)
         else:
-            raise EditError("Una forma contiene un tratto che PDFlex non sa ridisegnare.")
+            raise EditError(tr("Una forma contiene un tratto che PDFlex non sa ridisegnare."))
 
 
 def _finish(shape, d: dict, style: dict) -> None:
@@ -489,7 +488,7 @@ def _text_font(page, o: Obj, span: dict, override: str | None, text: str) -> pym
     if font is not None:
         missing = missing_letters(page, o, text)
         if missing:
-            raise EditError(f"PDFlex non riesce a scrivere con il carattere di questo testo le lettere: {missing}")
+            raise EditError(tr("PDFlex non riesce a scrivere con il carattere di questo testo le lettere: {0}").format(missing))
         return font
     name = span["font"].lower()
     base = "tiro" if "times" in name else "cour" if "courier" in name else "helv"
@@ -525,8 +524,8 @@ def _text_args(page, o: Obj, m: pymupdf.Matrix, style: dict, text: str | None) -
         font = _text_font(page, o, s, style.get("fontname"), words)
     except EditError:
         if text is None and "fontname" not in style:  # only moving it
-            raise EditError("Questo testo è intrecciato con un disegno e il suo carattere non si può riscrivere: "
-                            "PDFlex non riesce a spostarlo.") from None
+            raise EditError(tr("Questo testo è intrecciato con un disegno e il suo carattere non si può riscrivere: "
+                            "PDFlex non riesce a spostarlo.")) from None
         raise
     way, still = pymupdf.Point(o.data.get("dir", (1, 0))), pymupdf.Matrix(m.a, m.b, m.c, m.d, 0, 0)
     up = pymupdf.Point(way.y, -way.x) * still  # its letters' height through m: the size it gets
@@ -606,7 +605,7 @@ def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None
     layer: (where, k) to draw them again elsewhere among the rest, as content.place reads it (see restack)."""
     for o in objs:
         if o.state == "locked":
-            raise EditError(o.reason or "Questo oggetto non si può modificare.")
+            raise EditError(o.reason or tr("Questo oggetto non si può modificare."))
     before = page.get_cdrawings()
     targets = Counter(_key(d) for o in objs for d in _drawings(o))
     shapes = [(o, m, style) for o, (m, style, _) in zip(objs, new) if o.kind not in ("text", "image")]
@@ -614,7 +613,7 @@ def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None
     if layer and shapes:  # taken off where they are, drawn again where they go: nothing else is touched
         in_place = content.edit(page, {d["seqno"]: (None, {}) for o, _, _ in shapes for d in _drawings(o)}, before)
         if not in_place:
-            raise EditError("PDFlex non riesce a staccare questa forma dal suo posto per portarla sopra o sotto.")
+            raise EditError(tr("PDFlex non riesce a staccare questa forma dal suo posto per portarla sopra o sotto."))
     else:
         in_place = bool(shapes) and _edit_in_place(page, shapes, before)  # else taken off and drawn again
     areas = {"shape": [], "text": [], "image": []}
@@ -680,17 +679,17 @@ def _replace(page, objs: list[Obj], new: list[tuple], layer: tuple | None = None
         try:
             content.splice(page, data, pos, ctm, mark)
         except ValueError:
-            raise EditError("PDFlex non riesce a portare questo oggetto sopra o sotto gli altri.") from None
+            raise EditError(tr("PDFlex non riesce a portare questo oggetto sopra o sotto gli altri.")) from None
     gone = sum(len(_drawings(o)) for o, (m, _, _) in zip(objs, new) if m is None)
     if len(page.get_cdrawings()) != len(before) - gone:
-        raise EditError("Con questa modifica sarebbe cambiata anche un'altra forma della pagina.")
+        raise EditError(tr("Con questa modifica sarebbe cambiata anche un'altra forma della pagina."))
     gone = sum(1 for o, (m, _, _) in zip(objs, new) if o.kind == "image" and m is None)
     if len(_images(page)) != images_before - gone:
-        raise EditError("Con questa modifica sarebbe sparita un'altra immagine che tocca questa.")
+        raise EditError(tr("Con questa modifica sarebbe sparita un'altra immagine che tocca questa."))
     after = [w[0] for w in _words(page)]
     for word in words_kept:
         if word not in after:
-            raise EditError(f'Con questa modifica sarebbe sparita anche la parola "{word}" lì vicino.')
+            raise EditError(tr("Con questa modifica sarebbe sparita anche la parola \"{0}\" lì vicino.").format(word))
         after.remove(word)
 
 
@@ -705,7 +704,7 @@ def _line_matrix(o: Obj, p1, p2) -> pymupdf.Matrix:
         sy = (d.y - c.y) / (b.y - a.y) if abs(b.y - a.y) > 0.01 else 1
         return pymupdf.Matrix(1, 0, 0, sy, c.x - a.x, c.y - a.y * sy)
     if "thick" in o.data:
-        raise EditError("Questa linea si può allungare solo nella sua direzione.")
+        raise EditError(tr("Questa linea si può allungare solo nella sua direzione."))
     v, w = b - a, d - c  # a slanted line: rotate and scale it onto the new ends
     den = v.x * v.x + v.y * v.y
     if den < 1e-6:
@@ -773,21 +772,21 @@ def restack(page, obj: Obj, where: str) -> None:
     """obj drawn again over everything ("front"), under everything ("back"), just over the next thing above it
     that it touches ("forward") or just under the next one below ("backward")."""
     if obj.state == "locked":
-        raise EditError(obj.reason or "Questo oggetto non si può modificare.")
+        raise EditError(obj.reason or tr("Questo oggetto non si può modificare."))
     objs = [o for o in page_objects(page)[0] if not (o.kind == obj.kind and content._same(pymupdf.Rect(o.rect), obj.rect))]
     z = _stack(page, objs + [obj])
     if z[id(obj)] is None:
-        raise EditError("PDFlex non trova dove è disegnato questo oggetto.")
+        raise EditError(tr("PDFlex non trova dove è disegnato questo oggetto."))
     near = [o for o in objs if z[id(o)] is not None and _touch(o, obj)]
     if where == "forward":
         above = [o for o in near if z[id(o)][0] > z[id(obj)][1]]
         if not above:
-            raise EditError("È già sopra a tutto quello che tocca.")
+            raise EditError(tr("È già sopra a tutto quello che tocca."))
         layer = ("after", z[id(min(above, key=lambda o: z[id(o)][0]))][1])
     elif where == "backward":
         below = [o for o in near if z[id(o)][1] < z[id(obj)][0]]
         if not below:
-            raise EditError("È già sotto a tutto quello che tocca.")
+            raise EditError(tr("È già sotto a tutto quello che tocca."))
         layer = ("before", z[id(max(below, key=lambda o: z[id(o)][1]))][0])
     else:
         layer = (where, 0)
@@ -809,7 +808,7 @@ def duplicate(page, objs: list[Obj], dx: float, dy: float, src_page=None) -> Non
     src_page: the objects are of that page instead (see paste)."""
     for o in objs:
         if o.state == "locked":
-            raise EditError(o.reason or "Questo oggetto non si può modificare.")
+            raise EditError(o.reason or tr("Questo oggetto non si può modificare."))
     src_page = src_page or page
     m = pymupdf.Matrix(1, 0, 0, 1, dx, dy)
     before, images_before, words_before = page.get_cdrawings(), len(_images(page)), _words(page)
@@ -840,13 +839,13 @@ def duplicate(page, objs: list[Obj], dx: float, dy: float, src_page=None) -> Non
                 pix = pymupdf.Pixmap(pix, pymupdf.Pixmap(sdoc, info["smask"]))
             _put_image(page, pymupdf.Matrix(o.data["transform"]) * m, opacity=alpha[id(o)], pixmap=pix)
     if len(page.get_cdrawings()) != len(before) + len(paths):
-        raise EditError("PDFlex non è riuscito a copiare queste forme così come sono.")
+        raise EditError(tr("PDFlex non è riuscito a copiare queste forme così come sono."))
     if len(_images(page)) != images_before + sum(o.kind == "image" for o in objs):
-        raise EditError("PDFlex non è riuscito a copiare questa immagine.")
+        raise EditError(tr("PDFlex non è riuscito a copiare questa immagine."))
     after = [w for w, _ in _words(page)]
     for w, _ in words_before:
         if w not in after:
-            raise EditError(f'Con questa copia sarebbe sparita la parola "{w}".')
+            raise EditError(tr("Con questa copia sarebbe sparita la parola \"{0}\".").format(w))
         after.remove(w)
 
 
@@ -903,9 +902,9 @@ def _round_items(r: pymupdf.Rect, k: float) -> list:
 
 def _reshape(page, obj: Obj, items: list) -> None:
     if obj.state == "locked":
-        raise EditError(obj.reason or "Questo oggetto non si può modificare.")
+        raise EditError(obj.reason or tr("Questo oggetto non si può modificare."))
     if "drawing" not in obj.data or not content.reshape(page, {obj.data["drawing"]["seqno"]: items}):
-        raise EditError("PDFlex non riesce a cambiare la forma di questo oggetto: si può solo spostare.")
+        raise EditError(tr("PDFlex non riesce a cambiare la forma di questo oggetto: si può solo spostare."))
 
 
 def set_arrows(page, obj: Obj, start: bool, end: bool) -> None:
@@ -948,11 +947,11 @@ def distribute(page, objs: list[Obj], axis: str) -> None:
 def replace_image(page, obj: Obj, data: bytes) -> None:
     """Another picture in an image's place: in its box (in its own proportions, in the middle), turned as it was."""
     if obj.state == "locked":
-        raise EditError(obj.reason or "Questo oggetto non si può modificare.")
+        raise EditError(obj.reason or tr("Questo oggetto non si può modificare."))
     try:
         pix = pymupdf.Pixmap(data)
     except (RuntimeError, ValueError):
-        raise EditError("Questa immagine non si apre.") from None
+        raise EditError(tr("Questa immagine non si apre.")) from None
     t, alpha = pymupdf.Matrix(obj.data["transform"]), opacity(page, obj)
     w, h = abs(pymupdf.Point(t.a, t.b)), abs(pymupdf.Point(t.c, t.d))  # the box's sides, along the picture's own
     aspect = pix.width / pix.height
@@ -977,7 +976,7 @@ def set_text(page, obj: Obj, text: str, fallback: bool = False, anchor: float = 
     anchor: as for restyle."""
     missing = missing_letters(page, obj, text)
     if missing and not fallback:
-        raise EditError(f"Il carattere di questo testo non ha le lettere: {missing}")
+        raise EditError(tr("Il carattere di questo testo non ha le lettere: {0}").format(missing))
     style = {"fontname": ""} if missing else {}
     _replace(page, [obj], [(pymupdf.Identity, {**style, "anchor": anchor} if anchor else style, text)])
 

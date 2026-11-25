@@ -7,6 +7,7 @@ from pathlib import Path
 import pymupdf
 
 from pdflex import open_pdf, write_atomic
+from pdflex.i18n import tr
 
 
 @dataclass
@@ -60,7 +61,7 @@ def add_extras(doc: pymupdf.Document, extras: Extras) -> None:
         if extras.header:
             _write(page, extras.header, (r.width / 2, 24), 9)
         if extras.numbers:
-            _write(page, f"Pagina {page.number + 1} di {n}", (r.width / 2, r.height - 20), 9)
+            _write(page, tr("Pagina {0} di {1}").format(page.number + 1, n), (r.width / 2, r.height - 20), 9)
 
 
 def _bytes(doc: pymupdf.Document, extras: Extras | None) -> bytes:
@@ -231,20 +232,20 @@ class PagesTab(QWidget):
         bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
-        self.b_add = button("Aggiungi PDF", "open", tip="Aggiungi le pagine di uno o più PDF in fondo")
-        self.b_left = button("", "rotate-left", "Ghost", "Ruota a sinistra le pagine selezionate (Ctrl+Maiusc+R)")
-        self.b_right = button("", "rotate-right", "Ghost", "Ruota a destra le pagine selezionate (Ctrl+R)")
-        self.b_del = button("Elimina", "trash", "Danger", "Togli le pagine selezionate (Canc)")
-        self.b_view = button("Anteprima", "eye", tip="Il PDF come verrà salvato, pagina per pagina")
-        self.b_extras = button("Opzioni", "page", tip="Numeri di pagina, intestazione, filigrana e dimensione del file")
-        self.b_split = button("Dividi", "batch", tip="Salva ogni pagina in un PDF a sé")
-        self.b_extract = button("Estrai selezionate", "export", tip="Salva solo le pagine selezionate")
-        self.b_save = button("Salva PDF", "save", "Primary")
+        self.b_add = button(tr("Aggiungi PDF"), "open", tip=tr("Aggiungi le pagine di uno o più PDF in fondo"))
+        self.b_left = button("", "rotate-left", "Ghost", tr("Ruota a sinistra le pagine selezionate (Ctrl+Maiusc+R)"))
+        self.b_right = button("", "rotate-right", "Ghost", tr("Ruota a destra le pagine selezionate (Ctrl+R)"))
+        self.b_del = button(tr("Elimina"), "trash", "Danger", tr("Togli le pagine selezionate (Canc)"))
+        self.b_view = button(tr("Anteprima"), "eye", tip=tr("Il PDF come verrà salvato, pagina per pagina"))
+        self.b_extras = button(tr("Opzioni"), "page", tip=tr("Numeri di pagina, intestazione, filigrana e dimensione del file"))
+        self.b_split = button(tr("Dividi"), "batch", tip=tr("Salva ogni pagina in un PDF a sé"))
+        self.b_extract = button(tr("Estrai selezionate"), "export", tip=tr("Salva solo le pagine selezionate"))
+        self.b_save = button(tr("Salva PDF"), "save", "Primary")
         self.size = QSlider(Qt.Horizontal)
         self.size.setRange(90, THUMB)
         self.size.setValue(150)
         self.size.setFixedWidth(110)
-        self.size.setToolTip("Dimensione delle miniature")
+        self.size.setToolTip(tr("Dimensione delle miniature"))
         self.b_add.clicked.connect(self.ask_add)
         self.b_left.clicked.connect(lambda: self.rotate(-90))
         self.b_right.clicked.connect(lambda: self.rotate(90))
@@ -256,12 +257,12 @@ class PagesTab(QWidget):
         self.b_extract.clicked.connect(lambda: self.ask_save(selected=True))
         self.b_save.clicked.connect(lambda: self.ask_save())
         self.size.valueChanged.connect(lambda v: self.grid.set_thumb(v))
-        hint = QLabel("Trascina per riordinare", objectName="Muted")
-        hint.setToolTip("Trascina le miniature per riordinarle, o un PDF da Esplora risorse per inserirlo "
-                        "in quel punto. Doppio clic per vedere una pagina in grande.")
+        hint = QLabel(tr("Trascina per riordinare"), objectName="Muted")
+        hint.setToolTip(tr("Trascina le miniature per riordinarle, o un PDF da Esplora risorse per inserirlo "
+                        "in quel punto. Doppio clic per vedere una pagina in grande."))
         hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # the buttons keep their words first
-        self.b_undo = button("", "undo", "Ghost", "Annulla (Ctrl+Z)")
-        self.b_redo = button("", "redo", "Ghost", "Ripeti (Ctrl+Y)")
+        self.b_undo = button("", "undo", "Ghost", tr("Annulla (Ctrl+Z)"))
+        self.b_redo = button("", "redo", "Ghost", tr("Ripeti (Ctrl+Y)"))
         self.b_undo.clicked.connect(self.undo)
         self.b_redo.clicked.connect(self.redo)
         bl.addWidget(self.b_add)
@@ -269,7 +270,7 @@ class PagesTab(QWidget):
         bl.addWidget(self.b_redo)
         bl.addSpacing(8)
         bl.addWidget(hint, 1)
-        bl.addWidget(QLabel("Miniature", objectName="Muted"))
+        bl.addWidget(QLabel(tr("Miniature"), objectName="Muted"))
         bl.addWidget(self.size)
         bl.addSpacing(8)
         for w in (self.b_left, self.b_right, self.b_del, self.b_extras, self.b_view, self.b_split, self.b_extract,
@@ -284,7 +285,7 @@ class PagesTab(QWidget):
         self.grid.itemDoubleClicked.connect(self.show_page)
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._menu)
-        drop = ui.DropZone("Unisci, riordina o dividi PDF", "Trascina qui uno o più PDF o clicca per sceglierli", "batch")
+        drop = ui.DropZone(tr("Unisci, riordina o dividi PDF"), tr("Trascina qui uno o più PDF o clicca per sceglierli"), "batch")
         drop.picked.connect(lambda p: self.add_files([p]))
         empty = QWidget(objectName="Desk")
         el = QVBoxLayout(empty)
@@ -299,8 +300,8 @@ class PagesTab(QWidget):
         lay.addWidget(bar)
         lay.addWidget(self.stack, 1)
         QShortcut(QKeySequence.Delete, self.grid, self.delete_selected)
-        QShortcut(QKeySequence("Ctrl+R"), self.grid, lambda: self.rotate(90))
-        QShortcut(QKeySequence("Ctrl+Shift+R"), self.grid, lambda: self.rotate(-90))
+        QShortcut(QKeySequence(tr("Ctrl+R")), self.grid, lambda: self.rotate(90))
+        QShortcut(QKeySequence(tr("Ctrl+Shift+R")), self.grid, lambda: self.rotate(-90))
         QShortcut(QKeySequence.Undo, self, self.undo)
         QShortcut(QKeySequence.Redo, self, self.redo)
         self._buttons()
@@ -368,13 +369,13 @@ class PagesTab(QWidget):
         self._push()
         row = self.grid.count() if at is None else at
         total, done = sum(d.page_count for _, d in docs), 0
-        with ui.progress(self, "Preparo le miniature...", total) as step:
+        with ui.progress(self, tr("Preparo le miniature..."), total) as step:
             for p, doc in docs:
                 for page in doc:
                     ref = PageRef(p, page.number)
                     item = QListWidgetItem(self._icon(page, 0), f"{Path(p).stem[:18]}  p. {page.number + 1}")
                     item.setData(Qt.UserRole, ref)
-                    item.setToolTip(f"{Path(p).name}, pagina {page.number + 1}")
+                    item.setToolTip(tr("{0}, pagina {1}").format(Path(p).name, page.number + 1))
                     self.grid.insertItem(row + done, item)
                     done += 1
                     step(done)
@@ -382,7 +383,7 @@ class PagesTab(QWidget):
         self._buttons()
 
     def ask_add(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Aggiungi PDF", "", "PDF (*.pdf)")
+        paths, _ = QFileDialog.getOpenFileNames(self, tr("Aggiungi PDF"), "", tr("PDF (*.pdf)"))
         self.add_files(paths)
 
     def rotate(self, degrees: int):
@@ -415,19 +416,19 @@ class PagesTab(QWidget):
         rows = sorted(self.grid.row(i) for i in self.grid.selectedItems())
         last = self.grid.count() - 1
         m = QMenu(self)
-        for text, glyph, step, ok in (("Sposta indietro", "prev", -1, rows[0] > 0),
-                                      ("Sposta avanti", "next", 1, rows[-1] < last),
-                                      ("Sposta all'inizio", None, -last, rows[0] > 0),
-                                      ("Sposta alla fine", None, last, rows[-1] < last)):
+        for text, glyph, step, ok in ((tr("Sposta indietro"), "prev", -1, rows[0] > 0),
+                                      (tr("Sposta avanti"), "next", 1, rows[-1] < last),
+                                      (tr("Sposta all'inizio"), None, -last, rows[0] > 0),
+                                      (tr("Sposta alla fine"), None, last, rows[-1] < last)):
             a = m.addAction(ui.icon(glyph, ui.color("ink")) if glyph else QIcon(), text, lambda s=step: self.shift(s))
             a.setEnabled(ok)
         m.addSeparator()
-        m.addAction(ui.icon("rotate-right", ui.color("ink")), "Ruota a destra	Ctrl+R", lambda: self.rotate(90))
-        m.addAction(ui.icon("rotate-left", ui.color("ink")), "Ruota a sinistra	Ctrl+Maiusc+R", lambda: self.rotate(-90))
-        m.addAction(QIcon(), "Capovolgi", lambda: self.rotate(180))
+        m.addAction(ui.icon("rotate-right", ui.color("ink")), tr("Ruota a destra	Ctrl+R"), lambda: self.rotate(90))
+        m.addAction(ui.icon("rotate-left", ui.color("ink")), tr("Ruota a sinistra	Ctrl+Maiusc+R"), lambda: self.rotate(-90))
+        m.addAction(QIcon(), tr("Capovolgi"), lambda: self.rotate(180))
         m.addSeparator()
-        m.addAction(ui.icon("eye", ui.color("ink")), "Vedi la pagina", lambda: self.show_page(item))
-        m.addAction(ui.icon("trash", ui.color("danger")), "Elimina", self.delete_selected)
+        m.addAction(ui.icon("eye", ui.color("ink")), tr("Vedi la pagina"), lambda: self.show_page(item))
+        m.addAction(ui.icon("trash", ui.color("danger")), tr("Elimina"), self.delete_selected)
         m.aboutToHide.connect(m.deleteLater)
         return m
 
@@ -446,26 +447,26 @@ class PagesTab(QWidget):
 
     def show_page(self, item):
         ref = item.data(Qt.UserRole)
-        ui.show_doc(self, _build([ref]), f"{Path(ref.path).name}, pagina {ref.index + 1}")
+        ui.show_doc(self, _build([ref]), tr("{0}, pagina {1}").format(Path(ref.path).name, ref.index + 1))
 
     def ask_extras(self):
         """What to add while saving; kept until PDFlex is closed."""
         e = self.extras
         d = QDialog(self)
-        d.setWindowTitle("Opzioni di salvataggio")
+        d.setWindowTitle(tr("Opzioni di salvataggio"))
         d.setMinimumWidth(420)
         form = QFormLayout(d)
         form.setRowWrapPolicy(QFormLayout.WrapAllRows)
-        numbers = ui.Toggle("Numeri di pagina in basso (Pagina 1 di 5)")
+        numbers = ui.Toggle(tr("Numeri di pagina in basso (Pagina 1 di 5)"))
         numbers.setChecked(e.numbers)
-        header = QLineEdit(e.header, placeholderText="Nessuna")
-        mark = QLineEdit(e.watermark, placeholderText="Nessuna, es. BOZZA o COPIA")
-        compress = ui.Toggle("Riduci la dimensione del file")
+        header = QLineEdit(e.header, placeholderText=tr("Nessuna"))
+        mark = QLineEdit(e.watermark, placeholderText=tr("Nessuna, es. BOZZA o COPIA"))
+        compress = ui.Toggle(tr("Riduci la dimensione del file"))
         compress.setChecked(e.compress)
-        compress.setToolTip("Le immagini oltre 200 dpi scendono a 150 e vengono ricompresse: "
-                            "a schermo e in stampa non cambia quasi nulla")
-        note = QLabel("Valgono per Salva, Estrai, Dividi e Anteprima.", objectName="Muted")
-        ok, cancel = button("OK", None, "Primary"), button("Annulla")
+        compress.setToolTip(tr("Le immagini oltre 200 dpi scendono a 150 e vengono ricompresse: "
+                            "a schermo e in stampa non cambia quasi nulla"))
+        note = QLabel(tr("Valgono per Salva, Estrai, Dividi e Anteprima."), objectName="Muted")
+        ok, cancel = button("OK", None, "Primary"), button(tr("Annulla"))
         ok.clicked.connect(d.accept)
         cancel.clicked.connect(d.reject)
         row = QHBoxLayout()
@@ -473,8 +474,8 @@ class PagesTab(QWidget):
         row.addWidget(cancel)
         row.addWidget(ok)
         form.addRow(numbers)
-        form.addRow("Intestazione in alto", header)
-        form.addRow("Filigrana", mark)
+        form.addRow(tr("Intestazione in alto"), header)
+        form.addRow(tr("Filigrana"), mark)
         form.addRow(compress)
         form.addRow(note)
         form.addRow(row)
@@ -485,11 +486,11 @@ class PagesTab(QWidget):
 
     def preview(self):
         if self.grid.count():
-            with ui.progress(self, "Preparo l'anteprima...", 0):  # a moving bar: compression can take a while
+            with ui.progress(self, tr("Preparo l'anteprima..."), 0):  # a moving bar: compression can take a while
                 doc = _build(self.refs())
                 add_extras(doc, self.extras)
-            ui.show_doc(self, doc, "Anteprima del PDF da salvare",
-                        f"{self.grid.count()} pagine nell'ordine attuale. Ctrl+rotellina per ingrandire.")
+            ui.show_doc(self, doc, tr("Anteprima del PDF da salvare"),
+                        tr("{0} pagine nell'ordine attuale. Ctrl+rotellina per ingrandire.").format(self.grid.count()))
 
     def _buttons(self):
         has, sel = self.grid.count() > 0, bool(self.grid.selectedItems())
@@ -499,7 +500,7 @@ class PagesTab(QWidget):
         for w in (self.b_left, self.b_right, self.b_del, self.b_extract):
             w.setEnabled(sel)
         n = self.extras.count()
-        self.b_extras.setText(f"Opzioni ({n})" if n else "Opzioni")
+        self.b_extras.setText(tr("Opzioni ({0})").format(n) if n else tr("Opzioni"))
         self.b_undo.setEnabled(bool(self._undo))
         self.b_redo.setEnabled(bool(self._redo))
 
@@ -513,18 +514,18 @@ class PagesTab(QWidget):
     def ask_save(self, selected: bool = False):
         first = Path(self.refs()[0].path)
         default = str(first.with_name(first.stem + ("_estratte.pdf" if selected else "_unito.pdf")))
-        path, _ = QFileDialog.getSaveFileName(self, "Salva PDF", default, "PDF (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva PDF"), default, tr("PDF (*.pdf)"))
         if path:
             try:
                 self.save(path, selected)
             except (ValueError, OSError, RuntimeError) as e:
-                warn(self, f"Salvataggio non riuscito: {e}")
+                warn(self, tr("Salvataggio non riuscito: {0}").format(e))
                 return
-            info(self, f"Salvato in {path}")
+            info(self, tr("Salvato in {0}").format(path))
 
     def ask_split(self):
         first = Path(self.refs()[0].path)
-        out = QFileDialog.getExistingDirectory(self, "Cartella per le pagine singole", str(first.parent))
+        out = QFileDialog.getExistingDirectory(self, tr("Cartella per le pagine singole"), str(first.parent))
         if out:
             made = split(self.refs(), out, first.stem, self.extras)
-            info(self, f"Creati {len(made)} PDF in {out}")
+            info(self, tr("Creati {0} PDF in {1}").format(len(made), out))

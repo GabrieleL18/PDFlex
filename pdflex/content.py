@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, replace
 
 import pymupdf
+from pdflex.i18n import tr
 
 _OPERAND = (rb"%[^\r\n]*|\((?:\.|[^\()]|\((?:\.|[^\()])*\))*\)|<<|>>|<[0-9A-Fa-f\s]*>|[\[\]{}]"
             rb"|/[^\s()<>\[\]{}/%]*|[-+.0-9]+")
@@ -347,7 +348,7 @@ def splice(page, data: bytes, pos: int, ctm: pymupdf.Matrix, xref: int) -> None:
     its own coordinates and a plain state (dashes, joins, text spacing as they start)."""
     conts = page.get_contents()
     if not conts or conts[0] != xref:
-        raise ValueError("the page's stream changed under the drawing")
+        raise ValueError(tr("the page's stream changed under the drawing"))
     drawn = b"\n".join(page.parent.xref_stream(x) or b"" for x in conts[1:])
     fix = page.transformation_matrix * ~ctm
     plain = b"[] 0 d 0 J 0 j 10 M 0 Tc 0 Tw 100 Tz 0 TL 0 Ts 0 Tr"

@@ -6,7 +6,20 @@ if (-not (Test-Path (Join-Path $src "PDFlex.exe"))) { throw "Non trovo dist\PDFl
 
 $dest = Join-Path $env:LOCALAPPDATA "Programs\PDFlex"
 $exe = Join-Path $dest "PDFlex.exe"
-if (Get-Process PDFlex -ErrorAction SilentlyContinue) { throw "Chiudi PDFlex e riprova." }
+if (Get-Process PDFlex -ErrorAction SilentlyContinue) { throw "Chiudi PDFlex e riprova. / Close PDFlex and try again." }
+
+# lingua: chiesta solo alla prima installazione (poi si cambia dal pulsante in basso a sinistra in PDFlex)
+$langFile = Join-Path $env:LOCALAPPDATA "PDFlex\lingua.json"
+if (-not (Test-Path $langFile)) {
+    Write-Host ""
+    Write-Host "  1 = Italiano"
+    Write-Host "  2 = English"
+    $pick = Read-Host "Lingua / Language [1]"
+    $lang = if ($pick.Trim() -eq "2") { "en" } else { "it" }
+    New-Item (Split-Path $langFile) -ItemType Directory -Force | Out-Null
+    [IO.File]::WriteAllText($langFile, "{""lingua"": ""$lang""}")  # UTF-8 without BOM
+}
+$en = (Get-Content $langFile -Raw) -match '"en"'
 if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
 Copy-Item $src $dest -Recurse
 Copy-Item (Join-Path $PSScriptRoot "uninstall.ps1") $dest
@@ -42,4 +55,5 @@ $size = [int]((Get-ChildItem $dest -Recurse | Measure-Object Length -Sum).Sum / 
    UninstallString = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$dest\uninstall.ps1`""
    NoModify = 1; NoRepair = 1 }.GetEnumerator() | ForEach-Object { New-ItemProperty $un -Name $_.Key -Value $_.Value -Force | Out-Null }
 
-Write-Host "PDFlex installato in $dest. Lo trovi nel menu Start e in 'Apri con' sui PDF."
+if ($en) { Write-Host "PDFlex installed in $dest. You find it in the Start menu and in 'Open with' on PDFs." }
+else { Write-Host "PDFlex installato in $dest. Lo trovi nel menu Start e in 'Apri con' sui PDF." }

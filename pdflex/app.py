@@ -1,28 +1,55 @@
 import base64
 import ctypes
 import faulthandler
+import json
 import os
+import re
 import sys
+import threading
 import traceback
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QByteArray, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
-from pdflex import ui
+from pdflex import __version__, ui
 from pdflex.batch import BatchTab
 from pdflex.compare import CompareTab
 from pdflex.designer import DesignTab
 from pdflex.editor import EditorTab
 from pdflex.pages import PagesTab
+from pdflex import i18n
+from pdflex.i18n import tr
+
+
+RELEASES = "https://api.github.com/repos/GabrieleL18/PDFlex/releases/latest"
+
+
+def version_parts(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def newer_release(current: str = __version__) -> tuple[str, str] | None:
+    """(version, page) of the latest GitHub release when it is newer than this one; None if not, or offline."""
+    try:
+        req = urllib.request.Request(RELEASES, headers={"User-Agent": "PDFlex", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.load(r)
+        tag = data["tag_name"].lstrip("vV")
+        return (tag, data["html_url"]) if version_parts(tag) > version_parts(current) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 class MainWindow(QMainWindow):
+    update_found = Signal(str, str)  # version, release page: from the checking thread
+
     def __init__(self, path: str | None = None):
         super().__init__()
         self.setWindowTitle("PDFlex")
@@ -52,9 +79,9 @@ class MainWindow(QMainWindow):
         rl.addSpacing(14)
         group = QButtonGroup(self)
         self.rail = {}
-        for glyph, label, tab in [("page", "Editor", self.design), ("form", "Moduli", self.editor),
-                                  ("compare", "Confronta", self.compare), ("batch", "In serie", self.batch),
-                                  ("list", "Pagine", self.pages)]:
+        for glyph, label, tab in [("page", tr("Editor"), self.design), ("form", tr("Moduli"), self.editor),
+                                  ("compare", tr("Confronta"), self.compare), ("batch", tr("In serie"), self.batch),
+                                  ("list", tr("Pagine"), self.pages)]:
             b = QToolButton()
             b.setText(label)
             ui.set_glyph(b, glyph, "accent")
@@ -77,6 +104,22 @@ class MainWindow(QMainWindow):
         self.b_theme.clicked.connect(self.toggle_theme)
         rl.addWidget(self.b_theme, alignment=Qt.AlignHCenter)
         self._theme_button()
+        other = "en" if i18n.LANG == "it" else "it"
+        self.b_lang = QToolButton(text=i18n.LANGS[other], cursor=Qt.PointingHandCursor)
+        self.b_lang.setFixedWidth(76)
+        self.b_lang.setToolTip(tr("Usa PDFlex in un'altra lingua"))
+        self.b_lang.clicked.connect(lambda: self.switch_language(other))
+        rl.addWidget(self.b_lang, alignment=Qt.AlignHCenter)
+        self.b_update = QToolButton(cursor=Qt.PointingHandCursor, objectName="Primary")
+        self.b_update.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.b_update.setFixedWidth(76)
+        ui.set_glyph(self.b_update, "down", "accent")
+        self.b_update.hide()  # until GitHub has a newer version
+        self.update_found.connect(self._show_update)
+        self.version = QLabel(f"v{__version__}", objectName="Muted", alignment=Qt.AlignCenter)
+        self.version.setToolTip(tr("Versione di PDFlex"))
+        rl.addWidget(self.version)
+        rl.addWidget(self.b_update, alignment=Qt.AlignHCenter)
 
         root = QWidget(objectName="Root")
         h = QHBoxLayout(root)
@@ -103,14 +146,33 @@ class MainWindow(QMainWindow):
     def _theme_button(self):
         dark = ui.THEME == "dark"
         ui.set_glyph(self.b_theme, "sun" if dark else "moon", "muted")
-        self.b_theme.setText("Chiaro" if dark else "Scuro")
-        self.b_theme.setToolTip("Passa al tema chiaro" if dark else "Passa al tema scuro")
+        self.b_theme.setText(tr("Chiaro") if dark else tr("Scuro"))
+        self.b_theme.setToolTip(tr("Passa al tema chiaro") if dark else tr("Passa al tema scuro"))
 
     def toggle_theme(self):
         name = "light" if ui.THEME == "dark" else "dark"
         ui.apply_theme(QApplication.instance(), name)
         ui.save_json("tema.json", {"tema": name})  # chosen once: no longer follows Windows
         self._theme_button()
+
+    def check_updates(self):
+        """In the background: a slow or missing connection never holds up the start."""
+        def run():
+            found = newer_release()
+            if found:
+                self.update_found.emit(*found)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_update(self, version: str, page: str):
+        self.b_update.setText(tr("Scarica\nv{0}").format(version))
+        self.b_update.setToolTip(tr("È uscito PDFlex {0}: clicca per scaricarlo").format(version))
+        self.b_update.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(page)))
+        self.b_update.show()
+
+    def switch_language(self, lang: str):
+        i18n.save(lang)  # the labels are made at start: the next start uses it
+        ui.message(self, "PDFlex will be in English the next time you open it." if lang == "en"
+                   else "PDFlex sarà in italiano la prossima volta che lo apri.")
 
     def changeEvent(self, e):
         super().changeEvent(e)
@@ -143,8 +205,8 @@ def log_error(exc_type, exc, tb, log=LOG) -> str:
 def _show_error(exc_type, exc, tb):
     """Without a console an error would vanish and the button would just 'do nothing': say it."""
     log_error(exc_type, exc, tb)
-    ui.message(QApplication.activeWindow(), f"Qualcosa non ha funzionato: {exc}", "error",
-               note=f"I dettagli sono salvati in {LOG}")
+    ui.message(QApplication.activeWindow(), tr("Qualcosa non ha funzionato: {0}").format(exc), "error",
+               note=tr("I dettagli sono salvati in {0}").format(LOG))
 
 
 def setup(app: QApplication) -> None:
@@ -166,4 +228,5 @@ def main() -> None:
         pass
     w = MainWindow(next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), None))
     w.show()
+    w.check_updates()
     sys.exit(app.exec())

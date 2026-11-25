@@ -10,6 +10,7 @@ from pathlib import Path
 import pymupdf
 
 from pdflex import open_pdf, write_atomic
+from pdflex.i18n import tr
 
 FIELD_KINDS = ("text", "multiline", "checkbox", "radio", "dropdown", "date", "signature", "button")
 
@@ -77,14 +78,14 @@ def _xref_ref(doc, xref, key):
     return int(v.split()[0]) if t == "xref" else 0
 
 
-FORMATS = {"": "Testo libero", "number": "Numero", "amount": "Importo in euro", "percent": "Percentuale",
-           "date": "Data", "time": "Ora", "cap": "CAP", "cf": "Codice fiscale", "phone": "Telefono", "email": "Email"}
+FORMATS = {"": tr("Testo libero"), "number": tr("Numero"), "amount": tr("Importo in euro"), "percent": tr("Percentuale"),
+           "date": tr("Data"), "time": tr("Ora"), "cap": "CAP", "cf": tr("Codice fiscale"), "phone": tr("Telefono"), "email": tr("Email")}
 NUMERIC = ("number", "amount", "percent")
 DATE_PATTERNS = {"date": {"dd/mm/yyyy": "gg/mm/aaaa", "dd/mm/yy": "gg/mm/aa", "mm/yyyy": "mm/aaaa",
-                          "dd/mm/yyyy HH:MM": "gg/mm/aaaa hh:mm"},
-                 "time": {"HH:MM": "hh:mm", "HH:MM:ss": "hh:mm:ss"}}
-FONTS = {"": "Helvetica", "TiRo": "Times", "Cour": "Courier (larghezza fissa)"}
-ALIGN = {0: "Sinistra", 1: "Centro", 2: "Destra"}
+                          "dd/mm/yyyy HH:MM": tr("gg/mm/aaaa hh:mm")},
+                 "time": {"HH:MM": tr("hh:mm"), "HH:MM:ss": tr("hh:mm:ss")}}
+FONTS = {"": "Helvetica", "TiRo": "Times", "Cour": tr("Courier (larghezza fissa)")}
+ALIGN = {0: tr("Sinistra"), 1: tr("Centro"), 2: tr("Destra")}
 # the scripts are the standard Acrobat ones (AFNumber_Format...), the ones every PDF form library recognises
 _EMAIL_V = ('if (event.value && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(event.value)) '
             '{ app.alert("Indirizzo email non valido"); event.rc = false; }')
@@ -110,7 +111,7 @@ def fmt_parts(fmt: str, kind: str = "text") -> tuple[str, list[str]]:
 def fmt_label(fmt: str, kind: str = "text") -> str:
     base, args = fmt_parts(fmt, kind)
     if base in NUMERIC:
-        return f"{FORMATS[base]}, {args[0]} decimali"
+        return tr("{0}, {1} decimali").format(FORMATS[base], args[0])
     if base in DATE_PATTERNS:
         return DATE_PATTERNS[base].get(args[0], args[0])
     return FORMATS.get(base, "")
@@ -124,7 +125,7 @@ def _fmt_js(fmt: str, kind: str = "text") -> tuple:
         if base == "percent":
             return f"AFPercent_Format({dec}, {sep});", f"AFPercent_Keystroke({dec}, {sep});", None
         # € stays a JS escape: viewers misread a raw UTF-8 euro sign inside scripts
-        cur = '"\\u20AC "' if base == "amount" else '""'
+        cur = tr('"\\u20AC "') if base == "amount" else '""'
         return (f"AFNumber_Format({dec}, {sep}, 0, 0, {cur}, true);",
                 f'AFNumber_Keystroke({dec}, {sep}, 0, 0, "", true);', None)
     if base in DATE_PATTERNS:
@@ -236,7 +237,7 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
 
 def _check_names(fields):
     if any(not f.name.strip() for f in fields):
-        raise ValueError("Ogni campo deve avere un nome.")
+        raise ValueError(tr("Ogni campo deve avere un nome."))
     by_name = {}
     for f in fields:
         by_name.setdefault(f.name, []).append(f)
@@ -251,22 +252,22 @@ def _check_names(fields):
             if 0 in parents or len(parents) > 1:
                 dup.append(name)
     if dup:
-        raise ValueError("Nomi di campo duplicati: " + ", ".join(sorted(dup)))
+        raise ValueError(tr("Nomi di campo duplicati: ") + ", ".join(sorted(dup)))
     menus = sorted(f.name for f in fields if f.kind == "dropdown" and f.default and f.default not in f.options
                    and (not f.xref or f.default != f.orig.default))
     if menus:
-        raise ValueError("Il valore iniziale deve essere una delle opzioni del menu: " + ", ".join(menus))
+        raise ValueError(tr("Il valore iniziale deve essere una delle opzioni del menu: ") + ", ".join(menus))
     missing = sorted({n for f in fields for n in f.calc if n not in by_name})
     if missing:
-        raise ValueError("La somma usa campi che non esistono: " + ", ".join(missing))
+        raise ValueError(tr("La somma usa campi che non esistono: ") + ", ".join(missing))
     bad = []
     for name, group in by_name.items():
         values = [clean_value(f.value) for f in group if f.kind == "radio"]
         if len(values) != len(set(values)) or "Off" in values:
             bad.append(name)
     if bad:
-        raise ValueError("Nel gruppo di scelta " + ", ".join(sorted(bad)) +
-                         ' due opzioni hanno lo stesso valore, oppure una vale "Off" (riservato).')
+        raise ValueError(tr("Nel gruppo di scelta ") + ", ".join(sorted(bad)) +
+                         tr(' due opzioni hanno lo stesso valore, oppure una vale "Off" (riservato).'))
 
 
 def _new_widget(f: Field) -> pymupdf.Widget:
@@ -610,7 +611,7 @@ def _sample_text(f_name: str, multiline: bool) -> str:
     for keys, value in _SAMPLES:
         if any(k in n for k in keys):
             return value
-    return "Testo di esempio su\npiù righe" if multiline else "Testo di esempio"
+    return tr("Testo di esempio su\npiù righe") if multiline else tr("Testo di esempio")
 
 
 def sample_value(fmt: str, name: str, multiline: bool = False) -> str:

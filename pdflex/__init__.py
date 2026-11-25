@@ -3,16 +3,19 @@ from pathlib import Path
 
 import pymupdf
 
+__version__ = "1.3"  # also the GitHub release tag (v1.3): the update check compares the two
+from pdflex.i18n import tr
+
 
 def open_pdf(path: str | Path) -> pymupdf.Document:
     try:
         doc = pymupdf.open(path, filetype="pdf")
     except Exception as e:
-        raise ValueError(f"Impossibile aprire il PDF: {e}") from e
+        raise ValueError(tr("Impossibile aprire il PDF: {0}").format(e)) from e
     if doc.needs_pass:
-        raise ValueError("Il PDF è protetto da password.")
+        raise ValueError(tr("Il PDF è protetto da password."))
     if doc.page_count == 0:
-        raise ValueError("Impossibile aprire il PDF: nessuna pagina.")
+        raise ValueError(tr("Impossibile aprire il PDF: nessuna pagina."))
     return doc
 
 

@@ -7,6 +7,7 @@ import pymupdf
 from pdflex import write_atomic
 from pdflex.batch import fill_form
 from pdflex.fields import _field_js, _fmt_from_js, sample_value
+from pdflex.i18n import tr
 
 
 @dataclass
@@ -78,7 +79,7 @@ class FillDialog(QDialog):
         doc = pymupdf.open("pdf", data)
         self.inputs = form_inputs(doc)
         doc.close()
-        self.setWindowTitle(f"Compila {self.src.name}")
+        self.setWindowTitle(tr("Compila {0}").format(self.src.name))
         self.setWindowFlag(Qt.WindowMaximizeButtonHint)
         self.resize(1200, 900)
 
@@ -102,9 +103,9 @@ class FillDialog(QDialog):
         split.setSizes([360, 840])
         split.setChildrenCollapsible(False)
 
-        self.flatten = Toggle("Non modificabile (i campi diventano testo)")
-        b_cancel = button("Annulla")
-        b_save = button("Salva compilato", "save", "Primary")
+        self.flatten = Toggle(tr("Non modificabile (i campi diventano testo)"))
+        b_cancel = button(tr("Annulla"))
+        b_save = button(tr("Salva compilato"), "save", "Primary")
         b_cancel.clicked.connect(self.reject)
         b_save.clicked.connect(self.ask_save)
         bottom = QHBoxLayout()
@@ -121,7 +122,7 @@ class FillDialog(QDialog):
 
     def _input(self, inp: Input) -> QWidget:
         if inp.kind == "checkbox":
-            w = Toggle("Sì")
+            w = Toggle(tr("Sì"))
             w.setChecked(inp.value == "1")
             w.toggled.connect(self.timer.start)
             self.getters[inp.name] = lambda: "1" if w.isChecked() else ""
@@ -165,19 +166,19 @@ class FillDialog(QDialog):
 
     def ask_save(self):
         stem = self.src.stem.removesuffix("_modulo")
-        path, _ = QFileDialog.getSaveFileName(self, "Salva il modulo compilato",
-                                              str(self.src.with_name(stem + "_compilato.pdf")), "PDF (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva il modulo compilato"),
+                                              str(self.src.with_name(stem + "_compilato.pdf")), tr("PDF (*.pdf)"))
         if not path:
             return
         if Path(path).resolve() == self.src.resolve():
-            warn(self, "Scegli un altro nome: questo è il modulo aperto in PDFlex, che resta vuoto.")
+            warn(self, tr("Scegli un altro nome: questo è il modulo aperto in PDFlex, che resta vuoto."))
             return
         try:
             self.save(path)
         except (ValueError, OSError, RuntimeError) as e:
-            warn(self, f"Salvataggio non riuscito: {e}")
+            warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return
-        info(self, f"Salvato in {path}")
+        info(self, tr("Salvato in {0}").format(path))
         self.accept()
 
     def done(self, r):

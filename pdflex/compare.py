@@ -10,6 +10,7 @@ from pathlib import Path
 import pymupdf
 
 from pdflex import open_pdf
+from pdflex.i18n import tr
 
 RED = (1, 0, 0)
 GREEN = (0, 0.7, 0)
@@ -18,10 +19,10 @@ PURPLE = (0.48, 0.31, 0.82)  # same words, different formatting
 OPACITY = 0.3
 SIDE_COLORS = {"delete": (RED, None), "insert": (None, GREEN), "replace": (RED, GREEN), "move": (BLUE, BLUE),
                "format": (PURPLE, PURPLE), "image": (RED, GREEN)}  # (original, new version)
-KIND_TITLES = {"delete": "Rimosso", "insert": "Aggiunto", "replace": "Modificato", "move": "Spostato",
-               "format": "Formattazione", "image": "Immagine"}
+KIND_TITLES = {"delete": tr("Rimosso"), "insert": tr("Aggiunto"), "replace": tr("Modificato"), "move": tr("Spostato"),
+               "format": tr("Formattazione"), "image": tr("Immagine")}
 IMAGE = "[immagine]"  # the "text" of an image in lists and exports
-FONT = "C:/Windows/Fonts/arial.ttf"
+FONT = tr("C:/Windows/Fonts/arial.ttf")
 
 
 @dataclass
@@ -45,11 +46,13 @@ class Change:
     def pages_text(self) -> str:
         """ "Pagina 5 aggiunta", "Pagine 5, 6 rimosse": a whole page in or out, said as such."""
         n = [str(p + 1) for p in self.whole]
-        verb = "aggiunt" if self.kind == "insert" else "rimoss"
-        return f"Pagina {n[0]} {verb}a" if len(n) == 1 else f"Pagine {', '.join(n)} {verb}e"
+        added = self.kind == "insert"
+        if len(n) == 1:
+            return (tr("Pagina {0} aggiunta") if added else tr("Pagina {0} rimossa")).format(n[0])
+        return (tr("Pagine {0} aggiunte") if added else tr("Pagine {0} rimosse")).format(", ".join(n))
 
     def image_text(self) -> str:
-        return "Immagine cambiata" if self.old and self.new else "Immagine aggiunta" if self.new else "Immagine rimossa"
+        return tr("Immagine cambiata") if self.old and self.new else tr("Immagine aggiunta") if self.new else tr("Immagine rimossa")
 
     def label(self) -> str:
         def short(words):
@@ -58,27 +61,27 @@ class Change:
         if self.kind == "image":
             return f"{self.image_text()} (p. {(self.new or self.old)[0].page + 1})"
         if self.whole:
-            return f"{self.pages_text()} per intero: {short(self.old or self.new)}"
+            return tr("{0} per intero: {1}").format(self.pages_text(), short(self.old or self.new))
         if self.kind == "delete":
-            return f"Rimosso (p. {self.old[0].page + 1}): {short(self.old)}"
+            return tr("Rimosso (p. {0}): {1}").format(self.old[0].page + 1, short(self.old))
         if self.kind == "insert":
-            return f"Aggiunto (p. {self.new[0].page + 1}): {short(self.new)}"
+            return tr("Aggiunto (p. {0}): {1}").format(self.new[0].page + 1, short(self.new))
         if self.kind == "move":
-            return f"Spostato (p. {self.old[0].page + 1} → p. {self.new[0].page + 1}): {short(self.old)}"
+            return tr("Spostato (p. {0} → p. {1}): {2}").format(self.old[0].page + 1, self.new[0].page + 1, short(self.old))
         if self.kind == "format":
-            return f"Formattazione (p. {self.new[0].page + 1}): {short(self.new)} — {_style_change(self)}"
-        return f"Modificato (p. {self.old[0].page + 1}): {short(self.old)} → {short(self.new)}"
+            return tr("Formattazione (p. {0}): {1} — {2}").format(self.new[0].page + 1, short(self.new), _style_change(self))
+        return tr("Modificato (p. {0}): {1} → {2}").format(self.old[0].page + 1, short(self.old), short(self.new))
 
 
 def _style_change(c: Change) -> str:
     a, b = c.old[0].style, c.new[0].style
     parts = []
     if a[0] != b[0]:
-        parts.append("grassetto" if b[0] else "tolto il grassetto")
+        parts.append(tr("grassetto") if b[0] else tr("tolto il grassetto"))
     if a[1] != b[1]:
-        parts.append("corsivo" if b[1] else "tolto il corsivo")
+        parts.append(tr("corsivo") if b[1] else tr("tolto il corsivo"))
     if a[2] != b[2]:
-        parts.append(f"dimensione {a[2]:g} → {b[2]:g}")
+        parts.append(tr("dimensione {0:g} → {1:g}").format(a[2], b[2]))
     return ", ".join(parts)
 
 
@@ -318,13 +321,12 @@ def change_html(c: Change, color: str, red: str = TEXT_RED, green: str = TEXT_GR
     if c.kind == "image":
         w = (c.new or c.old)[0]
         size = f"{w.rect[2] - w.rect[0]:.0f} × {w.rect[3] - w.rect[1]:.0f} pt"
-        return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{c.image_text()}</span>'
-                f'<span style="{muted}"> &nbsp;pagina {w.page + 1} · {size}</span>')
+        return (tr("<span style=\"color:{0}; font-weight:700;\">●&nbsp;{1}</span><span style=\"{2}\"> &nbsp;pagina {3} · {4}</span>").format(color, c.image_text(), muted, w.page + 1, size))
 
     def words(ws, style):
         t = " ".join(w.text for w in ws)
         t = t if len(t) <= 160 else t[:159] + "…"
-        return f'<span style="{style}">{html.escape(t)}</span>'
+        return tr("<span style=\"{0}\">{1}</span>").format(style, html.escape(t))
     old = words(c.old, f"color:{red}; text-decoration:line-through;")
     new = words(c.new, f"color:{green}; font-weight:600;")
     page = (c.old or c.new)[0].page + 1
@@ -337,24 +339,22 @@ def change_html(c: Change, color: str, red: str = TEXT_RED, green: str = TEXT_GR
     elif c.kind == "move":
         page = c.new[0].page + 1
         body = (words(c.new, f"color:{color}; font-weight:600;") +
-                f' <span style="{muted}">da pagina {c.old[0].page + 1}</span>')
+                tr(" <span style=\"{0}\">da pagina {1}</span>").format(muted, c.old[0].page + 1))
     else:
-        body = words(c.new, "font-weight:600;") + f' <span style="{muted}">→ {html.escape(_style_change(c))}</span>'
+        body = words(c.new, "font-weight:600;") + tr(" <span style=\"{0}\">→ {1}</span>").format(muted, html.escape(_style_change(c)))
     if c.whole:  # a page in or out as a whole: say it first, the words are just a reminder of which
-        return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{c.pages_text()} per intero</span><br>'
-                f'<span style="{muted}">{html.escape(" ".join(w.text for w in (c.new or c.old))[:90])}…</span>')
-    return (f'<span style="color:{color}; font-weight:700;">●&nbsp;{KIND_TITLES[c.kind]}</span>'
-            f'<span style="{muted}"> &nbsp;pagina {page}</span><br>{body}')
+        return (tr("<span style=\"color:{0}; font-weight:700;\">●&nbsp;{1} per intero</span><br><span style=\"{2}\">{3}…</span>").format(color, c.pages_text(), muted, html.escape(" ".join(w.text for w in (c.new or c.old))[:90])))
+    return (tr("<span style=\"color:{0}; font-weight:700;\">●&nbsp;{1}</span><span style=\"{2}\"> &nbsp;pagina {3}</span><br>{4}").format(color, KIND_TITLES[c.kind], muted, page, body))
 
 
 def _summary_pages(out, old_path, new_path, changes):
     font = {"fontname": "arial", "fontfile": FONT} if os.path.exists(FONT) else {"fontname": "helv"}
     lines = [
-        ("Confronto PDF", 16),
-        (f"Originale: {Path(old_path).name}", 10),
-        (f"Nuova versione: {Path(new_path).name}", 10),
-        (f"Data: {datetime.now():%d/%m/%Y %H:%M}", 10),
-        (f"Modifiche: {len(changes)}", 10),
+        (tr("Confronto PDF"), 16),
+        (tr("Originale: {0}").format(Path(old_path).name), 10),
+        (tr("Nuova versione: {0}").format(Path(new_path).name), 10),
+        (tr("Data: {0:%d/%m/%Y %H:%M}").format(datetime.now()), 10),
+        (tr("Modifiche: {0}").format(len(changes)), 10),
         ("", 10),
     ]
     for c in changes:
@@ -404,8 +404,8 @@ def export_changes_xlsx(changes: list[Change], path, old_name: str, new_name: st
     from openpyxl.styles import Font, PatternFill
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Modifiche"
-    ws.append(["N.", "Tipo", "Pagina originale", "Pagina nuova", f"Testo in {old_name}", f"Testo in {new_name}"])
+    ws.title = tr("Modifiche")
+    ws.append(["N.", tr("Tipo"), tr("Pagina originale"), tr("Pagina nuova"), tr("Testo in {0}").format(old_name), tr("Testo in {0}").format(new_name)])
     names = KIND_TITLES
     fills = {"delete": "FBE3E3", "insert": "E2F4E8", "replace": "FFF3D6", "move": "E1EAFB", "format": "ECE5F8",
              "image": "FBE1EE"}
@@ -438,9 +438,9 @@ from pdflex.ui import DocView, button, info, warn  # noqa: E402
 KIND_NAMES = KIND_TITLES
 KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1",
                "image": "#C2357A"}
-KIND_PLURALS = {"insert": "Aggiunte", "delete": "Rimozioni", "replace": "Sostituzioni", "move": "Spostamenti",
-                "format": "Formattazione", "image": "Immagini"}
-HINT = "Trascina qui il PDF o clicca per sceglierlo"
+KIND_PLURALS = {"insert": tr("Aggiunte"), "delete": tr("Rimozioni"), "replace": tr("Sostituzioni"), "move": tr("Spostamenti"),
+                "format": tr("Formattazione"), "image": tr("Immagini")}
+HINT = tr("Trascina qui il PDF o clicca per sceglierlo")
 
 
 MEMORY, KEPT = "confronti.json", 15  # the last comparisons, to open again
@@ -472,8 +472,8 @@ def _dot(color: str) -> QIcon:
     p.drawEllipse(1, 1, 8, 8)
     p.end()
     return QIcon(pix)
-NO_OCR = ("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
-          "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex.")
+NO_OCR = (tr("{} non contiene testo: è una scansione. Per leggerla serve l'OCR: installa Tesseract "
+          "(github.com/UB-Mannheim/tesseract/wiki) spuntando la lingua italiana, poi riapri PDFlex."))
 
 
 class ChangeBar(ui.MarkBar):
@@ -535,27 +535,27 @@ class CompareTab(QWidget):
         bar = ui.Bar()
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(14, 10, 14, 10)
-        self.b_new = button("Nuovo confronto", "refresh")
+        self.b_new = button(tr("Nuovo confronto"), "refresh")
         self.b_new.clicked.connect(self.reset)
-        self.summary = QLabel("Scegli i due PDF da confrontare", objectName="Muted")
+        self.summary = QLabel(tr("Scegli i due PDF da confrontare"), objectName="Muted")
         self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # long counts must not widen the window
-        self.sync = ui.Toggle("Scorri insieme")
+        self.sync = ui.Toggle(tr("Scorri insieme"))
         self.sync.setChecked(True)
-        self.sync.setToolTip("Scorrendo un documento, l'altro segue alla stessa pagina")
-        self.b_zout = button("", "zoom-out", "Ghost", "Rimpicciolisci (Ctrl+rotellina)")
-        self.b_zin = button("", "zoom-in", "Ghost", "Ingrandisci (Ctrl+rotellina)")
-        self.zoom_label = button("100%", None, "Ghost", "Adatta alla larghezza")
-        self.b_page = button("", "page", "Ghost", "Pagina intera: una pagina alla volta sullo schermo")
-        self.b_full = button("", "expand", "Ghost", "Schermo intero (F11, Esc per uscire)")
+        self.sync.setToolTip(tr("Scorrendo un documento, l'altro segue alla stessa pagina"))
+        self.b_zout = button("", "zoom-out", "Ghost", tr("Rimpicciolisci (Ctrl+rotellina)"))
+        self.b_zin = button("", "zoom-in", "Ghost", tr("Ingrandisci (Ctrl+rotellina)"))
+        self.zoom_label = button("100%", None, "Ghost", tr("Adatta alla larghezza"))
+        self.b_page = button("", "page", "Ghost", tr("Pagina intera: una pagina alla volta sullo schermo"))
+        self.b_full = button("", "expand", "Ghost", tr("Schermo intero (F11, Esc per uscire)"))
         self.b_zout.clicked.connect(lambda: self.zoom_by(1 / 1.25))
         self.b_zin.clicked.connect(lambda: self.zoom_by(1.25))
         self.zoom_label.clicked.connect(self.zoom_fit)
         self.b_page.clicked.connect(self.zoom_page)
         self.b_full.clicked.connect(lambda: ui.toggle_full_screen(self))
-        self.b_prev = button("Precedente", "prev", tip="Modifica precedente")
-        self.b_next = button("Successiva", "next", tip="Modifica successiva")
-        self.b_export = button("Esporta PDF", "export", "Primary")
-        self.b_xlsx = button("Esporta Excel", "table", tip="Elenco delle modifiche in un foglio Excel")
+        self.b_prev = button(tr("Precedente"), "prev", tip=tr("Modifica precedente"))
+        self.b_next = button(tr("Successiva"), "next", tip=tr("Modifica successiva"))
+        self.b_export = button(tr("Esporta PDF"), "export", "Primary")
+        self.b_xlsx = button(tr("Esporta Excel"), "table", tip=tr("Elenco delle modifiche in un foglio Excel"))
         self.b_prev.clicked.connect(lambda: self.step(-1))
         self.b_next.clicked.connect(lambda: self.step(1))
         self.b_export.clicked.connect(self.ask_export)
@@ -572,16 +572,16 @@ class CompareTab(QWidget):
             bl.addWidget(w)
 
         # empty state: two drop zones
-        self.drop_old = ui.DropZone("Originale", glyph="form")
-        self.drop_new = ui.DropZone("Nuova versione", glyph="form")
+        self.drop_old = ui.DropZone(tr("Originale"), glyph="form")
+        self.drop_new = ui.DropZone(tr("Nuova versione"), glyph="form")
         self.drop_old.picked.connect(lambda p: self._pick("old", p))
         self.drop_new.picked.connect(lambda p: self._pick("new", p))
         empty = QWidget()
         empty.setObjectName("Desk")
         el = QVBoxLayout(empty)
         el.setContentsMargins(60, 40, 60, 40)
-        head = QLabel("Confronta due versioni di un documento", objectName="H1", alignment=Qt.AlignCenter)
-        sub = QLabel("Le parole tolte appaiono in rosso sull'originale, quelle aggiunte in verde sulla nuova versione.",
+        head = QLabel(tr("Confronta due versioni di un documento"), objectName="H1", alignment=Qt.AlignCenter)
+        sub = QLabel(tr("Le parole tolte appaiono in rosso sull'originale, quelle aggiunte in verde sulla nuova versione."),
                      objectName="Muted", alignment=Qt.AlignCenter)
         sub.setWordWrap(True)
         zones = QHBoxLayout()
@@ -596,7 +596,7 @@ class CompareTab(QWidget):
         el.addSpacing(20)
         self.start_slot = QVBoxLayout()  # the comparing options sit here before the comparison, then in the panel
         el.addLayout(self.start_slot)
-        self.recent_title = QLabel("Confronti recenti", objectName="H2")
+        self.recent_title = QLabel(tr("Confronti recenti"), objectName="H2")
         self.recent = QListWidget(objectName="Changes")  # the last comparisons: a click opens one again
         self.recent.setFixedSize(640, 220)
         self.recent.itemClicked.connect(lambda it: self.reopen(it.data(Qt.UserRole)))
@@ -652,9 +652,9 @@ class CompareTab(QWidget):
             hl.setSpacing(0)
             hl.addWidget(label, 1)
             if isinstance(view, DocView):  # its own zoom, like the top bar's but for this document only
-                out = button("", "zoom-out", "Ghost", "Rimpicciolisci solo questo documento (Ctrl+rotellina sopra)")
-                pct = button("100%", None, "Ghost", "Adatta alla larghezza solo questo documento")
-                inn = button("", "zoom-in", "Ghost", "Ingrandisci solo questo documento (Ctrl+rotellina sopra)")
+                out = button("", "zoom-out", "Ghost", tr("Rimpicciolisci solo questo documento (Ctrl+rotellina sopra)"))
+                pct = button("100%", None, "Ghost", tr("Adatta alla larghezza solo questo documento"))
+                inn = button("", "zoom-in", "Ghost", tr("Ingrandisci solo questo documento (Ctrl+rotellina sopra)"))
                 out.clicked.connect(lambda: self._zoom({view: view.scale / 1.25}))
                 inn.clicked.connect(lambda: self._zoom({view: view.scale * 1.25}))
                 pct.clicked.connect(lambda: self._zoom({view: 1.0}))
@@ -673,7 +673,7 @@ class CompareTab(QWidget):
         side = QFrame(objectName="Panel")
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 12, 0, 0)
-        title = QLabel("Modifiche", objectName="H2")
+        title = QLabel(tr("Modifiche"), objectName="H2")
         title.setContentsMargins(14, 0, 14, 4)
         sl.addWidget(title)
         self.side_slot = QVBoxLayout()
@@ -684,12 +684,12 @@ class CompareTab(QWidget):
         ol.setContentsMargins(0, 0, 0, 0)
         opts = QVBoxLayout()
         opts.setContentsMargins(14, 0, 14, 8)
-        self.search = QLineEdit(placeholderText="Cerca nei due documenti (Ctrl+F)")
+        self.search = QLineEdit(placeholderText=tr("Cerca nei due documenti (Ctrl+F)"))
         self.search.setClearButtonEnabled(True)
-        self.search.setToolTip("Invio: risultato successivo, Maiusc+Invio: precedente")
+        self.search.setToolTip(tr("Invio: risultato successivo, Maiusc+Invio: precedente"))
         self.search.returnPressed.connect(lambda: self.find_text(1))
         self.search.textChanged.connect(lambda: self.found.setText(""))
-        QShortcut(QKeySequence("Shift+Return"), self.search, lambda: self.find_text(-1))
+        QShortcut(QKeySequence(tr("Shift+Return")), self.search, lambda: self.find_text(-1))
         QShortcut(QKeySequence.Find, self, lambda: (self.search.setFocus(), self.search.selectAll()))
         self.found = QLabel(objectName="Muted")
         self.hits, self.hit, self._hits_for = [], -1, None
@@ -698,23 +698,23 @@ class CompareTab(QWidget):
         chips.setSpacing(6)
         for n, (kind, label) in enumerate(KIND_PLURALS.items()):
             b = QPushButton(label, checkable=True, checked=True, icon=_dot(KIND_COLORS[kind]))
-            b.setToolTip("Mostra o nascondi questo tipo di modifica nell'elenco e sulla barra")
+            b.setToolTip(tr("Mostra o nascondi questo tipo di modifica nell'elenco e sulla barra"))
             b.toggled.connect(self._apply_filter)
             chips.addWidget(b, n // 2, n % 2)
             self.kind_buttons[kind] = b
-        self.ignore_case = ui.Toggle("Ignora maiuscole e minuscole")
-        self.ignore_punct = ui.Toggle("Ignora la punteggiatura")
+        self.ignore_case = ui.Toggle(tr("Ignora maiuscole e minuscole"))
+        self.ignore_punct = ui.Toggle(tr("Ignora la punteggiatura"))
         self.ignore_case.setChecked(True)
         self.ignore_punct.setChecked(True)
-        self.ignore_images = ui.Toggle("Ignora le immagini")
-        self.formatting = ui.Toggle("Segnala grassetto, corsivo e dimensione")
-        self.formatting.setToolTip("Rende il confronto più lento: va letto lo stile di ogni parola")
-        self.moves = ui.Toggle("Segnala il testo spostato")
+        self.ignore_images = ui.Toggle(tr("Ignora le immagini"))
+        self.formatting = ui.Toggle(tr("Segnala grassetto, corsivo e dimensione"))
+        self.formatting.setToolTip(tr("Rende il confronto più lento: va letto lo stile di ogni parola"))
+        self.moves = ui.Toggle(tr("Segnala il testo spostato"))
         self.moves.setChecked(True)
-        self.moves.setToolTip("Spento: un pezzo spostato appare come rimosso in un punto e aggiunto in un altro")
-        self.include_list = ui.Toggle("Elenco modifiche nel PDF esportato")
+        self.moves.setToolTip(tr("Spento: un pezzo spostato appare come rimosso in un punto e aggiunto in un altro"))
+        self.include_list = ui.Toggle(tr("Elenco modifiche nel PDF esportato"))
         self.include_list.setChecked(True)
-        self.include_list.setToolTip("Spento: il PDF esportato contiene solo le pagine affiancate")
+        self.include_list.setToolTip(tr("Spento: il PDF esportato contiene solo le pagine affiancate"))
         for c in (self.ignore_case, self.ignore_punct, self.ignore_images, self.formatting, self.moves):
             c.toggled.connect(self._options_changed)
             ol.addWidget(c)
@@ -789,9 +789,9 @@ class CompareTab(QWidget):
         else:
             self.new_path = path
             self.drop_new.set_file(path)
-        missing = "la nuova versione" if not self.new_path else "l'originale" if not self.old_path else ""
+        missing = tr("la nuova versione") if not self.new_path else "l'originale" if not self.old_path else ""
         if missing:
-            self.summary.setText(f"{Path(path).name} caricato. Ora scegli {missing}.")
+            self.summary.setText(tr("{0} caricato. Ora scegli {1}.").format(Path(path).name, missing))
         if self.old_path and self.new_path:
             self.load(self.old_path, self.new_path)
 
@@ -801,7 +801,7 @@ class CompareTab(QWidget):
         self.list.clear()
         self.drop_old.set_file(None)
         self.drop_new.set_file(None)
-        self.summary.setText("Scegli i due PDF da confrontare")
+        self.summary.setText(tr("Scegli i due PDF da confrontare"))
         self.start_slot.addWidget(self.opts, 0, Qt.AlignHCenter)
         self._fill_recent()
         self.stack.setCurrentIndex(0)
@@ -813,7 +813,7 @@ class CompareTab(QWidget):
         for c in items:
             item = QListWidgetItem(ui.icon("clock", ui.color("muted")),
                                    f"{Path(c['old']).name}   →   {Path(c['new']).name}      {c['date']}")
-            item.setToolTip(f"Originale: {c['old']}\nNuova versione: {c['new']}")
+            item.setToolTip(tr("Originale: {0}\nNuova versione: {1}").format(c['old'], c['new']))
             item.setData(Qt.UserRole, c)
             self.recent.addItem(item)
         self.recent_title.setVisible(bool(items))
@@ -823,7 +823,7 @@ class CompareTab(QWidget):
         """A remembered comparison again, with the options it had."""
         missing = [p for p in (c["old"], c["new"]) if not Path(p).exists()]
         if missing:
-            warn(self, "Non trovo più " + " e ".join(missing))
+            warn(self, tr("Non trovo più ") + tr(" e ").join(missing))
             forget_comparison(c)
             self._fill_recent()
             return
@@ -856,14 +856,14 @@ class CompareTab(QWidget):
         styles, pics = self.formatting.isChecked(), not self.ignore_images.isChecked()  # read only what is asked
         try:
             n_old, n = old.page_count, old.page_count + new.page_count
-            with ui.progress(self, "Leggo il testo delle pagine...", 2 * n if pics else n, cancel=True) as step:
+            with ui.progress(self, tr("Leggo il testo delle pagine..."), 2 * n if pics else n, cancel=True) as step:
                 old_words = extract_words(old, ocr=True, on_page=step, styles=styles)
                 new_words = extract_words(new, ocr=True, on_page=lambda i: step(n_old + i), styles=styles)
                 images = diff_images(extract_images(old, lambda i: step(n + i)),
                                      extract_images(new, lambda i: step(n + n_old + i))) if pics else []
         except ui.Cancelled:
             self.reset()
-            self.summary.setText("Confronto annullato")
+            self.summary.setText(tr("Confronto annullato"))
             return
         empty = [Path(p).name for p, w in ((old_path, old_words), (new_path, new_words)) if not w]
         if empty:
@@ -877,7 +877,7 @@ class CompareTab(QWidget):
             for w in words:
                 self.by_page[side].setdefault(w.page, []).append(w)
         self.side_slot.addWidget(self.opts)
-        self._names = (("Originale", Path(old_path).name), ("Nuova versione", Path(new_path).name))
+        self._names = ((tr("Originale"), Path(old_path).name), (tr("Nuova versione"), Path(new_path).name))
         widest = max(p.rect.width for d in (old, new) for p in d)  # one scale for both: the same size on
         self.old_view.ref_width = self.new_view.ref_width = widest  # paper is the same size on screen
         self.stack.setCurrentIndex(1)
@@ -903,7 +903,7 @@ class CompareTab(QWidget):
             self.new_view.show_doc(self.docs[1])
             options = dict(ignore_case=self.ignore_case.isChecked(), ignore_punct=self.ignore_punct.isChecked(),
                            formatting=self.formatting.isChecked(), moves=self.moves.isChecked())
-            text = ui.run_busy(self, "Confronto i testi...", lambda: diff_words(*self.words, **options))
+            text = ui.run_busy(self, tr("Confronto i testi..."), lambda: diff_words(*self.words, **options))
             self.changes = merge_changes(text, [] if self.ignore_images.isChecked() else self.images)
             self.pairs = counterparts(*self.words, text, options["ignore_punct"])
         finally:
@@ -927,13 +927,14 @@ class CompareTab(QWidget):
         self.found.setText("")
         self._page_labels()
         if self.changes:
-            parts = [f"{n} {word}" for n, word in ((counts["insert"], "aggiunte"), (counts["delete"], "rimozioni"),
-                                                    (counts["replace"], "sostituzioni"), (counts["move"], "spostamenti"),
-                                                    (counts["format"], "di formattazione"),
-                                                    (counts["image"], "immagini")) if n]
-            self.summary.setText(f"{len(self.changes)} modifiche: " + ", ".join(parts))
+            parts = [f"{n} {word}" for n, word in ((counts["insert"], tr("aggiunte")), (counts["delete"], tr("rimozioni")),
+                                                    (counts["replace"], tr("sostituzioni")),
+                                                    (counts["move"], tr("spostamenti")),
+                                                    (counts["format"], tr("di formattazione")),
+                                                    (counts["image"], tr("immagini"))) if n]
+            self.summary.setText(tr("{0} modifiche: ").format(len(self.changes)) + ", ".join(parts))
         else:
-            self.summary.setText("Nessuna differenza nel testo")
+            self.summary.setText(tr("Nessuna differenza nel testo"))
         remember_comparison(self.old_path, self.new_path, {name: getattr(self, name).isChecked() for name in OPTIONS})
         self._apply_filter()
 
@@ -1017,11 +1018,11 @@ class CompareTab(QWidget):
         if self._hits_for != text:
             self.hits, self.hit, self._hits_for = self._search_hits(text), (-1 if d > 0 else 0), text
         if not self.hits:
-            self.found.setText("Nessun risultato")
+            self.found.setText(tr("Nessun risultato"))
             return
         self.hit = (self.hit + d) % len(self.hits)
         side, ws = self.hits[self.hit]
-        self.found.setText(f"{self.hit + 1} di {len(self.hits)}")
+        self.found.setText(tr("{0} di {1}").format(self.hit + 1, len(self.hits)))
         here = (self.old_view, self.new_view)[side]
         x, y, wd, h = here.word_rect(ws[0])
         here.centerOn(x + wd / 2, y + h / 2)  # the other side follows, then lines up exactly
@@ -1032,7 +1033,7 @@ class CompareTab(QWidget):
         """Column headers: which page is at the top of each side, and the file."""
         for label, view, (title, name) in zip((self.old_label, self.new_label), (self.old_view, self.new_view),
                                               self._names):
-            pages = f"   ·   pagina {view.position()[0] + 1} di {len(view.offsets)}" if view.offsets else ""
+            pages = tr("   ·   pagina {0} di {1}").format(view.position()[0] + 1, len(view.offsets)) if view.offsets else ""
             label.setText(f"{title}{pages}   ·   {name}")
 
     def _hidden(self, i) -> bool:
@@ -1172,25 +1173,25 @@ class CompareTab(QWidget):
 
     def ask_export(self):
         default = str(Path(self.new_path).with_name(Path(self.new_path).stem + "_confronto.pdf"))
-        path, _ = QFileDialog.getSaveFileName(self, "Esporta confronto", default, "PDF (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Esporta confronto"), default, tr("PDF (*.pdf)"))
         if path:
             try:
                 self.export(path)
             except (ValueError, OSError, RuntimeError) as e:
-                warn(self, f"Esportazione non riuscita: {e}")
+                warn(self, tr("Esportazione non riuscita: {0}").format(e))
                 return
-            info(self, f"Confronto esportato in {path}")
+            info(self, tr("Confronto esportato in {0}").format(path))
 
     def ask_export_xlsx(self):
-        default = str(Path(self.new_path).with_name(Path(self.new_path).stem + "_modifiche.xlsx"))
-        path, _ = QFileDialog.getSaveFileName(self, "Esporta elenco modifiche", default, "Excel (*.xlsx)")
+        default = str(Path(self.new_path).with_name(Path(self.new_path).stem + tr("_modifiche.xlsx")))
+        path, _ = QFileDialog.getSaveFileName(self, tr("Esporta elenco modifiche"), default, tr("Excel (*.xlsx)"))
         if path:
             try:
                 self.export_xlsx(path)
             except OSError as e:
-                warn(self, f"Esportazione non riuscita (il file è aperto in Excel?): {e}")
+                warn(self, tr("Esportazione non riuscita (il file è aperto in Excel?): {0}").format(e))
                 return
-            info(self, f"Elenco esportato in {path}")
+            info(self, tr("Elenco esportato in {0}").format(path))
 
     def export_xlsx(self, path: str) -> None:
         export_changes_xlsx(self.changes, path, Path(self.old_path).name, Path(self.new_path).name)

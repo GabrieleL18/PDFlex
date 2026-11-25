@@ -2,6 +2,7 @@ import os
 import itertools
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("PDFLEX_LANG", "it")  # the tests check the Italian texts, whatever this PC uses
 
 import pymupdf
 import pytest

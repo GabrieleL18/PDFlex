@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from pdflex.ui import Toggle, button, load_bytes, save_bytes, warn
+from pdflex.i18n import tr
 
 
 class SignatureCanvas(QWidget):
@@ -46,7 +47,7 @@ class SignatureCanvas(QWidget):
             p.drawPath(path)
         if not self.paths and not self.picture:
             p.setPen(QColor("#A9B0BB"))
-            p.drawText(self.rect(), Qt.AlignCenter, "Firma qui col mouse")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("Firma qui col mouse"))
 
     def png(self) -> bytes | None:
         """The signature cropped to its ink, transparent background, drawn at 3x for sharp printing."""
@@ -81,12 +82,12 @@ def _png(img) -> bytes:
 class SignatureDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Firma a mano")
+        self.setWindowTitle(tr("Firma a mano"))
         self.png: bytes | None = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 18)
         lay.setSpacing(12)
-        lay.addWidget(QLabel("Firma col mouse (o con la penna) nel riquadro, oppure carica un'immagine della firma.",
+        lay.addWidget(QLabel(tr("Firma col mouse (o con la penna) nel riquadro, oppure carica un'immagine della firma."),
                              objectName="Muted"))
         self.canvas = SignatureCanvas()
         frame = QFrame()
@@ -96,15 +97,15 @@ class SignatureDialog(QDialog):
         fl.addWidget(self.canvas)
         lay.addWidget(frame, 1)
         saved = load_bytes("firma.png")
-        self.b_saved = button("Usa la firma salvata", "signature")
+        self.b_saved = button(tr("Usa la firma salvata"), "signature")
         self.b_saved.setVisible(saved is not None)
         self.b_saved.clicked.connect(lambda: self._load(saved))
-        self.c_keep = Toggle("Ricorda questa firma per la prossima volta")
+        self.c_keep = Toggle(tr("Ricorda questa firma per la prossima volta"))
         self.c_keep.setChecked(True)
-        b_clear = button("Cancella", "trash", "Ghost")
-        b_file = button("Carica immagine...", "open")
-        b_ok = button("Inserisci firma", "signature", "Primary")
-        b_cancel = button("Annulla")
+        b_clear = button(tr("Cancella"), "trash", "Ghost")
+        b_file = button(tr("Carica immagine..."), "open")
+        b_ok = button(tr("Inserisci firma"), "signature", "Primary")
+        b_cancel = button(tr("Annulla"))
         b_clear.clicked.connect(self.canvas.clear)
         b_file.clicked.connect(self._pick)
         b_ok.clicked.connect(self._accept)
@@ -128,14 +129,14 @@ class SignatureDialog(QDialog):
             self.canvas.update()
 
     def _pick(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Immagine della firma", "", "Immagini (*.png *.jpg *.jpeg)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Immagine della firma"), "", tr("Immagini (*.png *.jpg *.jpeg)"))
         if path:
             self._load(Path(path).read_bytes())
 
     def _accept(self):
         self.png = self.canvas.png()
         if not self.png:
-            warn(self, "Il riquadro è vuoto: firma col mouse o carica un'immagine.")
+            warn(self, tr("Il riquadro è vuoto: firma col mouse o carica un'immagine."))
             return
         if self.c_keep.isChecked():
             save_bytes("firma.png", self.png)

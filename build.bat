@@ -6,7 +6,7 @@ set QT_QPA_PLATFORM=offscreen
 .venv\Scripts\python -c "from PySide6.QtGui import QGuiApplication; a=QGuiApplication([]); from pdflex.ui import write_ico; write_ico('pdflex.ico')" || exit /b 1
 set QT_QPA_PLATFORM=
 .venv\Scripts\pyinstaller --noconfirm --onedir --windowed --name PDFlex --icon pdflex.ico --paths . ^
-  --exclude-module numpy --exclude-module pymupdf.layout --exclude-module tkinter --exclude-module ssl ^
+  --exclude-module numpy --exclude-module pymupdf.layout --exclude-module tkinter ^
   --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtNetwork ^
   --exclude-module PySide6.QtPdf pdflex\__main__.py || exit /b 1
 rem pezzi non usati che PyInstaller copia comunque (modelli AI di PyMuPDF, OpenGL software, traduzioni di Qt)
