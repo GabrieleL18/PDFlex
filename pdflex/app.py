@@ -1,13 +1,11 @@
 import base64
 import ctypes
 import faulthandler
-import json
 import os
-import re
+import shutil
 import sys
 import threading
 import traceback
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from pdflex import __version__, ui
+from pdflex import __version__, ui, update
 from pdflex.batch import BatchTab
 from pdflex.compare import CompareTab
 from pdflex.designer import DesignTab
@@ -28,27 +26,10 @@ from pdflex import i18n
 from pdflex.i18n import tr
 
 
-RELEASES = "https://api.github.com/repos/GabrieleL18/PDFlex/releases/latest"
-
-
-def version_parts(v: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in re.findall(r"\d+", v))
-
-
-def newer_release(current: str = __version__) -> tuple[str, str] | None:
-    """(version, page) of the latest GitHub release when it is newer than this one; None if not, or offline."""
-    try:
-        req = urllib.request.Request(RELEASES, headers={"User-Agent": "PDFlex", "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.load(r)
-        tag = data["tag_name"].lstrip("vV")
-        return (tag, data["html_url"]) if version_parts(tag) > version_parts(current) else None
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
 class MainWindow(QMainWindow):
-    update_found = Signal(str, str)  # version, release page: from the checking thread
+    update_found = Signal(str, str, str)  # version, release page, zip: from the checking thread
+    update_progress = Signal(int)
+    update_ready = Signal(str, str)  # unpacked folder, or "" and what went wrong
 
     def __init__(self, path: str | None = None):
         super().__init__()
@@ -116,6 +97,9 @@ class MainWindow(QMainWindow):
         ui.set_glyph(self.b_update, "down", "accent")
         self.b_update.hide()  # until GitHub has a newer version
         self.update_found.connect(self._show_update)
+        self.update_progress.connect(lambda p: self.b_update.setText(tr("Scarico\n{0}%").format(p)))
+        self.update_ready.connect(self._install_update)
+        self.b_update.clicked.connect(self.get_update)
         self.version = QLabel(f"v{__version__}", objectName="Muted", alignment=Qt.AlignCenter)
         self.version.setToolTip(tr("Versione di PDFlex"))
         rl.addWidget(self.version)
@@ -158,16 +142,54 @@ class MainWindow(QMainWindow):
     def check_updates(self):
         """In the background: a slow or missing connection never holds up the start."""
         def run():
-            found = newer_release()
+            found = update.newer_release()
             if found:
                 self.update_found.emit(*found)
         threading.Thread(target=run, daemon=True).start()
 
-    def _show_update(self, version: str, page: str):
-        self.b_update.setText(tr("Scarica\nv{0}").format(version))
-        self.b_update.setToolTip(tr("È uscito PDFlex {0}: clicca per scaricarlo").format(version))
-        self.b_update.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(page)))
+    def _show_update(self, version: str, page: str, zip_url: str = ""):
+        self.update_info = version, page, zip_url
+        self.b_update.setText(tr("Aggiorna\nv{0}").format(version))
+        self.b_update.setToolTip(tr("È uscito PDFlex {0}: clicca per installarlo").format(version))
         self.b_update.show()
+
+    def get_update(self):
+        """Download the new version, then close, install and reopen by itself."""
+        version, page, zip_url = self.update_info
+        if not zip_url or not getattr(sys, "frozen", False):  # no zip in the release, or run from the sources
+            QDesktopServices.openUrl(QUrl(page))
+            return
+        if ui.message(self, tr("Installare PDFlex {0} adesso?").format(version), "ask",
+                      (tr("Aggiorna"), tr("Più tardi")),
+                      note=tr("PDFlex lo scarica, si chiude, si aggiorna e si riapre da solo. "
+                              "I file scaricati vengono cancellati dopo l'installazione.")) != 0:
+            return
+        self.b_update.setEnabled(False)
+
+        def run():
+            try:
+                self.update_ready.emit(str(update.download(zip_url, self.update_progress.emit)), "")
+            except (OSError, ValueError) as e:
+                self.update_ready.emit("", str(e))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _install_update(self, files: str, error: str):
+        version, page, _ = self.update_info
+        self.b_update.setEnabled(True)
+        self.b_update.setText(tr("Aggiorna\nv{0}").format(version))
+        if not files:
+            shutil.rmtree(update.FOLDER, ignore_errors=True)
+            if ui.message(self, tr("Download non riuscito: {0}").format(error), "warn",
+                          (tr("Apri la pagina della versione"), tr("Chiudi"))) == 0:
+                QDesktopServices.openUrl(QUrl(page))
+            return
+        if i18n.saved() is None:
+            i18n.save(i18n.LANG)  # so the installer does not stop to ask the language
+        if not self.close():  # unsaved work and "Annulla": PDFlex stays open, the download goes
+            shutil.rmtree(update.FOLDER, ignore_errors=True)
+            return
+        update.start_install(Path(files))
+        QApplication.quit()
 
     def switch_language(self, lang: str):
         i18n.save(lang)  # the labels are made at start: the next start uses it

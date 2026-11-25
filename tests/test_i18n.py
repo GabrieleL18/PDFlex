@@ -25,22 +25,3 @@ def test_tr_translates_only_in_english(monkeypatch):
     monkeypatch.setattr(i18n, "_TABLE", {})
     assert i18n.tr("Salva modulo") == "Salva modulo"
 
-
-def test_update_check_compares_versions_and_stays_quiet_offline(qapp, monkeypatch):
-    import io
-    import json
-    from pdflex import app
-    assert app.version_parts("v1.10") > app.version_parts("1.9") > app.version_parts("1.3")
-    reply = {"tag_name": "v1.4", "html_url": "https://github.com/x/releases/tag/v1.4"}
-    monkeypatch.setattr(app.urllib.request, "urlopen", lambda req, timeout: io.BytesIO(json.dumps(reply).encode()))
-    assert app.newer_release("1.3") == ("1.4", reply["html_url"])
-    assert app.newer_release("1.4") is None
-
-    def offline(req, timeout):
-        raise OSError("no network")
-    monkeypatch.setattr(app.urllib.request, "urlopen", offline)
-    assert app.newer_release("1.3") is None
-    w = app.MainWindow()
-    w._show_update("1.4", reply["html_url"])
-    assert not w.b_update.isHidden() and w.b_update.text() == "Scarica\nv1.4"
-    w.close()

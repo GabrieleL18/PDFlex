@@ -1,8 +1,15 @@
 """English interface: Italian text (as written in the code) -> English. Missing ones stay Italian."""
 EN = {
     "Versione di PDFlex": "PDFlex version",
-    "È uscito PDFlex {0}: clicca per scaricarlo": "PDFlex {0} is out: click to download it",
-    "Scarica\nv{0}": "Get\nv{0}",
+    "Aggiorna\nv{0}": "Update\nv{0}",
+    "Scarico\n{0}%": "Getting\n{0}%",
+    "È uscito PDFlex {0}: clicca per installarlo": "PDFlex {0} is out: click to install it",
+    "Installare PDFlex {0} adesso?": "Install PDFlex {0} now?",
+    "Aggiorna": "Update",
+    "Più tardi": "Later",
+    "PDFlex lo scarica, si chiude, si aggiorna e si riapre da solo. I file scaricati vengono cancellati dopo l'installazione.": "PDFlex downloads it, closes, updates and reopens by itself. The downloaded files are deleted after installing.",
+    "Download non riuscito: {0}": "Download failed: {0}",
+    "Apri la pagina della versione": "Open the release page",
     "grassetto": "bold",
     "corsivo": "italic",
     "dimensione {0:g} → {1:g}": "size {0:g} → {1:g}",
