@@ -437,15 +437,15 @@ class EditorTab(QWidget):
         self.c_grid = Toggle(tr("Griglia ogni 5 punti"))
         self.c_grid.toggled.connect(self._grid_toggled)
         pl.addWidget(self.c_grid)
+        grid_hint = QLabel(tr("Accesa la vedi sulla pagina e i campi scattano sulle sue linee. Spenta, si "
+                           "agganciano agli altri campi (linea rosa). Alt: movimento libero."), objectName="Muted")
+        grid_hint.setWordWrap(True)
+        pl.addWidget(grid_hint)
         self._order_no: dict[int, int] = {}  # id(field) -> its number in the Tab order, while shown
         self.c_order = Toggle(tr("Mostra ordine Tab"))
         self.c_order.setToolTip(tr("Un numero su ogni campo: l'ordine in cui si passa da uno all'altro con Tab"))
         self.c_order.toggled.connect(lambda _=False: self.refresh())
         pl.addWidget(self.c_order)
-        grid_hint = QLabel(tr("Accesa la vedi sulla pagina e i campi scattano sulle sue linee. Spenta, si "
-                           "agganciano agli altri campi (linea rosa). Alt: movimento libero."), objectName="Muted")
-        grid_hint.setWordWrap(True)
-        pl.addWidget(grid_hint)
         pl.addSpacing(12)
         pl.addWidget(QLabel(tr("Blocchi salvati"), objectName="H2"))
         self.block_combo = QComboBox()
@@ -655,8 +655,9 @@ class EditorTab(QWidget):
         self.p_currency, self.p_before = QComboBox(), QComboBox()
         for c in CURRENCIES:
             self.p_currency.addItem(c or tr("Nessuna"), c)
-        self.p_before.addItem(tr("Prima del numero"), 1)
-        self.p_before.addItem(tr("Dopo il numero"), 0)
+        self.p_before.addItem(tr("Prima"), 1)
+        self.p_before.addItem(tr("Dopo"), 0)
+        self.p_before.setToolTip(tr("Il simbolo prima o dopo il numero"))
         self.p_pattern = QComboBox()  # date or time layout, filled for the format in use
         self.p_vmin, self.p_vmax = QLineEdit(), QLineEdit()
         self.p_calc_op = QComboBox()

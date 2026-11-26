@@ -475,9 +475,9 @@ def test_toast_shows_and_replaces(qapp):
     assert t1.isVisible() and t1.parent() is w.window()
     t2 = ui.toast(w, "Salvato", "b.pdf")
     assert not t1.isVisible() and t2.isVisible()
-    assert t2.geometry().bottom() < w.height() and abs(t2.geometry().center().x() - w.width() / 2) < 2
     QTest.qWait(400)
     assert t2.isVisible()  # 4 s by default
+    assert t2.geometry().bottom() < w.height() and abs(t2.geometry().center().x() - w.width() / 2) < 2
     QTest.mouseClick(t2, Qt.LeftButton)
     QTest.qWait(400)
     assert not t2.isVisible()

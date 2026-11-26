@@ -19,7 +19,7 @@ from PySide6.QtGui import (
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect, QGraphicsScene, QGraphicsView, QLabel,
+    QGraphicsScene, QGraphicsView, QLabel,
     QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
     QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget,
 )
@@ -743,19 +743,22 @@ class Toast(QWidget):
         if detail:
             body = QLabel(detail, wordWrap=True)
             body.setMaximumWidth(420)
+            if len(detail) > 40:  # wrapped: a readable width, not the narrowest that fits
+                body.setMinimumWidth(320)
             body.setStyleSheet(f"color: {color('muted')}; font-size: 13px; background: transparent;")
             texts.addWidget(body)
         row.addLayout(texts)
-        self.fade = QGraphicsOpacityEffect(self, opacity=0.0)
-        self.setGraphicsEffect(self.fade)
+        # ponytail: slides in and out, no fade: an opacity effect around the card's shadow effect draws
+        # nothing (Qt does not nest graphics effects)
+        self.shown = 0.0  # 0 hidden below its place .. 1 in place
         self.anim = QVariantAnimation(self, duration=180, valueChanged=self._step)
         self.timer = QTimer(self, singleShot=True, interval=ms, timeout=self.dismiss)
         self.closing = False
         win.installEventFilter(self)
 
     def _step(self, v):
-        self.fade.setOpacity(v)
-        self.move(self.x(), self._y + round((1 - v) * 10))  # rises a little as it appears
+        self.shown = v
+        self.move(self.x(), self._y + round((1 - v) * 16))  # rises a little as it appears
 
     def place(self):
         win = self.parentWidget()
@@ -778,7 +781,7 @@ class Toast(QWidget):
         self.closing = True
         self.timer.stop()
         self.anim.stop()
-        self.anim.setStartValue(self.fade.opacity())
+        self.anim.setStartValue(self.shown)
         self.anim.setEndValue(0.0)
         self.anim.finished.connect(self.close)
         self.anim.start()
