@@ -487,3 +487,28 @@ def test_editing_one_property_keeps_unshown_ones(tab):
     tab.select_field(f)
     tab.p_required.setChecked(True)
     assert f.required and f.maxlen == 10
+
+
+# tab order
+def test_sort_by_columns(tab):
+    a = tab.add_field("text", 0, (10, 100, 90, 120))
+    b = tab.add_field("text", 0, (200, 10, 290, 30))
+    c = tab.add_field("text", 0, (10, 10, 90, 30))
+    tab.sort_by_columns()
+    assert tab.fields == [c, a, b]
+
+
+def test_tab_number_counts_radio_group_once(tab):
+    r1 = tab.add_field("radio", 0, (10, 10, 25, 25))
+    r2 = tab.add_field("radio", 0, (40, 10, 55, 25))
+    r2.name = r1.name
+    t = tab.add_field("text", 0, (10, 40, 100, 60))
+    assert (tab.tab_number(r1), tab.tab_number(r2), tab.tab_number(t)) == (1, 1, 2)
+
+
+def test_order_toggle_draws_numbers(tab):
+    tab.add_field("text", 0, (10, 10, 100, 30))
+    tab.c_order.setChecked(True)
+    QTest.qWait(50)
+    assert tab.c_order.isChecked() and tab._order_no
+    tab.view.grab()  # paints every field with its number: must not fail

@@ -80,6 +80,9 @@ class FieldItem(QGraphicsRectItem):
         fill.setAlpha(80 if sel else 16 if other_selected else 38)
         line = QColor(color)
         line.setAlpha(110 if other_selected else 255)
+        unseen = bool(self.field.visibility)  # hidden, or shown only on paper / only on screen
+        if unseen:
+            fill.setAlpha(fill.alpha() // 2)
         if self.field.kind == "image":
             if not hasattr(self, "_pic"):
                 self._pic = QPixmap()
@@ -87,12 +90,26 @@ class FieldItem(QGraphicsRectItem):
             pic = self._pic.scaled(r.size().toSize(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             painter.drawPixmap(QPointF(r.left(), r.top() + (r.height() - pic.height()) / 2), pic)
             fill.setAlpha(25 if sel else 0)
-        painter.setPen(QPen(line, 2.5 if sel else 1.3) if self.field.kind != "image" or sel else Qt.NoPen)
+        painter.setPen(QPen(line, 2.5 if sel else 1.3, Qt.DashLine if unseen else Qt.SolidLine)
+                       if self.field.kind != "image" or sel else Qt.NoPen)
         painter.setBrush(fill)
         painter.drawRoundedRect(r, 3, 3)
         label = self.field.name + (f" = {self.field.value}" if self.field.kind == "radio" else "")
         if self.field.kind != "image":
             self._paint_info(painter, r, QColor(color).darker(150))
+        number = self.tab._order_no.get(id(self.field))
+        if number:
+            d = max(10.0, min(16.0, r.height() - 2, r.width() - 2))
+            badge = QRectF(r.left() + 1, r.top() + 1, d, d)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(ACCENT))
+            painter.drawEllipse(badge)
+            small = QFont(painter.font())
+            small.setPixelSize(max(6, round(d * (0.62 if number < 100 else 0.45))))
+            small.setBold(True)
+            painter.setFont(small)
+            painter.setPen(Qt.white)
+            painter.drawText(badge, Qt.AlignCenter, str(number))
         if sel and (self.field is self.tab.selected or len(self.tab.selection) <= TAGS_MAX):
             # outer ring in the app accent so the selection reads at a glance
             painter.setBrush(Qt.NoBrush)
@@ -162,6 +179,10 @@ class FieldItem(QGraphicsRectItem):
             parts.append(FONTS[f.font].split(" ")[0])
         if f.font_size:
             parts.append(f"{f.font_size:g} pt")
+        if f.visibility:
+            parts.append(VISIBILITY[f.visibility].lower())
+        if f.readonly:
+            parts.append(tr("sola lettura"))
         return " · ".join(parts)
 
     def _paint_info(self, p, r, color):
@@ -172,19 +193,21 @@ class FieldItem(QGraphicsRectItem):
             for i in range(1, f.comb):
                 x = r.left() + r.width() * i / f.comb
                 p.drawLine(QPointF(x, r.top() + 2), QPointF(x, r.bottom() - 2))
-        if f.kind in ("checkbox", "radio"):
-            if f.default == "1":  # starts ticked / chosen
-                p.setPen(QPen(color, max(1.5, r.width() / 9), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                if f.kind == "checkbox":
-                    path = QPainterPath(QPointF(r.left() + r.width() * .22, r.center().y()))
-                    path.lineTo(r.left() + r.width() * .42, r.bottom() - r.height() * .25)
-                    path.lineTo(r.right() - r.width() * .2, r.top() + r.height() * .25)
-                    p.setBrush(Qt.NoBrush)
-                    p.drawPath(path)
-                else:
-                    p.setBrush(color)
-                    p.drawEllipse(r.center(), r.width() / 5, r.height() / 5)
+        if f.kind == "checkbox":  # its mark: faint until it starts ticked
+            ink = QColor(color)
+            ink.setAlpha(255 if f.default == "1" else 70)
+            glyph = QFont(p.font())
+            glyph.setPixelSize(max(6, round(min(r.width(), r.height()) * 0.75)))
+            p.setFont(glyph)
+            p.setPen(ink)
+            p.drawText(r, Qt.AlignCenter, MARK_GLYPHS.get(f.mark, MARK_GLYPHS[""]))
             return  # too small for words
+        if f.kind == "radio":
+            if f.default == "1":  # starts chosen
+                p.setPen(Qt.NoPen)
+                p.setBrush(color)
+                p.drawEllipse(r.center(), r.width() / 5, r.height() / 5)
+            return
         if r.width() < 34 or r.height() < 9:
             return
         name = f.name + (f" = {f.value}" if f.kind == "radio" else "") + (" *" if f.required else "")
@@ -413,6 +436,11 @@ class EditorTab(QWidget):
         self.c_grid = Toggle(tr("Griglia ogni 5 punti"))
         self.c_grid.toggled.connect(self._grid_toggled)
         pl.addWidget(self.c_grid)
+        self._order_no: dict[int, int] = {}  # id(field) -> its number in the Tab order, while shown
+        self.c_order = Toggle(tr("Mostra ordine Tab"))
+        self.c_order.setToolTip(tr("Un numero su ogni campo: l'ordine in cui si passa da uno all'altro con Tab"))
+        self.c_order.toggled.connect(lambda _=False: self.refresh())
+        pl.addWidget(self.c_order)
         grid_hint = QLabel(tr("Accesa la vedi sulla pagina e i campi scattano sulle sue linee. Spenta, si "
                            "agganciano agli altri campi (linea rosa). Alt: movimento libero."), objectName="Muted")
         grid_hint.setWordWrap(True)
@@ -574,12 +602,16 @@ class EditorTab(QWidget):
             c.currentIndexChanged.connect(self._filter_list)
             filters.addWidget(c)
         lp.addLayout(filters)
-        self.b_sort = button(tr("Ordina per posizione"), "list", "Ghost",
+        self.b_sort = button(tr("Ordina per righe"), "list", "Ghost",
                              tr("Ordine Tab da sinistra a destra, dall'alto in basso, pagina per pagina"))
         self.b_sort.clicked.connect(self.sort_by_position)
         sort_row = QHBoxLayout()
         sort_row.setContentsMargins(8, 0, 8, 4)
         sort_row.addWidget(self.b_sort)
+        self.b_sort_cols = button(tr("Ordina per colonne"), "list", "Ghost",
+                                  tr("Ordine Tab dall'alto in basso, colonna per colonna, pagina per pagina"))
+        self.b_sort_cols.clicked.connect(self.sort_by_columns)
+        sort_row.addWidget(self.b_sort_cols)
         sort_row.addStretch()
         lp.addLayout(sort_row)
         self.field_list = QListWidget(objectName="Changes")
@@ -1225,6 +1257,28 @@ class EditorTab(QWidget):
             return f.page, round(r[1] / 6), r[0]  # same line (within ~6 pt), then left to right
         self.set_order(sorted(self.fields, key=key))
 
+    def sort_by_columns(self):
+        def key(f):
+            r = to_view(self.doc[f.page], f.rect)
+            return f.page, round(r[0] / 6), r[1]  # same column (within ~6 pt), then top to bottom
+        self.set_order(sorted(self.fields, key=key))
+
+    def tab_numbers(self) -> dict[int, int]:
+        """id(field) -> its place in the Tab order (1, 2, 3...); the buttons of a choice group share one."""
+        out, groups, n = {}, {}, 0
+        for f in self.fields:
+            if f.kind == "radio" and f.name in groups:
+                out[id(f)] = groups[f.name]
+                continue
+            n += 1
+            out[id(f)] = n
+            if f.kind == "radio":
+                groups[f.name] = n
+        return out
+
+    def tab_number(self, f: Field) -> int:
+        return self.tab_numbers()[id(f)]
+
     def _list_reordered(self):
         by_id = {id(f): f for f in self.fields}
         order = [by_id[self.field_list.item(i).data(Qt.UserRole)] for i in range(self.field_list.count())]
@@ -1454,6 +1508,7 @@ class EditorTab(QWidget):
             self.view.verticalScrollBar().setValue(0)
 
     def refresh(self):
+        self._order_no = self.tab_numbers() if self.c_order.isChecked() else {}
         self.scene.blockSignals(True)
         self.scene.clear()
         has = self.doc is not None
