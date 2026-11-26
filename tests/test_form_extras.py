@@ -282,3 +282,15 @@ def test_old_checkbox_reads_as_check(make_pdf, tmp_path):
     save_with_fields(src, [Field("checkbox", 0, (10, 10, 30, 30), "c", default="1")], out)
     f = load_fields(open_pdf(out))[0]
     assert f.mark == "" and f == f.orig
+
+
+def test_text_becomes_multiline_on_saved_field(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, [Field("text", 0, (10, 10, 200, 60), "t"), Field("multiline", 0, (10, 70, 200, 120), "m")], out)
+    fields = load_fields(open_pdf(out))
+    fields[0].kind, fields[1].kind = "multiline", "text"
+    out2 = tmp_path / "o2.pdf"
+    save_with_fields(out, fields, out2)
+    got = {f.name: f.kind for f in load_fields(open_pdf(out2))}
+    assert got == {"t": "multiline", "m": "text"}

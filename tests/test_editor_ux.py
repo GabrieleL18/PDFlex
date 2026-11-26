@@ -175,7 +175,7 @@ def test_format_colour_alignment_from_the_panel(tab, tmp_path):
     pick(tab.p_fmt, "cf")
     assert (f.kind, f.fmt) == ("text", "cf") and not tab.form.isRowVisible(tab.p_pattern)
     tab._show_color("#336699")
-    tab._props_edited()
+    tab._set_prop("color")  # what the colour picker does
     pick(tab.p_align, 1)
     assert (f.color, f.align) == ("#336699", 1)
     tab.undo()  # each step is one undo
@@ -545,3 +545,64 @@ def test_paste_repeats_manual_move(tab):
     p2 = tab.paste()[0]
     p3 = tab.paste()[0]
     assert p2.rect[:2] == pytest.approx((10, 90)) and p3.rect[:2] == pytest.approx((10, 130))
+
+
+# review fixes
+def test_other_property_keeps_total_without_format(tab):
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    t = tab.add_field("text", 0, (10, 40, 100, 60))
+    t.calc, t.vmax = ["text_1"], "5"  # a total from another program: a sum, no number format
+    tab.select_many([a, t])
+    QTest.qWait(50)
+    tab.p_required.setChecked(True)
+    assert t.required and t.calc == ["text_1"] and t.vmax == "5"
+
+
+def test_one_click_on_mixed_toggle_sets_all(tab):
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    b = tab.add_field("text", 0, (10, 40, 100, 60))
+    b.required = True
+    tab.select_many([a, b])
+    QTest.qWait(50)
+    tab.p_required.click()
+    assert a.required and b.required and "(diversi)" not in tab.p_required.text()
+
+
+def test_save_keeps_values_the_panel_cannot_show(tab):
+    f = tab.add_field("text", 0, (10, 10, 100, 30))
+    f.fmt, f.vmax = "amount|6|1|¥|1", "100.50"  # from another program: yen, 6 decimals
+    c = tab.add_field("checkbox", 0, (10, 40, 30, 60))
+    c.mark = "5"
+    for g in (f, c):
+        tab.select_field(g)
+        before = copy.deepcopy(g)
+        tab._props_edited()  # what Ctrl+S, preview and export do first
+        assert g == before
+
+
+def test_colour_from_the_picker_is_applied(tab):
+    f = tab.add_field("text", 0, (10, 10, 100, 30))
+    tab.select_field(f)
+    tab._show_color("#336699")
+    tab._set_prop("color")
+    assert f.color == "#336699"
+
+
+def test_percent_has_no_min_max(tab):
+    f = tab.add_field("text", 0, (10, 10, 100, 30))
+    tab.select_field(f)
+    tab.p_fmt.setCurrentIndex(tab.p_fmt.findData("number"))
+    tab.p_vmin.setText("5")
+    tab.p_vmin.editingFinished.emit()
+    tab.p_fmt.setCurrentIndex(tab.p_fmt.findData("percent"))
+    assert f.vmin == "" and not tab.form.isRowVisible(tab.p_vmin.parentWidget())
+
+
+def test_repeated_move_goes_back_home_at_the_page_edge(tab):
+    f = tab.add_field("text", 0, (10, 700, 100, 720))
+    tab.select_many([f])
+    tab.copy_selected()
+    p1 = tab.paste()[0]
+    tab._move([p1], -10, 30)  # 40 below the copied one
+    tops = [tab.paste()[0].rect[1] for _ in range(3)]
+    assert tops[:2] == pytest.approx([780, 820]) and tops[2] == pytest.approx(700)

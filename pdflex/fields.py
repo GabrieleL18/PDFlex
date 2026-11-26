@@ -431,10 +431,12 @@ def _update_widget(doc, f: Field) -> None:
     if f.name != o.name:
         doc.xref_set_key(f.parent or f.xref, "T", pymupdf.get_pdf_str(f.name))
     locked, was_locked = bool(f.readonly or f.calc), bool(o.readonly or o.calc)  # a total is computed, not typed
-    if f.required != o.required or f.comb != o.comb or locked != was_locked:
+    multi, was_multi = f.kind == "multiline", o.kind == "multiline"
+    if f.required != o.required or f.comb != o.comb or locked != was_locked or multi != was_multi:
         flags = int(_inherited(doc, f, "Ff") or 0)
         for bit, on, was in ((pymupdf.PDF_FIELD_IS_REQUIRED, f.required, o.required),
                              (pymupdf.PDF_TX_FIELD_IS_COMB, f.comb, o.comb),
+                             (pymupdf.PDF_TX_FIELD_IS_MULTILINE, multi, was_multi),
                              (pymupdf.PDF_FIELD_IS_READ_ONLY, locked, was_locked)):
             if bool(on) != bool(was):
                 flags = flags | bit if on else flags & ~bit

@@ -44,6 +44,7 @@ KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B",
 TEXT_KINDS = ("text", "multiline", "date")  # a field can change kind only among these
 MARK_GLYPHS = {"": "✓", "8": "✗", "l": "●", "n": "■", "u": "◆", "H": "★"}  # what MARKS look like on screen
 MIXED = "\x00diversi"  # a combo's item when the selected fields have different values
+EXTRA = Qt.UserRole + 1  # marks a combo item added for a value the list does not have
 THUMB_W = 110  # px, width of a page thumbnail
 HANDLE = 6  # px: the resize grips on the edges and corners, and how near an edge a press resizes
 PAGE_MARGIN = 24
@@ -761,7 +762,7 @@ class EditorTab(QWidget):
                 w.currentIndexChanged.connect(lambda _=0, k=key: self._set_prop(k))
             elif isinstance(w, QCheckBox):
                 w.setProperty("label", w.text())
-                w.toggled.connect(lambda _=False, k=key: self._set_prop(k))
+                w.stateChanged.connect(lambda _=0, k=key: self._set_prop(k))  # (diversi) -> on: no toggled
         self.p_options.textChanged.connect(lambda: self._set_prop("options"))
         pr.addWidget(self.props)
         actions = QHBoxLayout()
@@ -1407,8 +1408,8 @@ class EditorTab(QWidget):
                 clip["src"], at = at, (at[0] + clip["step"][0], at[1] + clip["step"][1])
             else:
                 clip["src"], at = at, (at[0] + 10, at[1] + 10)
-                if self._fit(at, block) != at:
-                    at = home
+            if dy is None and self._fit(at, block) != at:  # off the sheet: over the copied ones again
+                at = home
         made = self._place(block, at)
         clip.update(at=at, page=self.page_no, made=made, placed=self._top_left(made) if made else None)
         return made
@@ -1711,7 +1712,9 @@ class EditorTab(QWidget):
         if k == "checkbox":
             rows.add("mark")
         if k != "multiline" and base in NUMERIC:
-            rows |= {"dec", "thousands", "vmin", "vmax"}
+            rows |= {"dec", "thousands"}
+        if k != "multiline" and base in ("number", "amount"):  # a percentage is kept as 0.5: no range
+            rows |= {"vmin", "vmax"}
         if base == "amount":
             rows |= {"currency", "before"}
         if base in DATE_PATTERNS:
@@ -1747,9 +1750,12 @@ class EditorTab(QWidget):
         v = values[0]
         w.setProperty("mixed", not same)
         if isinstance(w, QComboBox):
-            i = w.findData(MIXED)
-            if i >= 0:
-                w.removeItem(i)
+            for i in reversed(range(w.count())):  # what the last field shown added, and "(diversi)"
+                if w.itemData(i) == MIXED or w.itemData(i, EXTRA):
+                    w.removeItem(i)
+            if same and v is not None and w.findData(v) < 0:  # e.g. ¥ or 6 decimals, from another program
+                w.addItem(str(v), v)
+                w.setItemData(w.count() - 1, True, EXTRA)
             if same:
                 w.setCurrentIndex(max(w.findData(v), 0))
             else:
@@ -1769,9 +1775,11 @@ class EditorTab(QWidget):
         elif w.hasFocus():  # being typed: leave it as it is
             return
         elif isinstance(w, QPlainTextEdit):
+            w.setProperty("shown", v if same else "")
             if w.toPlainText() != (v if same else ""):
                 w.setPlainText(v if same else "")
         else:
+            w.setProperty("shown", v if same else "")
             w.setText(v if same else "")
             w.setPlaceholderText(w.property("ph") if same else tr("(diversi)"))
 
@@ -1880,6 +1888,8 @@ class EditorTab(QWidget):
                         o.default = ""
         else:  # calc_op, font, color, align, mark, tooltip, visibility, readonly, required
             setattr(f, key, v)
+        if key not in ("kind", "fmt", "comb"):  # other properties leave the rest as it is (a total from
+            return                                # another program may have a sum and no number format)
         base = fmt_parts(f.fmt, f.kind)[0]
         if not (f.kind == "text" and base in ("number", "amount")):
             f.calc = []
@@ -1887,7 +1897,7 @@ class EditorTab(QWidget):
             f.comb = 0
         if f.comb or f.kind not in ("text", "multiline", "date"):
             f.maxlen = 0
-        if base not in NUMERIC:
+        if base not in ("number", "amount"):
             f.vmin = f.vmax = ""
 
     def _set_prop(self, key: str, refresh: bool = True) -> None:
@@ -1914,9 +1924,14 @@ class EditorTab(QWidget):
             self.scene.update()
 
     def _props_edited(self, *_):
-        """What is typed but not confirmed yet (Ctrl+S keeps the focus in the box) counts too."""
+        """What is typed but not confirmed yet (Ctrl+S keeps the focus in the box) counts too: the text boxes
+        whose text is not what they were showing. The rest is left alone, so nothing untouched is rewritten."""
         for key in list(self._shown):
-            self._set_prop(key, refresh=False)  # every box read before any is shown again
+            w = self._prop_widgets[key]
+            if isinstance(w, (QLineEdit, QPlainTextEdit)):
+                text = w.toPlainText() if isinstance(w, QPlainTextEdit) else w.text()
+                if text != (w.property("shown") or ""):
+                    self._set_prop(key, refresh=False)  # every box read before any is shown again
         self._show_props()
         self.scene.update()
 

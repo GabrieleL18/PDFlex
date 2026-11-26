@@ -364,8 +364,14 @@ def table_step(hlines, box: tuple, taken: list[tuple], page_height: float) -> fl
     the row; None when it is in no table, or no row below is free. Rows come from the lines spanning at
     least 80% of the box; a box spanning n rows moves n rows at a time."""
     x0, y0, x1, y1 = box
+    spans = []  # a row's line drawn cell by cell: the pieces joined first (same height, touching)
+    for a, b, y in sorted(hlines, key=lambda h: (round(h[2]), h[0])):
+        if spans and abs(spans[-1][2] - y) <= 1 and a <= spans[-1][1] + 2:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b, y])
     ys = []
-    for y in sorted(y for a, b, y in hlines if min(b, x1) - max(a, x0) >= 0.8 * (x1 - x0)):
+    for y in sorted(y for a, b, y in spans if min(b, x1) - max(a, x0) >= 0.8 * (x1 - x0)):
         if not ys or y - ys[-1] > 1:  # the same line drawn twice, or a cell's edge and its neighbour's
             ys.append(y)
     above = [i for i, y in enumerate(ys) if y <= y0 + 1]

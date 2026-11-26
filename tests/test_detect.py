@@ -180,3 +180,8 @@ def test_row_lines_reads_cell_rectangles():
     for y in (100, 120):
         page.draw_rect((50, y, 400, y + 20))
     assert sorted({round(line[2]) for line in row_lines(page)}) == [100, 120, 140]
+
+
+def test_table_step_rows_drawn_cell_by_cell():
+    cells = [(x, x + 150, y) for y in (100, 120, 140) for x in (50, 200, 350)]
+    assert table_step(cells, (60, 102, 490, 118), [], 800) == 20
