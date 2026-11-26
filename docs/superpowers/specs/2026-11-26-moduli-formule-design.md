@@ -53,6 +53,12 @@ The user chose the full version of each:
    - *Serie* computes them for every row: computed values are written, and fields whose condition is false are hidden and empty. This covers the existing quick totals too, which was the user's choice ("nelle copie della serie scrive i totali già calcolati"): a computed field is never taken from a column, and it does not appear in the column table.
 8. **Serie, colonne:** a table with one row per form field, "campo → colonna". Each row has a menu with "(nessuna)" plus the file's columns, already filled in with today's automatic same-name matches. The "N campi su M trovati" summary follows the table.
 
+9. **Incolla laterale** (asked by the user while planning): today pasting copied fields that sit in a table goes to the next free row below. When the table's records run in columns instead (cells arranged in a column, the next record to the right), the paste goes to the next free column on the right, at the same place in the column.
+   - A copied block taller than it is wide tries the column to the right first, then the row below.
+   - Any other block tries the row below first, then the column to the right.
+   - Columns come from the page's vertical lines and box edges, exactly as rows come from the horizontal ones.
+   - When neither direction is free, the existing fallbacks apply unchanged: the repeated manual move, then the small offset.
+
 ## Non-goals
 
 - Text functions (joining, upper case), date arithmetic, conditions on whole pages.
