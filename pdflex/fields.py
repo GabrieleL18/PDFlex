@@ -960,16 +960,23 @@ def _sample_text(f_name: str, multiline: bool) -> str:
     return tr("Testo di esempio su\npiù righe") if multiline else tr("Testo di esempio")
 
 
+def fmt_number(n: float, fmt: str) -> str:
+    """A number as a numeric format shows it: "€ 1.234,50", "12,50%" (a percentage is kept as 0.125)."""
+    base, args = fmt_parts(fmt)
+    if base == "percent":
+        n *= 100
+    s = f"{n:,.{int(args[0])}f}".replace(",", " ").replace(".", ",").replace(" ", "." if args[1] != "0" else "")
+    if base == "amount" and args[2]:
+        return f"{args[2]} {s}" if args[3] != "0" else f"{s} {args[2]}"
+    return s + "%" if base == "percent" else s
+
+
 def sample_value(fmt: str, name: str, multiline: bool = False) -> str:
     """An example already written as the format shows it (PyMuPDF does not run the format scripts)."""
     from datetime import datetime
     base, args = fmt_parts(fmt)
     if base in NUMERIC:
-        n = 12.5 if base == "percent" else 1234.5
-        s = f"{n:,.{int(args[0])}f}".replace(",", " ").replace(".", ",").replace(" ", "." if args[1] != "0" else "")
-        if base == "amount" and args[2]:
-            return f"{args[2]} {s}" if args[3] != "0" else f"{s} {args[2]}"
-        return s + "%" if base == "percent" else s
+        return fmt_number(0.125 if base == "percent" else 1234.5, fmt)
     if base in DATE_PATTERNS:
         py = {"dd": "%d", "mm": "%m", "yyyy": "%Y", "yy": "%y", "HH": "%H", "MM": "%M", "ss": "%S"}
         return datetime.now().strftime(re.sub(r"yyyy|yy|dd|mm|HH|MM|ss", lambda m: py[m.group()], args[0]))
@@ -1007,6 +1014,8 @@ def fill_sample(doc: pymupdf.Document) -> None:
             else:
                 continue
             w.update()
+    from pdflex.logic import form_logic  # totals, formulas and conditions, as on the filled form
+    form_logic(doc).apply(doc)
 
 
 _BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "calc_op", "vmin",

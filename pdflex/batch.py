@@ -77,6 +77,8 @@ def fill_form(doc, row: dict, mapping: dict) -> None:
             else:
                 w.field_value = value
             _safe_update(doc, w)  # keeps its scripts and its check box mark
+    from pdflex.logic import form_logic  # totals, formulas and conditions worked out on the filled copy
+    form_logic(doc).apply(doc)
 
 
 def _file_name(row, name_col, i, stem) -> str:

@@ -77,7 +77,7 @@ def test_compress_shrinks_big_pictures(tmp_path):
 def test_form_inputs_and_fill(make_pdf, tmp_path):
     data = open_pdf(_form(tmp_path, make_pdf)).tobytes()
     inputs = {i.name: i for i in form_inputs(pymupdf.open("pdf", data))}
-    assert "totale" not in inputs  # a computed total is not typed
+    assert inputs["totale"].kind == "computed"  # a computed total is shown, not typed
     assert inputs["sesso"].kind == "choice" and inputs["sesso"].choices == ["M", "F"]
     assert inputs["citta"].choices == ["Roma", "Milano"] and inputs["accetto"].kind == "checkbox"
     assert inputs["importo"].hint.startswith("€")

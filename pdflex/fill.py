@@ -6,7 +6,7 @@ import pymupdf
 
 from pdflex import write_atomic
 from pdflex.batch import fill_form
-from pdflex.fields import _field_js, _fmt_from_js, sample_value
+from pdflex.fields import HELPER, _field_js, _fmt_from_js, sample_value
 from pdflex.i18n import tr
 
 
@@ -18,15 +18,24 @@ class Input:
     value: str = ""
     hint: str = ""  # how a formatted value is written, e.g. "1.234,50"
     maxlen: int = 0  # boxes of a comb field (codice fiscale)
+    cond: bool = False  # shown only while its condition holds ("Mostra solo se")
 
 
 def form_inputs(doc: pymupdf.Document) -> list[Input]:
-    """One input per field name, in page order. Totals (read only) and signatures are left out."""
+    """One input per field name, in page order. Totals and formulas are there, computed (kind "computed");
+    other read-only fields and signatures are left out."""
+    from pdflex.logic import form_logic
+    logic = form_logic(doc)
     out: dict[str, Input] = {}
     for page in doc:
         for w in page.widgets():
             name, t = w.field_name or "", w.field_type
-            if not name or w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY:
+            if not name or name == HELPER:
+                continue
+            if name in logic.computed:
+                out.setdefault(name, Input(name, "computed", value=w.field_value or ""))
+                continue
+            if w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY:
                 continue
             if t == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:  # one entry for the group, a choice per button
                 inp = out.setdefault(name, Input(name, "choice"))
@@ -47,6 +56,9 @@ def form_inputs(doc: pymupdf.Document) -> list[Input]:
                 comb = w.text_maxlen if w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB else 0
                 out[name] = Input(name, "multiline" if multiline else "text", value=w.field_value or "",
                                   hint=sample_value(fmt, name) if fmt else "", maxlen=comb or 0)
+    for name in logic.conditions:
+        if name in out:
+            out[name].cond = True
     return list(out.values())
 
 
@@ -78,19 +90,24 @@ class FillDialog(QDialog):
         self.data, self.src = data, Path(src_path)
         doc = pymupdf.open("pdf", data)
         self.inputs = form_inputs(doc)
+        from pdflex.logic import form_logic
+        self.logic = form_logic(doc)
         doc.close()
         self.setWindowTitle(tr("Compila {0}").format(self.src.name))
         self.setWindowFlag(Qt.WindowMaximizeButtonHint)
         self.resize(1200, 900)
 
         box = QWidget()
-        form = QFormLayout(box)
+        form = self.form = QFormLayout(box)
         form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         form.setContentsMargins(16, 16, 16, 16)
         self.getters = {}
+        self.inputs_by_name: dict[str, QWidget] = {}  # each field's box
         self.timer = QTimer(self, singleShot=True, interval=300, timeout=self.redraw)
         for inp in self.inputs:
-            form.addRow(inp.name, self._input(inp))
+            w = self._input(inp)
+            self.inputs_by_name[inp.name] = w
+            form.addRow(inp.name, w)
         scroll = QScrollArea()
         scroll.setWidget(box)
         scroll.setWidgetResizable(True)
@@ -121,6 +138,11 @@ class FillDialog(QDialog):
         self.redraw()
 
     def _input(self, inp: Input) -> QWidget:
+        if inp.kind == "computed":  # worked out from the other fields
+            w = QLineEdit(inp.value)
+            w.setReadOnly(True)
+            w.setToolTip(tr("Calcolato dagli altri campi"))
+            return w
         if inp.kind == "checkbox":
             w = Toggle(tr("Sì"))
             w.setChecked(inp.value == "1")
@@ -152,7 +174,27 @@ class FillDialog(QDialog):
     def values(self) -> dict[str, str]:
         return {name: get() for name, get in self.getters.items()}
 
+    def _apply_logic(self):
+        """Totals and formulas worked out, the fields whose condition is false hidden and emptied."""
+        values, hidden = self.logic.run(self.values())
+        for name, w in self.inputs_by_name.items():
+            if name in self.logic.computed:
+                w.setText(values.get(name, ""))
+            if name not in self.logic.conditions:
+                continue
+            self.form.setRowVisible(w, name not in hidden)
+            if name in hidden:
+                w.blockSignals(True)
+                if isinstance(w, Toggle):
+                    w.setChecked(False)
+                elif isinstance(w, QComboBox):
+                    w.setCurrentIndex(0)
+                else:
+                    w.clear()
+                w.blockSignals(False)
+
     def redraw(self):
+        self._apply_logic()
         old = self.view.doc
         self.view.show_doc(fill_values(self.data, self.values()))
         if old:
