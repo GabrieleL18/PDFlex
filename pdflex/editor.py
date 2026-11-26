@@ -14,20 +14,21 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton,
+    QListWidgetItem, QMenu, QPlainTextEdit, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 from pdflex import open_pdf
 from pdflex.fields import (
-    ALIGN, CALC_OPS, CURRENCIES, DATE_PATTERNS, FONTS, FORMATS, MARKS, NUMBERED, NUMERIC, VISIBILITY, _TYPES, Field,
-    align_rects, build_pdf, clean_value,
+    ALIGN, BORDER_STYLES, BORDER_WIDTHS, CALC_OPS, CURRENCIES, DATE_PATTERNS, FONTS, FORMATS, MARKS, NUMBERED, NUMERIC,
+    VISIBILITY, _TYPES, Field, _formula_info, align_rects, build_pdf, clean_value,
     fill_sample, fmt_label, fmt_parts, from_view, load_fields, make_block, next_name, place_block, sample_value,
     save_with_fields, snap, suggest_save_path, to_view,
 )
 from pdflex import recovery, ui
 from pdflex.detect import row_lines, table_step
 from pdflex.fill import FillDialog
+from pdflex.formula import check as check_formula, ref_text, rename as rename_ref
 from pdflex.signature import SignatureDialog
 from pdflex.ui import (
     Toggle, add_recent, ask_text, info, load_json, message, recent_files, save_json, toast, warn,
@@ -92,6 +93,19 @@ class FieldItem(QGraphicsRectItem):
             pic = self._pic.scaled(r.size().toSize(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             painter.drawPixmap(QPointF(r.left(), r.top() + (r.height() - pic.height()) / 2), pic)
             fill.setAlpha(25 if sel else 0)
+        f = self.field
+        if f.kind != "image" and (f.fill_color or f.border_color or f.border_style or f.border_width != 1):
+            if f.fill_color:  # the look chosen in "Bordo" / "Sfondo", as the form will show it
+                painter.fillRect(r, QColor(f.fill_color))
+            if f.border_color != "none":
+                pen = QPen(QColor(f.border_color or "#999999"), f.border_width * self.tab.zoom)
+                pen.setStyle(Qt.DashLine if f.border_style == "dashed" else Qt.SolidLine)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                if f.border_style == "underline":
+                    painter.drawLine(r.bottomLeft(), r.bottomRight())
+                else:
+                    painter.drawRect(r)
         painter.setPen(QPen(line, 2.5 if sel else 1.3, Qt.DashLine if unseen else Qt.SolidLine)
                        if self.field.kind != "image" or sel else Qt.NoPen)
         painter.setBrush(fill)
@@ -185,6 +199,10 @@ class FieldItem(QGraphicsRectItem):
             parts.append(VISIBILITY[f.visibility].lower())
         if f.readonly:
             parts.append(tr("sola lettura"))
+        if f.formula:
+            parts.append(tr("formula"))
+        if f.show_if:
+            parts.append(tr("a condizione"))
         return " · ".join(parts)
 
     def _paint_info(self, p, r, color):
@@ -248,6 +266,12 @@ class FieldItem(QGraphicsRectItem):
         self.setCursor(RESIZE_CURSORS.get(self.edges_at(e.pos()), Qt.SizeAllCursor))
 
     def mousePressEvent(self, e):
+        box = self.tab._insert_into
+        if box is not None and e.button() == Qt.LeftButton:  # writing a formula: the click names this field
+            self.tab.insert_name(box, self.field.name)
+            self._inserted = True
+            e.accept()
+            return
         self.resizing = self.edges_at(e.pos()) if e.button() == Qt.LeftButton else ""
         super().mousePressEvent(e)  # selects it (alone, without Ctrl)
         if not self.resizing:
@@ -258,6 +282,8 @@ class FieldItem(QGraphicsRectItem):
             self._from = [(i, i.pos(), QRectF(i.rect())) for i in chosen]
 
     def mouseMoveEvent(self, e):
+        if getattr(self, "_inserted", False):
+            return
         if not self.resizing:
             super().mouseMoveEvent(e)
             return self.tab.snap_drag()
@@ -278,6 +304,9 @@ class FieldItem(QGraphicsRectItem):
             item.setRect(0, 0, x1 - x0, y1 - y0)
 
     def mouseReleaseEvent(self, e):
+        if getattr(self, "_inserted", False):
+            self._inserted = False
+            return
         resized = [i for i, _, _ in self._from] if self.resizing else None
         chosen = list(self.tab.selection)
         super().mouseReleaseEvent(e)  # a release that moved nothing drops the other selected fields
@@ -534,6 +563,7 @@ class EditorTab(QWidget):
         self._sel_timer = QTimer(self, singleShot=True, interval=0, timeout=self._selection_shown)
         self.scene.selectionChanged.connect(self._selection_changed)
         self.view = PageView(self.scene, self)
+        QApplication.instance().focusChanged.connect(self._focus_changed)
         self.view.drawn.connect(self._drawn)
         self.drop = DropZone(tr("Apri un PDF per aggiungere i campi"), glyph="form")
         self.drop.picked.connect(self.open)
@@ -669,7 +699,7 @@ class EditorTab(QWidget):
             self.p_align.addItem(label, key)
         self.p_color = button(tr("Nero"), None, tip=tr("Colore del testo"))
         self.p_color.setProperty("value", "")
-        self.p_color.clicked.connect(self._pick_color)
+        self.p_color.clicked.connect(lambda: self._pick_color(self.p_color, "color"))
         self.p_mark, self.p_visibility = QComboBox(), QComboBox()
         for key, label in MARKS.items():
             self.p_mark.addItem(f"{MARK_GLYPHS[key]}   {label}", key)
@@ -677,9 +707,39 @@ class EditorTab(QWidget):
             self.p_visibility.addItem(label, key)
         self.p_tooltip, self.p_maxlen = QLineEdit(), QLineEdit()
         self.p_readonly = Toggle(tr("Sola lettura"))
+        self.p_border = button(tr("Grigio"), None, tip=tr("Colore del bordo"))
+        self.p_fill = button(tr("Nessuno"), None, tip=tr("Colore dello sfondo"))
+        self.p_bwidth, self.p_bstyle = QComboBox(), QComboBox()
+        for key, label in BORDER_WIDTHS.items():
+            self.p_bwidth.addItem(label, key)
+        for key, label in BORDER_STYLES.items():
+            self.p_bstyle.addItem(label, key)
+        self._color_keys = {self.p_color: "color", self.p_border: "border_color", self.p_fill: "fill_color"}
+        for btn, key, extra in ((self.p_border, "border_color", ((tr("Grigio, come di solito"), ""), (tr("Nessuno"), "none"))),
+                                (self.p_fill, "fill_color", ((tr("Nessuno"), ""),))):
+            menu = QMenu(btn)
+            menu.addAction(tr("Scegli un colore..."), lambda b=btn, k=key: self._pick_color(b, k))
+            for label, value in extra:
+                menu.addAction(label, lambda b=btn, k=key, v=value: self.set_color_choice(b, k, v))
+            btn.setMenu(menu)
+        self.p_formula, self.p_show_if = QLineEdit(), QLineEdit()
+        self.p_formula_err, self.p_show_if_err = QLabel(objectName="Error"), QLabel(objectName="Error")
+        click = tr("Clic su un campo della pagina per inserirne il nome.")
+        for box, err, hint, tip in (
+                (self.p_formula, self.p_formula_err, tr("es. [Quantità] * [Prezzo]"),
+                 tr("Il campo mostra il risultato e non si può scrivere a mano.") + " " + click),
+                (self.p_show_if, self.p_show_if_err, tr("es. [Altro] = SÌ"),
+                 tr("Il campo compare solo quando la condizione è vera; quando non lo è si nasconde e si svuota.")
+                 + " " + click)):
+            box.setPlaceholderText(hint)
+            box.setToolTip(tip)
+            err.setWordWrap(True)
+            err.hide()
+        self._insert_into = None  # the formula box a click on a field writes into
         self.p_font.setToolTip(tr("Courier dà a ogni lettera la stessa larghezza: utile per codici e caselle"))
         for c in (self.p_fmt, self.p_font, self.p_pattern, self.p_align, self.p_kind, self.p_currency, self.p_before,
-                  self.p_calc_op, self.p_mark, self.p_visibility):  # narrow panel: combos follow
+                  self.p_calc_op, self.p_mark, self.p_visibility, self.p_bwidth,
+                  self.p_bstyle):  # narrow panel: combos follow
             c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             c.setMinimumContentsLength(4)
         self.p_calc.setPlaceholderText(tr("es. importo_1, importo_2"))
@@ -716,6 +776,18 @@ class EditorTab(QWidget):
         currency_row = pair(self.p_currency, self.p_before)
         range_row = pair(self.p_vmin, "–", self.p_vmax)
         calc_row = pair(self.p_calc_op, self.p_calc)
+        border_row = pair(self.p_border, self.p_bwidth)
+
+        def stack(box, err) -> QWidget:  # a box with its error under it
+            row = QWidget()
+            lines = QVBoxLayout(row)
+            lines.setContentsMargins(0, 0, 0, 0)
+            lines.setSpacing(2)
+            lines.addWidget(box)
+            lines.addWidget(err)
+            return row
+        formula_row = stack(self.p_formula, self.p_formula_err)
+        show_if_row = stack(self.p_show_if, self.p_show_if_err)
         form.addRow(tr("Nome del campo"), self.p_name)
         form.addRow(tr("Tipo"), self.p_kind)
         form.addRow(tr("Larghezza × altezza (pt)"), size_row)
@@ -729,15 +801,20 @@ class EditorTab(QWidget):
         form.addRow(tr("Come si scrive"), self.p_pattern)
         form.addRow(tr("Valore minimo – massimo"), range_row)
         form.addRow(tr("Calcolo dai campi (facoltativo)"), calc_row)
+        form.addRow(tr("Formula (facoltativa)"), formula_row)
         form.addRow(tr("Carattere"), self.p_font)
         form.addRow(tr("Dimensione testo (pt)"), self.p_size)
         form.addRow(tr("Colore del testo"), self.p_color)
         form.addRow(tr("Allineamento"), self.p_align)
+        form.addRow(tr("Bordo"), border_row)
+        form.addRow(tr("Stile del bordo"), self.p_bstyle)
+        form.addRow(tr("Sfondo"), self.p_fill)
         form.addRow(tr("Caselle, una lettera ciascuna"), self.p_comb)
         form.addRow(tr("Massimo caratteri"), self.p_maxlen)
         form.addRow(tr("Segno"), self.p_mark)
         form.addRow(tr("Suggerimento"), self.p_tooltip)
         form.addRow(tr("Visibilità"), self.p_visibility)
+        form.addRow(tr("Mostra solo se"), show_if_row)
         form.addRow(self.p_checked)
         form.addRow(self.p_readonly)
         form.addRow(self.p_required)
@@ -750,9 +827,13 @@ class EditorTab(QWidget):
             "calc": self.p_calc, "font": self.p_font, "size": self.p_size, "color": self.p_color,
             "align": self.p_align, "comb": self.p_comb, "maxlen": self.p_maxlen, "mark": self.p_mark,
             "tooltip": self.p_tooltip, "visibility": self.p_visibility, "checked": self.p_checked,
-            "readonly": self.p_readonly, "required": self.p_required}
+            "readonly": self.p_readonly, "required": self.p_required, "formula": self.p_formula,
+            "show_if": self.p_show_if, "border_color": self.p_border, "fill_color": self.p_fill,
+            "border_width": self.p_bwidth, "border_style": self.p_bstyle}
         self._row_of = {"width": size_row, "height": size_row, "currency": currency_row, "before": currency_row,
-                        "vmin": range_row, "vmax": range_row, "calc_op": calc_row, "calc": calc_row}
+                        "vmin": range_row, "vmax": range_row, "calc_op": calc_row, "calc": calc_row,
+                        "formula": formula_row, "show_if": show_if_row, "border_color": border_row,
+                        "border_width": border_row}
         self._shown: set[str] = set()
         for key, w in self._prop_widgets.items():
             if isinstance(w, QLineEdit):
@@ -1696,7 +1777,8 @@ class EditorTab(QWidget):
         if k == "image":
             return {"name", "width", "height"}
         base, _ = fmt_parts(f.fmt, k)
-        rows = {"name", "width", "height", "tooltip", "visibility"}
+        rows = {"name", "width", "height", "tooltip", "visibility", "show_if",
+                "border_color", "fill_color", "border_width", "border_style"}
         if k != "signature":
             rows |= {"required", "readonly"}
         if k in TEXT_KINDS:
@@ -1719,8 +1801,10 @@ class EditorTab(QWidget):
             rows |= {"currency", "before"}
         if base in DATE_PATTERNS:
             rows.add("pattern")
-        if k == "text" and base in ("number", "amount"):
+        if k == "text" and base in ("number", "amount") and not f.formula:  # a formula replaces the quick total
             rows |= {"calc", "calc_op"}
+        if (k == "text" and base in ("", *NUMERIC)) or f.foreign_calc:
+            rows.add("formula")
         if k == "text":
             rows.add("comb")
         if k in ("text", "multiline") and not f.comb:
@@ -1765,9 +1849,9 @@ class EditorTab(QWidget):
             w.setTristate(not same)
             w.setCheckState(Qt.PartiallyChecked if not same else Qt.Checked if v else Qt.Unchecked)
             w.setText(w.property("label") + ("   " + tr("(diversi)") if not same else ""))
-        elif w is self.p_color:
+        elif w in self._color_keys:
             if same:
-                self._show_color(v)
+                self._show_color(v, w)
             else:
                 w.setProperty("value", None)
                 w.setText(tr("(diversi)"))
@@ -1799,7 +1883,7 @@ class EditorTab(QWidget):
             w.setTristate(False)
             w.setText(w.property("label"))
             return w.isChecked()
-        if w is self.p_color:
+        if w in self._color_keys:
             value = w.property("value")
             return MIXED if value is None else value
         text = w.toPlainText() if isinstance(w, QPlainTextEdit) else w.text()
@@ -1813,12 +1897,17 @@ class EditorTab(QWidget):
             if i < len(args):
                 f.fmt = "|".join([base] + args[:i] + [str(value)] + args[i + 1:])
         if key == "name":
-            new = v.strip()
+            new, old = v.strip(), f.name
             if f.kind == "radio" and new != f.name:  # renaming the group renames all its buttons
                 for o in self.fields:
                     if o.kind == "radio" and o.name == f.name and o is not f:
                         o.name = new
             f.name = new
+            if new and new != old:  # totals, formulas and conditions follow the new name
+                for o in self.fields:
+                    o.calc = [new if n == old else n for n in o.calc]
+                    o.formula = rename_ref(o.formula, old, new) if o.formula else ""
+                    o.show_if = rename_ref(o.show_if, old, new) if o.show_if else ""
         elif key == "kind":
             if v == f.kind or f.kind not in TEXT_KINDS or v not in TEXT_KINDS:
                 return
@@ -1869,6 +1958,12 @@ class EditorTab(QWidget):
                 with_arg(0, v)
         elif key == "calc":
             f.calc = [n.strip() for n in v.split(",") if n.strip()]
+        elif key == "formula":
+            f.formula = v.strip()
+        elif key == "show_if":  # it belongs to the whole field: every button of a group, every copy
+            for o in self.fields:
+                if o.name == f.name:
+                    o.show_if = v.strip()
         elif key in ("vmin", "vmax"):
             t = v.strip().replace(",", ".")
             try:
@@ -1899,6 +1994,8 @@ class EditorTab(QWidget):
             f.maxlen = 0
         if base not in ("number", "amount"):
             f.vmin = f.vmax = ""
+        if not (f.kind == "text" and base in ("", *NUMERIC)):
+            f.formula = ""
 
     def _set_prop(self, key: str, refresh: bool = True) -> None:
         """A property box changed: write it to every field being edited, as one undo step."""
@@ -1962,24 +2059,74 @@ class EditorTab(QWidget):
             self.p_default.setPlaceholderText(sample_value(f.fmt if f.kind != "date" else f"{base}|{args[0]}", "")
                                               if base and base != "email" else tr("Una delle opzioni")
                                               if f.kind == "dropdown" else tr("Vuoto"))
+        self._show_errors(targets)
         self._loading = False
+
+    def _show_errors(self, targets: list[Field]):
+        """What is wrong in a formula or condition, under its box; a script from another program is shown
+        as such and cannot be edited here."""
+        kinds, choices = _formula_info(self.fields)
+        for key, err in (("formula", self.p_formula_err), ("show_if", self.p_show_if_err)):
+            texts = {getattr(f, key) for f in targets}
+            text = next(iter(texts))
+            msg = check_formula(text, kinds, choices) if key in self._shown and len(texts) == 1 and text else ""
+            err.setText(msg)
+            err.setVisible(bool(msg))
+        foreign = any(f.foreign_calc for f in targets)
+        self.p_formula.setEnabled(not foreign)
+        if foreign:
+            self.p_formula.setPlaceholderText(tr("Script da un altro programma"))
+
+    def insert_name(self, box: QLineEdit, name: str):
+        """[name] where the cursor is in a formula box, which keeps the focus."""
+        box.insert(ref_text(name))
+        box.setFocus()
+        self._insert_into = None
+
+    def _focus_changed(self, old, new):
+        """Leaving a formula box for the page, the next click on a field names it there."""
+        boxes = (self.p_formula, self.p_show_if)
+        if new is not None and (new is self.view or self.view.isAncestorOf(new)):
+            if old in boxes:
+                self._insert_into = old
+                QTimer.singleShot(0, self._end_insert)  # only for the click that moved the focus
+        elif new is not None and new not in boxes:
+            self._insert_into = None
+
+    def _end_insert(self):
+        self._insert_into = None
 
     def _kind_label(self, f: Field):
         self.kind_label.setText(tr("{0}, pagina {1}").format(KIND_LABELS[f.kind], f.page + 1))
         self.kind_label.setStyleSheet(f"color: white; background: {KIND_COLORS[f.kind]}; border-radius: 6px;"
                                       "padding: 4px 8px; font-weight: 600;")
 
-    def _show_color(self, color: str):
-        self.p_color.setProperty("value", color)
-        self.p_color.setText(color.upper() if color else tr("Nero"))
-        self.p_color.setIcon(dot(color or "#000000"))
+    def _show_color(self, color: str, btn=None):
+        """A colour button showing its value: text colour ("" black), border ("" grey, "none"), background."""
+        btn = btn or self.p_color
+        if btn is self.p_color:
+            text, ink = (color.upper() if color else tr("Nero")), color or "#000000"
+        elif btn is self.p_border:
+            text, ink = {"": (tr("Grigio"), "#999999"), "none": (tr("Nessuno"), "")}.get(color, (color.upper(), color))
+        else:
+            text, ink = (color.upper(), color) if color else (tr("Nessuno"), "")
+        btn.setProperty("value", color)
+        btn.setText(text)
+        btn.setIcon(dot(ink) if ink else QIcon())
 
-    def _pick_color(self):
+    def set_color_choice(self, btn, key: str, value: str):
+        self._show_color(value, btn)
+        self._set_prop(key)
+
+    def _pick_color(self, btn=None, key: str = "color"):
         from PySide6.QtWidgets import QColorDialog
-        chosen = QColorDialog.getColor(QColor(self.p_color.property("value") or "#000000"), self, tr("Colore del testo"))
+        btn = btn or self.p_color
+        current = btn.property("value") or ""
+        start = current if current.startswith("#") else {self.p_color: "#000000", self.p_border: "#999999"}.get(btn, "#ffffff")
+        chosen = QColorDialog.getColor(QColor(start), self, btn.toolTip())
         if chosen.isValid():
-            self._show_color("" if chosen.name() == "#000000" else chosen.name())
-            self._set_prop("color")
+            value = chosen.name()
+            self.set_color_choice(btn, key, "" if btn is self.p_color and value == "#000000" else value)
 
     def _update_rows(self, targets: list[Field]):
         """Show the rows every edited field has; refill the lists that depend on them."""

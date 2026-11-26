@@ -124,6 +124,7 @@ QPushButton#Recent:hover {{ background: {surface}; }}
 QLabel#H1 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 14pt; font-weight: 600; }}
 QLabel#H2 {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 11pt; font-weight: 600; }}
 QLabel#Muted {{ color: {muted}; }}
+QLabel#Error {{ color: {text_red}; }}
 QLabel#Key {{ background: {bg}; border: 1px solid {border_strong}; border-bottom-width: 2px; border-radius: 5px;
              padding: 1px 7px; font-size: 9pt; font-weight: 600; }}
 QLabel#KeysGroup {{ color: {accent}; font-weight: 600; }}
