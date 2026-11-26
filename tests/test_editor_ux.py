@@ -479,3 +479,11 @@ def test_multi_size_each_keeps_its_corner(tab):
     tab.p_w.setText("40")
     tab.p_w.editingFinished.emit()
     assert a.rect == pytest.approx((10, 10, 50, 30)) and b.rect == pytest.approx((200, 50, 240, 70))
+
+
+def test_editing_one_property_keeps_unshown_ones(tab):
+    f = tab.add_field("date", 0, (10, 10, 100, 30))
+    f.maxlen = 10  # a date from another program with a length limit: no box for it here
+    tab.select_field(f)
+    tab.p_required.setChecked(True)
+    assert f.required and f.maxlen == 10

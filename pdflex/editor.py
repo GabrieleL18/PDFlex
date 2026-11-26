@@ -1796,7 +1796,7 @@ class EditorTab(QWidget):
             f.calc = []
         if f.kind != "text":
             f.comb = 0
-        if f.comb or f.kind not in ("text", "multiline"):
+        if f.comb or f.kind not in ("text", "multiline", "date"):
             f.maxlen = 0
         if base not in NUMERIC:
             f.vmin = f.vmax = ""
