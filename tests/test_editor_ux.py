@@ -1,3 +1,6 @@
+import copy
+import dataclasses
+
 import pytest
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtTest import QTest
@@ -365,3 +368,114 @@ def test_pasted_array_keeps_its_order_and_its_rows(tab):
     tab.select_many(row[:2])
     tab.copy_selected()
     assert sorted(f.name for f in tab.paste()) == ["Cognome[2]", "Nome[2]"]  # still one row
+
+
+# one field: kind, size and the new properties
+def test_kind_combo_switches_text_multiline_date(tab):
+    f = tab.add_field("text", 0, (10, 10, 100, 30))
+    tab.select_field(f)
+    tab.p_kind.setCurrentIndex(tab.p_kind.findData("date"))
+    assert f.kind == "date" and f.fmt.startswith("date|")
+    tab.p_kind.setCurrentIndex(tab.p_kind.findData("multiline"))
+    assert f.kind == "multiline" and f.fmt == ""
+    c = tab.add_field("checkbox", 0, (10, 40, 30, 60))
+    tab.select_field(c)
+    assert not tab.form.isRowVisible(tab.p_kind)
+
+
+def test_size_rows_keep_top_left(tab):
+    f = tab.add_field("text", 0, (10, 10, 100, 30))
+    tab.select_field(f)
+    assert tab.p_w.text() == "90" and tab.p_h.text() == "20"
+    tab.p_w.setText("50")
+    tab.p_w.editingFinished.emit()
+    tab.p_h.setText("15")
+    tab.p_h.editingFinished.emit()
+    assert f.rect == pytest.approx((10, 10, 60, 25))
+
+
+def test_new_rows_write_field(tab):
+    c = tab.add_field("checkbox", 0, (10, 40, 30, 60))
+    tab.select_field(c)
+    tab.p_mark.setCurrentIndex(tab.p_mark.findData("H"))
+    assert c.mark == "H"
+    t = tab.add_field("text", 0, (10, 80, 100, 100))
+    tab.select_field(t)
+    tab.p_fmt.setCurrentIndex(tab.p_fmt.findData("amount"))
+    assert tab.form.isRowVisible(tab.p_currency.parentWidget())
+    tab.p_currency.setCurrentIndex(tab.p_currency.findData("$"))
+    tab.p_before.setCurrentIndex(tab.p_before.findData(0))
+    tab.p_vmin.setText("1,5")
+    tab.p_vmin.editingFinished.emit()
+    assert t.fmt == "amount|2|1|$|0" and t.vmin == "1.5"
+    tab.p_dec.setCurrentIndex(tab.p_dec.findData(0))
+    assert t.fmt == "amount|0|1|$|0"  # the currency stays when the decimals change
+    tab.p_tooltip.setText("Totale in dollari")
+    tab.p_tooltip.editingFinished.emit()
+    tab.p_readonly.setChecked(True)
+    tab.p_visibility.setCurrentIndex(tab.p_visibility.findData("print"))
+    tab.p_maxlen.setText("8")
+    tab.p_maxlen.editingFinished.emit()
+    tab.p_calc_op.setCurrentIndex(tab.p_calc_op.findData("AVG"))
+    assert (t.tooltip, t.readonly, t.visibility, t.maxlen, t.calc_op) == ("Totale in dollari", True, "print", 8, "AVG")
+
+
+# many fields at once
+def test_multi_edit_touches_only_changed_prop(tab):
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    a.font_size, a.fmt = 9, "number|2|1"
+    b = tab.add_field("checkbox", 0, (10, 40, 30, 60))
+    b.mark = "8"
+    tab.select_many([a, b])
+    QTest.qWait(50)
+    assert tab.props.isVisible() and not tab.form.isRowVisible(tab.p_name)
+    assert not tab.form.isRowVisible(tab.p_fmt)  # not common to text + checkbox
+    before_a, before_b = copy.deepcopy(a), copy.deepcopy(b)
+    tab.p_required.setChecked(True)
+    assert a.required and b.required
+    assert dataclasses.replace(a, required=False) == before_a and dataclasses.replace(b, required=False) == before_b
+    tab.undo()  # one undo step for all of them
+    assert not tab.fields[0].required and not tab.fields[1].required
+
+
+def test_multi_mixed_values_show_diversi(tab):
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    a.font_size = 9
+    b = tab.add_field("text", 0, (10, 40, 100, 60))
+    b.font_size = 12
+    b.required = True
+    tab.select_many([a, b])
+    QTest.qWait(50)
+    assert tab.p_size.text() == "" and tab.p_size.placeholderText() == "(diversi)"
+    assert tab.p_required.checkState() == Qt.PartiallyChecked
+    tab._props_edited()  # nothing typed: the mixed values stay as they are
+    assert (a.font_size, b.font_size, a.required, b.required) == (9, 12, False, True)
+    tab.p_size.setText("10")
+    tab.p_size.editingFinished.emit()
+    assert a.font_size == b.font_size == 10
+
+
+def test_multi_kind_only_between_similar(tab):
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    b = tab.add_field("date", 0, (10, 40, 100, 60))
+    tab.select_many([a, b])
+    QTest.qWait(50)
+    assert tab.form.isRowVisible(tab.p_kind)
+    c = tab.add_field("checkbox", 0, (10, 70, 30, 90))
+    tab.select_many([a, c])
+    QTest.qWait(50)
+    assert not tab.form.isRowVisible(tab.p_kind)
+    tab.select_many([a, b])
+    QTest.qWait(50)
+    tab.p_kind.setCurrentIndex(tab.p_kind.findData("multiline"))
+    assert a.kind == b.kind == "multiline"
+
+
+def test_multi_size_each_keeps_its_corner(tab):
+    a = tab.add_field("text", 0, (10, 10, 100, 30))
+    b = tab.add_field("text", 0, (200, 50, 260, 70))
+    tab.select_many([a, b])
+    QTest.qWait(50)
+    tab.p_w.setText("40")
+    tab.p_w.editingFinished.emit()
+    assert a.rect == pytest.approx((10, 10, 50, 30)) and b.rect == pytest.approx((200, 50, 240, 70))

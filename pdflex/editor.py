@@ -11,7 +11,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsPixmapItem, QGridLayout,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QPlainTextEdit, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton,
@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 
 from pdflex import open_pdf
 from pdflex.fields import (
-    ALIGN, DATE_PATTERNS, FONTS, FORMATS, NUMBERED, NUMERIC, _TYPES, Field, align_rects, build_pdf, clean_value,
+    ALIGN, CALC_OPS, CURRENCIES, DATE_PATTERNS, FONTS, FORMATS, MARKS, NUMBERED, NUMERIC, VISIBILITY, _TYPES, Field,
+    align_rects, build_pdf, clean_value,
     fill_sample, fmt_label, fmt_parts, from_view, load_fields, make_block, next_name, place_block, sample_value,
     save_with_fields, snap, suggest_save_path, to_view,
 )
@@ -39,6 +40,9 @@ KIND_LABELS = {"text": tr("Testo"), "multiline": tr("Testo lungo"), "checkbox": 
 KIND_COLORS = {"text": "#2F6FDB", "multiline": "#0E8FA3", "checkbox": "#2E9E5B", "radio": "#7A4FD1",
                "dropdown": "#D9730D", "date": "#8A5A3C", "signature": "#C2357A", "image": "#1D2633",
                "button": "#4A5568"}
+TEXT_KINDS = ("text", "multiline", "date")  # a field can change kind only among these
+MARK_GLYPHS = {"": "✓", "8": "✗", "l": "●", "n": "■", "u": "◆", "H": "★"}  # what MARKS look like on screen
+MIXED = "\x00diversi"  # a combo's item when the selected fields have different values
 THUMB_W = 110  # px, width of a page thumbnail
 HANDLE = 6  # px: the resize grips on the edges and corners, and how near an edge a press resizes
 PAGE_MARGIN = 24
@@ -604,6 +608,9 @@ class EditorTab(QWidget):
         self.p_checked, self.p_size = Toggle(tr("Selezionata all'apertura")), QLineEdit()
         self.p_options, self.p_value = QPlainTextEdit(), QLineEdit()
         self.p_fmt, self.p_calc, self.p_font = QComboBox(), QLineEdit(), QComboBox()
+        self.p_kind, self.p_w, self.p_h = QComboBox(), QLineEdit(), QLineEdit()
+        for k in TEXT_KINDS:
+            self.p_kind.addItem(dot(KIND_COLORS[k]), KIND_LABELS[k], k)
         for key, label in FORMATS.items():
             self.p_fmt.addItem(label, key)
         for key, label in FONTS.items():
@@ -612,19 +619,36 @@ class EditorTab(QWidget):
         for n in range(5):
             self.p_dec.addItem(str(n), n)
         self.p_thousands = Toggle(tr("Separatore delle migliaia (1.234)"))
+        self.p_currency, self.p_before = QComboBox(), QComboBox()
+        for c in CURRENCIES:
+            self.p_currency.addItem(c or tr("Nessuna"), c)
+        self.p_before.addItem(tr("Prima del numero"), 1)
+        self.p_before.addItem(tr("Dopo il numero"), 0)
         self.p_pattern = QComboBox()  # date or time layout, filled for the format in use
+        self.p_vmin, self.p_vmax = QLineEdit(), QLineEdit()
+        self.p_calc_op = QComboBox()
+        for key, label in CALC_OPS.items():
+            self.p_calc_op.addItem(label, key)
         self.p_align = QComboBox()
         for key, label in ALIGN.items():
             self.p_align.addItem(label, key)
         self.p_color = button(tr("Nero"), None, tip=tr("Colore del testo"))
         self.p_color.setProperty("value", "")
         self.p_color.clicked.connect(self._pick_color)
+        self.p_mark, self.p_visibility = QComboBox(), QComboBox()
+        for key, label in MARKS.items():
+            self.p_mark.addItem(f"{MARK_GLYPHS[key]}   {label}", key)
+        for key, label in VISIBILITY.items():
+            self.p_visibility.addItem(label, key)
+        self.p_tooltip, self.p_maxlen = QLineEdit(), QLineEdit()
+        self.p_readonly = Toggle(tr("Sola lettura"))
         self.p_font.setToolTip(tr("Courier dà a ogni lettera la stessa larghezza: utile per codici e caselle"))
-        for c in (self.p_fmt, self.p_font, self.p_pattern, self.p_align):  # narrow panel: combos follow
+        for c in (self.p_fmt, self.p_font, self.p_pattern, self.p_align, self.p_kind, self.p_currency, self.p_before,
+                  self.p_calc_op, self.p_mark, self.p_visibility):  # narrow panel: combos follow
             c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            c.setMinimumContentsLength(6)
+            c.setMinimumContentsLength(4)
         self.p_calc.setPlaceholderText(tr("es. importo_1, importo_2"))
-        self.p_calc.setToolTip(tr("Il campo mostra la somma di questi campi e non si può scrivere a mano"))
+        self.p_calc.setToolTip(tr("Il campo mostra il risultato di questi campi e non si può scrivere a mano"))
         self.p_options.setPlaceholderText(tr("Roma\nMilano\nNapoli"))
         self.p_default.setPlaceholderText(tr("Vuoto"))
         self.p_size.setPlaceholderText(tr("Automatica"))
@@ -633,30 +657,76 @@ class EditorTab(QWidget):
         self.p_comb.setPlaceholderText("No")
         self.p_comb.setValidator(QIntValidator(0, 99, self.p_comb))
         self.p_comb.setToolTip(tr("Divide il campo in caselle, una lettera ciascuna (es. 16 per il codice fiscale)"))
+        self.p_maxlen.setValidator(QIntValidator(0, 9999, self.p_maxlen))
+        for w in (self.p_tooltip, self.p_maxlen, self.p_vmin, self.p_vmax):
+            w.setPlaceholderText(tr("Nessuno"))
+        self.p_tooltip.setToolTip(tr("Il testo che compare passando con il mouse sul campo"))
+        self.p_vmin.setToolTip(tr("Un numero più piccolo non viene accettato"))
+        self.p_vmax.setToolTip(tr("Un numero più grande non viene accettato"))
+
+        def pair(*parts) -> QWidget:  # two boxes on one row
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(6)
+            for part in parts:
+                if isinstance(part, str):
+                    line.addWidget(QLabel(part, objectName="Muted"))
+                else:
+                    line.addWidget(part, 1)
+            return row
+        size_row = pair(self.p_w, "×", self.p_h)
+        currency_row = pair(self.p_currency, self.p_before)
+        range_row = pair(self.p_vmin, "–", self.p_vmax)
+        calc_row = pair(self.p_calc_op, self.p_calc)
         form.addRow(tr("Nome del campo"), self.p_name)
+        form.addRow(tr("Tipo"), self.p_kind)
+        form.addRow(tr("Larghezza × altezza (pt)"), size_row)
         form.addRow(tr("Valore iniziale"), self.p_default)
         form.addRow(tr("Opzioni, una per riga"), self.p_options)
         form.addRow(tr("Valore di questa scelta"), self.p_value)
         form.addRow(tr("Formato"), self.p_fmt)
         form.addRow(tr("Decimali"), self.p_dec)
         form.addRow(self.p_thousands)
+        form.addRow(tr("Valuta"), currency_row)
         form.addRow(tr("Come si scrive"), self.p_pattern)
-        form.addRow(tr("Somma dei campi (facoltativo)"), self.p_calc)
+        form.addRow(tr("Valore minimo – massimo"), range_row)
+        form.addRow(tr("Calcolo dai campi (facoltativo)"), calc_row)
         form.addRow(tr("Carattere"), self.p_font)
         form.addRow(tr("Dimensione testo (pt)"), self.p_size)
         form.addRow(tr("Colore del testo"), self.p_color)
         form.addRow(tr("Allineamento"), self.p_align)
         form.addRow(tr("Caselle, una lettera ciascuna"), self.p_comb)
+        form.addRow(tr("Massimo caratteri"), self.p_maxlen)
+        form.addRow(tr("Segno"), self.p_mark)
+        form.addRow(tr("Suggerimento"), self.p_tooltip)
+        form.addRow(tr("Visibilità"), self.p_visibility)
         form.addRow(self.p_checked)
+        form.addRow(self.p_readonly)
         form.addRow(self.p_required)
-        for w in (self.p_name, self.p_default, self.p_value, self.p_size, self.p_calc, self.p_comb):
-            w.editingFinished.connect(self._props_edited)
-        for c in (self.p_fmt, self.p_font, self.p_dec, self.p_pattern, self.p_align):
-            c.currentIndexChanged.connect(self._props_edited)
-        self.p_thousands.toggled.connect(self._props_edited)
-        self.p_required.toggled.connect(self._props_edited)
-        self.p_checked.toggled.connect(self._props_edited)
-        self.p_options.textChanged.connect(self._props_edited)
+        # each property: its box, and the form row that holds it (some rows hold two)
+        self._prop_widgets = {
+            "name": self.p_name, "kind": self.p_kind, "width": self.p_w, "height": self.p_h,
+            "default": self.p_default, "options": self.p_options, "value": self.p_value, "fmt": self.p_fmt,
+            "dec": self.p_dec, "thousands": self.p_thousands, "currency": self.p_currency, "before": self.p_before,
+            "pattern": self.p_pattern, "vmin": self.p_vmin, "vmax": self.p_vmax, "calc_op": self.p_calc_op,
+            "calc": self.p_calc, "font": self.p_font, "size": self.p_size, "color": self.p_color,
+            "align": self.p_align, "comb": self.p_comb, "maxlen": self.p_maxlen, "mark": self.p_mark,
+            "tooltip": self.p_tooltip, "visibility": self.p_visibility, "checked": self.p_checked,
+            "readonly": self.p_readonly, "required": self.p_required}
+        self._row_of = {"width": size_row, "height": size_row, "currency": currency_row, "before": currency_row,
+                        "vmin": range_row, "vmax": range_row, "calc_op": calc_row, "calc": calc_row}
+        self._shown: set[str] = set()
+        for key, w in self._prop_widgets.items():
+            if isinstance(w, QLineEdit):
+                w.setProperty("ph", w.placeholderText())
+                w.editingFinished.connect(lambda k=key: self._set_prop(k))
+            elif isinstance(w, QComboBox):
+                w.currentIndexChanged.connect(lambda _=0, k=key: self._set_prop(k))
+            elif isinstance(w, QCheckBox):
+                w.setProperty("label", w.text())
+                w.toggled.connect(lambda _=False, k=key: self._set_prop(k))
+        self.p_options.textChanged.connect(lambda: self._set_prop("options"))
         pr.addWidget(self.props)
         actions = QHBoxLayout()
         self.b_dup = button(tr("Duplica"), "copy")
@@ -696,7 +766,7 @@ class EditorTab(QWidget):
         b_del_all = button(tr("Elimina selezionati"), "trash", "Danger")
         b_del_all.clicked.connect(self.delete_selected)
         grid.addWidget(b_del_all, 5, 0, 1, 2)
-        pr.addWidget(self.multi_box)
+        pr.insertWidget(pr.indexOf(self.props), self.multi_box)  # above the properties they share
         pr.addStretch()
 
         props_scroll = QScrollArea(objectName="PanelRight")  # long forms on small screens: scroll, never cut
@@ -1520,41 +1590,274 @@ class EditorTab(QWidget):
             item.setSelected(item.data(Qt.UserRole) in chosen_ids)
         self.field_list.blockSignals(False)
 
+    # ---- properties: one or many fields
+    def _targets(self) -> list[Field]:
+        """The fields the properties panel edits: the whole selection, or the one selected field."""
+        if len(self.selection) > 1:
+            return list(self.selection)
+        return [self.selected] if self.selected else []
+
+    @staticmethod
+    def _rows_for(f: Field) -> set[str]:
+        """The properties a field of this kind and format shows."""
+        k = f.kind
+        if k == "button":  # made by another program: only shown, moved or deleted
+            return {"width", "height"}
+        if k == "image":
+            return {"name", "width", "height"}
+        base, _ = fmt_parts(f.fmt, k)
+        rows = {"name", "width", "height", "tooltip", "visibility"}
+        if k != "signature":
+            rows |= {"required", "readonly"}
+        if k in TEXT_KINDS:
+            rows |= {"kind", "fmt"}
+        if k in TEXT_KINDS or k == "dropdown":
+            rows |= {"default", "font", "size", "color", "align"}
+        if k == "dropdown":
+            rows.add("options")
+        if k == "radio":
+            rows.add("value")
+        if k in ("checkbox", "radio"):
+            rows.add("checked")
+        if k == "checkbox":
+            rows.add("mark")
+        if k != "multiline" and base in NUMERIC:
+            rows |= {"dec", "thousands", "vmin", "vmax"}
+        if base == "amount":
+            rows |= {"currency", "before"}
+        if base in DATE_PATTERNS:
+            rows.add("pattern")
+        if k == "text" and base in ("number", "amount"):
+            rows |= {"calc", "calc_op"}
+        if k == "text":
+            rows.add("comb")
+        if k in ("text", "multiline") and not f.comb:
+            rows.add("maxlen")
+        return rows
+
+    def _get(self, f: Field, key: str):
+        """A field's value for one property, as its box shows it."""
+        base, args = fmt_parts(f.fmt, f.kind)
+        if key in ("width", "height"):
+            x0, y0, x1, y1 = to_view(self.doc[f.page], f.rect)
+            return f"{round(x1 - x0 if key == 'width' else y1 - y0, 1):g}"
+        if key in ("dec", "thousands", "currency", "before", "pattern"):
+            i = {"dec": 0, "thousands": 1, "currency": 2, "before": 3, "pattern": 0}[key]
+            if i >= len(args):
+                return None
+            return {"dec": int, "thousands": lambda a: a != "0", "before": int}.get(key, str)(args[i])
+        special = {"fmt": base, "options": "\n".join(f.options), "calc": ", ".join(f.calc),
+                   "size": str(int(f.font_size)) if f.font_size else "", "comb": str(f.comb) if f.comb else "",
+                   "maxlen": str(f.maxlen) if f.maxlen else "", "checked": f.default == "1"}
+        return special[key] if key in special else getattr(f, key)
+
+    def _show_value(self, key: str, values: list) -> None:
+        """One property in its box; "(diversi)" when the fields disagree."""
+        w = self._prop_widgets[key]
+        same = all(v == values[0] for v in values)
+        v = values[0]
+        w.setProperty("mixed", not same)
+        if isinstance(w, QComboBox):
+            i = w.findData(MIXED)
+            if i >= 0:
+                w.removeItem(i)
+            if same:
+                w.setCurrentIndex(max(w.findData(v), 0))
+            else:
+                w.insertItem(0, tr("(diversi)"), MIXED)
+                w.setCurrentIndex(0)
+        elif isinstance(w, QCheckBox):
+            w.setTristate(not same)
+            w.setCheckState(Qt.PartiallyChecked if not same else Qt.Checked if v else Qt.Unchecked)
+            w.setText(w.property("label") + ("   " + tr("(diversi)") if not same else ""))
+        elif w is self.p_color:
+            if same:
+                self._show_color(v)
+            else:
+                w.setProperty("value", None)
+                w.setText(tr("(diversi)"))
+                w.setIcon(QIcon())
+        elif w.hasFocus():  # being typed: leave it as it is
+            return
+        elif isinstance(w, QPlainTextEdit):
+            if w.toPlainText() != (v if same else ""):
+                w.setPlainText(v if same else "")
+        else:
+            w.setText(v if same else "")
+            w.setPlaceholderText(w.property("ph") if same else tr("(diversi)"))
+
+    def _read(self, key: str):
+        """The value in a property's box; MIXED when it still says "(diversi)" (nothing to write)."""
+        w = self._prop_widgets[key]
+        if isinstance(w, QComboBox):
+            value = w.currentData()
+            if value != MIXED and w.findData(MIXED) >= 0:
+                w.blockSignals(True)
+                w.removeItem(w.findData(MIXED))
+                w.blockSignals(False)
+            return value
+        if isinstance(w, QCheckBox):
+            if w.checkState() == Qt.PartiallyChecked:
+                return MIXED
+            w.setTristate(False)
+            w.setText(w.property("label"))
+            return w.isChecked()
+        if w is self.p_color:
+            value = w.property("value")
+            return MIXED if value is None else value
+        text = w.toPlainText() if isinstance(w, QPlainTextEdit) else w.text()
+        return MIXED if w.property("mixed") and not text else text
+
+    def _apply(self, f: Field, key: str, v) -> None:
+        """Write one property into one field, with the rules that tie properties together."""
+        base, args = fmt_parts(f.fmt, f.kind)
+
+        def with_arg(i, value):
+            if i < len(args):
+                f.fmt = "|".join([base] + args[:i] + [str(value)] + args[i + 1:])
+        if key == "name":
+            new = v.strip()
+            if f.kind == "radio" and new != f.name:  # renaming the group renames all its buttons
+                for o in self.fields:
+                    if o.kind == "radio" and o.name == f.name and o is not f:
+                        o.name = new
+            f.name = new
+        elif key == "kind":
+            if v == f.kind or f.kind not in TEXT_KINDS or v not in TEXT_KINDS:
+                return
+            if v == "date":
+                f.fmt = f.fmt if base in DATE_PATTERNS else "date|dd/mm/yyyy"
+            elif f.kind == "date" or (v == "multiline" and base not in ("", "email")):
+                f.fmt = ""
+            f.kind = v
+        elif key in ("width", "height"):
+            try:
+                size = max(float(str(v).replace(",", ".")), 4)
+            except ValueError:
+                return
+            page = self.doc[f.page]
+            x0, y0, x1, y1 = to_view(page, f.rect)
+            if abs((x1 - x0 if key == "width" else y1 - y0) - size) < 0.05:
+                return
+            x1, y1 = (x0 + size, y1) if key == "width" else (x1, y0 + size)
+            f.rect = from_view(page, (x0, y0, x1, y1))
+        elif key == "default":
+            f.default = v
+            if f.kind == "dropdown":  # "milano" picks the option "Milano"
+                f.default = next((o for o in f.options if o.casefold() == v.strip().casefold()), v)
+        elif key == "options":
+            f.options = [o.strip() for o in v.splitlines() if o.strip()]
+        elif key == "value":
+            f.value = clean_value(v)
+        elif key == "fmt":
+            if v == base:
+                return
+            if v in NUMERIC:
+                new = fmt_parts(v)[1]
+                if base in NUMERIC:  # decimals and thousands carry over
+                    new[:2] = args[:2]
+                f.fmt = "|".join([v] + new)
+            elif v in DATE_PATTERNS:
+                f.fmt = f"{v}|{next(iter(DATE_PATTERNS[v]))}"
+            else:
+                f.fmt = v
+            if f.kind != "multiline":  # a date or time is a "Data" field, the rest a "Testo" field
+                f.kind = "date" if v in DATE_PATTERNS else "text"
+        elif key in ("dec", "currency", "before"):
+            with_arg({"dec": 0, "currency": 2, "before": 3}[key], v)
+        elif key == "thousands":
+            with_arg(1, 1 if v else 0)
+        elif key == "pattern":
+            if v in DATE_PATTERNS.get(base, {}):
+                with_arg(0, v)
+        elif key == "calc":
+            f.calc = [n.strip() for n in v.split(",") if n.strip()]
+        elif key in ("vmin", "vmax"):
+            t = v.strip().replace(",", ".")
+            try:
+                t = f"{float(t):g}" if t else ""
+            except ValueError:
+                return
+            setattr(f, key, t)
+        elif key == "size":
+            f.font_size = float(v or 0)
+        elif key in ("comb", "maxlen"):
+            setattr(f, key, int(v or 0))
+        elif key == "checked":
+            f.default = "1" if v else ""
+            if f.default and f.kind == "radio":  # only one button per group starts selected
+                for o in self.fields:
+                    if o.kind == "radio" and o.name == f.name and o is not f:
+                        o.default = ""
+        else:  # calc_op, font, color, align, mark, tooltip, visibility, readonly, required
+            setattr(f, key, v)
+        base = fmt_parts(f.fmt, f.kind)[0]
+        if not (f.kind == "text" and base in ("number", "amount")):
+            f.calc = []
+        if f.kind != "text":
+            f.comb = 0
+        if f.comb or f.kind not in ("text", "multiline"):
+            f.maxlen = 0
+        if base not in NUMERIC:
+            f.vmin = f.vmax = ""
+
+    def _set_prop(self, key: str, refresh: bool = True) -> None:
+        """A property box changed: write it to every field being edited, as one undo step."""
+        if self._loading or key not in self._shown:
+            return
+        targets = self._targets()
+        v = self._read(key)
+        if not targets or v == MIXED:
+            return
+        snapshot = copy.deepcopy(self.fields)
+        for f in targets:
+            self._apply(f, key, v)
+        if snapshot != self.fields:
+            self._push(snapshot)
+            self.b_undo.setEnabled(True)
+            self.dirty = True
+            self.file_label.setText(Path(self.path).name + "  (modificato)")
+            self._fill_list()
+            if key in ("width", "height"):
+                self._sync_items()
+        if refresh:
+            self._show_props()  # rows may come or go (a format with decimals...), values tidied
+            self.scene.update()
+
+    def _props_edited(self, *_):
+        """What is typed but not confirmed yet (Ctrl+S keeps the focus in the box) counts too."""
+        for key in list(self._shown):
+            self._set_prop(key, refresh=False)  # every box read before any is shown again
+        self._show_props()
+        self.scene.update()
+
     def _show_props(self):
-        many = len(self.selection) > 1
-        f = None if many else self.selected
+        targets = self._targets()
+        many = len(targets) > 1
         self.multi_box.setVisible(many)
-        self.props.setVisible(f is not None)
-        self.actions_box.setVisible(f is not None)
+        self.props.setVisible(bool(targets))
+        self.actions_box.setVisible(len(targets) == 1)
         if many:
-            self.kind_label.setText(tr("{0} campi selezionati").format(len(self.selection)))
+            self.kind_label.setText(tr("{0} campi selezionati").format(len(targets)))
             self.kind_label.setStyleSheet(f"color: white; background: {ACCENT}; border-radius: 6px;"
                                           "padding: 4px 8px; font-weight: 600;")
-            return
-        if not f:
+        elif not targets:
             self.kind_label.setText(tr("Seleziona un campo sulla pagina per modificarlo."))
             self.kind_label.setStyleSheet("")
+            self._shown = set()
             return
-        self._kind_label(f)
+        else:
+            self._kind_label(targets[0])
         self._loading = True
-        self.p_name.setText(f.name)
-        self.p_required.setChecked(f.required)
-        self.p_default.setText(f.default)
-        self.p_checked.setChecked(f.default == "1")
-        self.p_size.setText(str(int(f.font_size)) if f.font_size else "")
-        self.p_options.setPlainText("\n".join(f.options))
-        self.p_value.setText(f.value)
-        base, args = fmt_parts(f.fmt, f.kind)
-        self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(base), 0))
-        if base in NUMERIC:
-            self.p_dec.setCurrentIndex(int(args[0]))
-            self.p_thousands.setChecked(args[1] != "0")
-        self.p_font.setCurrentIndex(max(self.p_font.findData(f.font), 0))
-        self.p_align.setCurrentIndex(max(self.p_align.findData(f.align), 0))
-        self._show_color(f.color)
-        self.p_calc.setText(", ".join(f.calc))
-        self.p_comb.setText(str(f.comb) if f.comb else "")
-        self._update_rows(f)
+        self._update_rows(targets)
+        for key in self._shown:
+            self._show_value(key, [self._get(f, key) for f in targets])
+        if not many:
+            f = targets[0]
+            base, args = fmt_parts(f.fmt, f.kind)
+            self.p_default.setPlaceholderText(sample_value(f.fmt if f.kind != "date" else f"{base}|{args[0]}", "")
+                                              if base and base != "email" else tr("Una delle opzioni")
+                                              if f.kind == "dropdown" else tr("Vuoto"))
         self._loading = False
 
     def _kind_label(self, f: Field):
@@ -1572,120 +1875,41 @@ class EditorTab(QWidget):
         chosen = QColorDialog.getColor(QColor(self.p_color.property("value") or "#000000"), self, tr("Colore del testo"))
         if chosen.isValid():
             self._show_color("" if chosen.name() == "#000000" else chosen.name())
-            self._props_edited()
+            self._set_prop("color")
 
-    def _update_rows(self, f: Field):
-        k = f.kind
-        text_like = k in ("text", "multiline", "date", "dropdown")
-        for w in (self.p_color, self.p_align):
-            self.form.setRowVisible(w, text_like)
-        self.form.setRowVisible(self.p_name, k != "button")
-        base, args = fmt_parts(f.fmt, k)
-        # the formats this kind of field can take: a long text is no date
-        allowed = [b for b in FORMATS if k != "multiline" or b in ("", "email")]
-        if [self.p_fmt.itemData(i) for i in range(self.p_fmt.count())] != allowed:
+    def _update_rows(self, targets: list[Field]):
+        """Show the rows every edited field has; refill the lists that depend on them."""
+        many = len(targets) > 1
+        shown = set.intersection(*(self._rows_for(f) for f in targets))
+        bases = {fmt_parts(f.fmt, f.kind)[0] for f in targets}
+        if many:
+            shown -= {"name", "value"}  # names stay different; a choice's value belongs to that button
+            if len(bases) > 1:
+                shown.discard("pattern")  # dates and times have different layouts
+        self._shown = shown
+        rows = {}
+        for key, w in self._prop_widgets.items():
+            row = self._row_of.get(key, w)
+            rows[row] = rows.get(row, False) or key in shown
+        for row, visible in rows.items():
+            self.form.setRowVisible(row, visible)
+        # the formats these kinds of field can take: a long text is no date
+        allowed = [b for b in FORMATS if all(f.kind != "multiline" for f in targets) or b in ("", "email")]
+        if [self.p_fmt.itemData(i) for i in range(self.p_fmt.count()) if self.p_fmt.itemData(i) != MIXED] != allowed:
             self.p_fmt.blockSignals(True)
             self.p_fmt.clear()
             for b in allowed:
                 self.p_fmt.addItem(FORMATS[b], b)
-            self.p_fmt.setCurrentIndex(max(self.p_fmt.findData(base), 0))
             self.p_fmt.blockSignals(False)
-        self.form.setRowVisible(self.p_dec, k != "multiline" and base in NUMERIC)
-        self.form.setRowVisible(self.p_thousands, k != "multiline" and base in NUMERIC)
-        self.form.setRowVisible(self.p_pattern, base in DATE_PATTERNS)
-        if base in DATE_PATTERNS:
-            self.p_pattern.blockSignals(True)
-            self.p_pattern.clear()
-            for pattern, label in DATE_PATTERNS[base].items():
-                self.p_pattern.addItem(label, pattern)
-            self.p_pattern.setCurrentIndex(max(self.p_pattern.findData(args[0]), 0))
-            self.p_pattern.blockSignals(False)
+        if "pattern" in shown:
+            base = next(iter(bases))
+            if [self.p_pattern.itemData(i) for i in range(self.p_pattern.count())] != list(DATE_PATTERNS[base]):
+                self.p_pattern.blockSignals(True)
+                self.p_pattern.clear()
+                for pattern, label in DATE_PATTERNS[base].items():
+                    self.p_pattern.addItem(label, pattern)
+                self.p_pattern.blockSignals(False)
+        k = targets[0].kind
+        self.form.labelForField(self.p_name).setText(tr("Nome del gruppo") if k == "radio" else
+                                                     tr("Nome") if k == "image" else tr("Nome del campo"))
         self.b_dup.setVisible(k != "button")
-        if k == "button":  # made by another program: only shown, moved or deleted
-            for w in (self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required, self.p_fmt,
-                      self.p_calc, self.p_comb, self.p_font, self.p_dec, self.p_thousands, self.p_pattern,
-                      self.p_default):
-                self.form.setRowVisible(w, False)
-            return
-        if k == "image":
-            for w in (self.p_default, self.p_checked, self.p_size, self.p_options, self.p_value, self.p_required,
-                      self.p_fmt, self.p_calc, self.p_comb, self.p_font, self.p_dec, self.p_thousands,
-                      self.p_pattern):
-                self.form.setRowVisible(w, False)
-            self.form.labelForField(self.p_name).setText(tr("Nome"))
-            return
-        self.form.setRowVisible(self.p_default, k in ("text", "multiline", "date", "dropdown"))
-        self.form.setRowVisible(self.p_checked, k in ("checkbox", "radio"))
-        self.form.setRowVisible(self.p_size, k in ("text", "multiline", "date", "dropdown"))
-        self.form.setRowVisible(self.p_font, k in ("text", "multiline", "date", "dropdown"))
-        self.form.setRowVisible(self.p_options, k == "dropdown")
-        self.form.setRowVisible(self.p_value, k == "radio")
-        self.form.setRowVisible(self.p_required, k != "signature")
-        self.form.setRowVisible(self.p_fmt, k in ("text", "multiline", "date"))
-        self.form.setRowVisible(self.p_calc, k == "text" and base in ("number", "amount"))
-        self.form.setRowVisible(self.p_comb, k == "text")
-        self.form.labelForField(self.p_name).setText(tr("Nome del gruppo") if k == "radio" else tr("Nome del campo"))
-        self.p_default.setPlaceholderText(sample_value(f.fmt if k != "date" else f"{base}|{args[0]}", "")
-                                          if base and base != "email" else tr("Una delle opzioni") if k == "dropdown"
-                                          else tr("Vuoto"))
-
-    def _props_edited(self, *_):
-        f = self.selected
-        if not f or self._loading:
-            return
-        snapshot = copy.deepcopy(self.fields)
-        before = copy.deepcopy(f)
-        new_name = self.p_name.text().strip()
-        if f.kind == "radio" and new_name != f.name:  # renaming the group renames all its buttons
-            for o in self.fields:
-                if o.kind == "radio" and o.name == f.name and o is not f:
-                    o.name = new_name
-        f.name = new_name
-        f.required = self.p_required.isChecked()
-        f.font_size = float(self.p_size.text() or 0)
-        f.options = [o.strip() for o in self.p_options.toPlainText().splitlines() if o.strip()]
-        if f.kind in ("text", "multiline", "date"):
-            base = self.p_fmt.currentData() or ""
-            if base in NUMERIC:
-                f.fmt = f"{base}|{self.p_dec.currentData()}|{1 if self.p_thousands.isChecked() else 0}"
-            elif base in DATE_PATTERNS:
-                pattern = self.p_pattern.currentData()  # the list may still hold the other kind's layouts
-                f.fmt = f"{base}|{pattern if pattern in DATE_PATTERNS[base] else next(iter(DATE_PATTERNS[base]))}"
-            else:
-                f.fmt = base
-            if f.kind != "multiline":  # a date or time is a "Data" field, the rest a "Testo" field
-                f.kind = "date" if base in DATE_PATTERNS else "text"
-        if f.kind in ("text", "multiline", "date", "dropdown"):
-            f.font = self.p_font.currentData() or ""
-            f.color = self.p_color.property("value") or ""
-            f.align = self.p_align.currentData() or 0
-        f.calc = ([n.strip() for n in self.p_calc.text().split(",") if n.strip()]
-                  if f.kind == "text" and fmt_parts(f.fmt)[0] in ("number", "amount") else [])
-        f.comb = int(self.p_comb.text() or 0) if f.kind == "text" else 0
-        if f.kind == "radio":
-            f.value = clean_value(self.p_value.text())
-            if self.p_value.text() != f.value:
-                self.p_value.setText(f.value)
-        if f.kind in ("checkbox", "radio"):
-            f.default = "1" if self.p_checked.isChecked() else ""
-            if f.default and f.kind == "radio":  # only one button per group starts selected
-                for o in self.fields:
-                    if o.kind == "radio" and o.name == f.name and o is not f:
-                        o.default = ""
-        else:
-            f.default = self.p_default.text()
-            if f.kind == "dropdown":  # "milano" picks the option "Milano"
-                f.default = next((o for o in f.options if o.casefold() == f.default.strip().casefold()), f.default)
-                if self.p_default.text() != f.default:
-                    self.p_default.setText(f.default)
-        if before != f:
-            if before.kind != f.kind:
-                self._kind_label(f)
-            self._push(snapshot)
-            self.b_undo.setEnabled(True)
-            self._update_rows(f)
-            self.dirty = True
-            self.file_label.setText(Path(self.path).name + "  (modificato)")
-            self._fill_list()
-        self.scene.update()
-
