@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pymupdf
 
-__version__ = "1.6"  # also the GitHub release tag (v1.6): the update check compares the two
+__version__ = "1.7"  # also the GitHub release tag (v1.7): the update check compares the two
 from pdflex.i18n import tr
 
 
