@@ -149,7 +149,7 @@ def test_modello_redditi_boxes(tmp_path):
 
 
 # paste into the next table row
-from pdflex.detect import row_lines, table_step  # noqa: E402
+from pdflex.detect import col_lines, row_lines, table_step  # noqa: E402
 
 H = [(50, 400, y) for y in (100, 120, 140, 160)]
 
@@ -185,3 +185,16 @@ def test_row_lines_reads_cell_rectangles():
 def test_table_step_rows_drawn_cell_by_cell():
     cells = [(x, x + 150, y) for y in (100, 120, 140) for x in (50, 200, 350)]
     assert table_step(cells, (60, 102, 490, 118), [], 800) == 20
+
+
+def test_col_lines_from_cells():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for x in (100, 150, 200):
+        page.draw_rect((x, 100, x + 50, 130))
+    assert sorted({round(line[2]) for line in col_lines(page)}) == [100, 150, 200, 250]
+
+
+def test_table_step_sideways():
+    v = [(100, 300, x) for x in (100, 150, 200, 250)]  # col_lines: (y0, y1, x)
+    assert table_step(v, (100, 100, 300, 150), [], 800) == 50

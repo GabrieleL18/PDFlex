@@ -606,3 +606,34 @@ def test_repeated_move_goes_back_home_at_the_page_edge(tab):
     tab._move([p1], -10, 30)  # 40 below the copied one
     tops = [tab.paste()[0].rect[1] for _ in range(3)]
     assert tops[:2] == pytest.approx([780, 820]) and tops[2] == pytest.approx(700)
+
+
+def _grid(tmp_path, xs, ys):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for x0, x1 in zip(xs, xs[1:]):
+        for y0, y1 in zip(ys, ys[1:]):
+            page.draw_rect((x0, y0, x1, y1))
+    doc.save(tmp_path / "grid.pdf")
+    t = EditorTab()
+    t.open(str(tmp_path / "grid.pdf"))
+    return t
+
+
+def test_paste_goes_right_in_column_table(qapp, tmp_path):
+    t = _grid(tmp_path, (100, 150, 200, 250, 300), (100, 130, 160, 190))
+    column = [t.add_field("text", 0, (102, y + 2, 148, y + 28)) for y in (100, 130, 160)]
+    t.select_many(column)
+    t.copy_selected()
+    made = t.paste()
+    assert [f.rect for f in made] == [pytest.approx((152, y + 2, 198, y + 28)) for y in (100, 130, 160)]
+    made = t.paste()
+    assert [f.rect[0] for f in made] == [pytest.approx(202)] * 3
+
+
+def test_paste_wide_field_in_grid_goes_down(qapp, tmp_path):
+    t = _grid(tmp_path, (100, 250, 400), (100, 130, 160, 190))
+    f = t.add_field("text", 0, (102, 102, 248, 128))
+    t.select_many([f])
+    t.copy_selected()
+    assert t.paste()[0].rect == pytest.approx((102, 132, 248, 158))

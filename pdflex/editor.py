@@ -26,7 +26,7 @@ from pdflex.fields import (
     save_with_fields, snap, suggest_save_path, to_view,
 )
 from pdflex import recovery, ui
-from pdflex.detect import row_lines, table_step
+from pdflex.detect import col_lines, row_lines, table_step
 from pdflex.fill import FillDialog
 from pdflex.formula import check as check_formula, ref_text, rename as rename_ref
 from pdflex.signature import SignatureDialog
@@ -1462,7 +1462,8 @@ class EditorTab(QWidget):
 
     def paste(self) -> list[Field]:
         """Ctrl+V. Another page: the same place. The same page, the first that works of:
-        the next free row of the table the copied fields are in; the move the user made to the last pasted
+        the next free row of the table the copied fields are in (the next free column first, for a block
+        taller than wide: fields stacked in a column go to the column beside it); the move the user made to the last pasted
         fields, done again; a little lower-right (back over the copied ones when that would leave the sheet).
         The fields keep their places among themselves."""
         clip = getattr(self, "_clip", None)
@@ -1471,16 +1472,28 @@ class EditorTab(QWidget):
         block, home, at = clip["block"], clip["home"], clip["at"]
         if clip["page"] == self.page_no:
             page = self.doc[self.page_no]
-            dy = None
+            table = None  # where the table's next free row (or column) puts the block
             if page.rotation == 0:  # the table's lines are read in the page's own coordinates
                 w, h = max(d["rect"][2] for d in block), max(d["rect"][3] for d in block)
                 taken = [to_view(page, f.rect) for f in self.fields if f.page == self.page_no]
-                dy = table_step(row_lines(page), (home[0], home[1], home[0] + w, home[1] + h), taken,
-                                page.rect.height)
+
+                def down():
+                    dy = table_step(row_lines(page), (home[0], home[1], home[0] + w, home[1] + h), taken,
+                                    page.rect.height)
+                    return None if dy is None else (home[0], home[1] + dy)
+
+                def side():  # the same, with x and y swapped
+                    dx = table_step(col_lines(page), (home[1], home[0], home[1] + h, home[0] + w),
+                                    [(t[1], t[0], t[3], t[2]) for t in taken], page.rect.width)
+                    return None if dx is None else (home[0] + dx, home[1])
+
+                for go in ((side, down) if h > w else (down, side)):
+                    if (table := go()) is not None:
+                        break
             made = [f for f in clip["made"] if any(f is g for g in self.fields)]
             now = self._top_left(made) if made and len(made) == len(clip["made"]) else None
-            if dy is not None:
-                at = (home[0], home[1] + dy)
+            if table is not None:
+                at = table
             elif now and clip["placed"] and (abs(now[0] - clip["placed"][0]) > 0.01 or
                                              abs(now[1] - clip["placed"][1]) > 0.01):
                 clip["step"] = (now[0] - clip["src"][0], now[1] - clip["src"][1])  # the user moved them
@@ -1489,7 +1502,7 @@ class EditorTab(QWidget):
                 clip["src"], at = at, (at[0] + clip["step"][0], at[1] + clip["step"][1])
             else:
                 clip["src"], at = at, (at[0] + 10, at[1] + 10)
-            if dy is None and self._fit(at, block) != at:  # off the sheet: over the copied ones again
+            if table is None and self._fit(at, block) != at:  # off the sheet: over the copied ones again
                 at = home
         made = self._place(block, at)
         clip.update(at=at, page=self.page_no, made=made, placed=self._top_left(made) if made else None)

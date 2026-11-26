@@ -341,21 +341,36 @@ def _code_length(label: str, rect, fmt: str) -> tuple[int, str]:
     return (n, "cf" if n == 16 else fmt) if rect.width >= n * 6 else (0, fmt)
 
 
+def _drawn_rects(drawings) -> list[pymupdf.Rect]:
+    out = []
+    for d in drawings:
+        for item in d["items"]:
+            if item[0] == "re":
+                out.append(pymupdf.Rect(item[1]))
+            elif item[0] == "qu" and item[1].is_rectangular:
+                out.append(item[1].rect)
+    return out
+
+
 def row_lines(page: pymupdf.Page) -> list[tuple[float, float, float]]:
     """(x0, x1, y) of every horizontal edge on the page: drawn lines, and the top and bottom of boxes
     (tables are often drawn as one rectangle per cell)."""
     drawings = page.get_drawings()
     out = list(_lines(drawings)[0])
-    for d in drawings:
-        for item in d["items"]:
-            if item[0] == "re":
-                r = pymupdf.Rect(item[1])
-            elif item[0] == "qu" and item[1].is_rectangular:
-                r = item[1].rect
-            else:
-                continue
-            if r.height >= 2 and r.width >= 3:  # thinner ones are lines, already in
-                out += [(r.x0, r.x1, r.y0), (r.x0, r.x1, r.y1)]
+    for r in _drawn_rects(drawings):
+        if r.height >= 2 and r.width >= 3:  # thinner ones are lines, already in
+            out += [(r.x0, r.x1, r.y0), (r.x0, r.x1, r.y1)]
+    return out
+
+
+def col_lines(page: pymupdf.Page) -> list[tuple[float, float, float]]:
+    """(y0, y1, x) of every vertical edge on the page: `row_lines` turned on its side, so that
+    `table_step` given these and a box written (y0, x0, y1, x1) says how far right the next free column is."""
+    drawings = page.get_drawings()
+    out = [(y0, y1, x) for x, y0, y1 in _lines(drawings)[1]]
+    for r in _drawn_rects(drawings):
+        if r.width >= 2 and r.height >= 3:
+            out += [(r.y0, r.y1, r.x0), (r.y0, r.y1, r.x1)]
     return out
 
 
