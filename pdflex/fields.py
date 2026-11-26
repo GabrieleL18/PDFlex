@@ -42,6 +42,9 @@ class Field:
     value: str = ""
     fmt: str = ""  # see FORMATS; with options after "|": "number|2|1" (decimals, thousands), "date|dd/mm/yy"
     calc: list[str] = dc_field(default_factory=list)  # names of the fields this one sums
+    calc_op: str = "SUM"  # see CALC_OPS
+    vmin: str = ""  # numeric fields: smallest / largest value accepted ("" no limit; decimal point)
+    vmax: str = ""
     comb: int = 0  # text split into this many boxes, one character each (codice fiscale); 0 = normal
     image: str = dc_field(default="", repr=False)  # kind "image": PNG as base64 (a hand-drawn signature)
     font: str = ""  # "" Helvetica, "TiRo" Times, "Cour" Courier (same width for every letter)
@@ -78,9 +81,11 @@ def _xref_ref(doc, xref, key):
     return int(v.split()[0]) if t == "xref" else 0
 
 
-FORMATS = {"": tr("Testo libero"), "number": tr("Numero"), "amount": tr("Importo in euro"), "percent": tr("Percentuale"),
+FORMATS = {"": tr("Testo libero"), "number": tr("Numero"), "amount": tr("Importo"), "percent": tr("Percentuale"),
            "date": tr("Data"), "time": tr("Ora"), "cap": "CAP", "cf": tr("Codice fiscale"), "phone": tr("Telefono"), "email": tr("Email")}
 NUMERIC = ("number", "amount", "percent")
+CURRENCIES = ("€", "$", "£", "CHF", "")  # "" no symbol
+CALC_OPS = {"SUM": tr("Somma"), "AVG": tr("Media"), "MIN": tr("Minimo"), "MAX": tr("Massimo"), "PRD": tr("Prodotto")}
 DATE_PATTERNS = {"date": {"dd/mm/yyyy": tr("gg/mm/aaaa"), "dd/mm/yy": tr("gg/mm/aa"), "mm/yyyy": tr("mm/aaaa"),
                           "dd/mm/yyyy HH:MM": tr("gg/mm/aaaa hh:mm")},
                  "time": {"HH:MM": tr("hh:mm"), "HH:MM:ss": tr("hh:mm:ss")}}
@@ -97,14 +102,16 @@ _CAP_K = 'AFSpecial_KeystrokeEx("99999");'
 
 
 def fmt_parts(fmt: str, kind: str = "text") -> tuple[str, list[str]]:
-    """("number", ["2", "1"]) from "number|2|1". A date field without a format is dd/mm/yyyy."""
+    """("number", ["2", "1"]) from "number|2|1". A date field without a format is dd/mm/yyyy.
+    An amount also has its currency and whether it goes before the number: "amount|2|1|€|1"."""
     base, *args = fmt.split("|")
     if kind == "date" and base not in DATE_PATTERNS:
         return "date", ["dd/mm/yyyy"]
     if base in DATE_PATTERNS and not args:
         args = [next(iter(DATE_PATTERNS[base]))]
     if base in NUMERIC:
-        args = (args + ["2", "1"][len(args):])[:2]  # 2 decimals, thousands separator: "number" alone
+        default = ["2", "1", "€", "1"] if base == "amount" else ["2", "1"]  # amounts saved before: euro, before
+        args = (args + default[len(args):])[:len(default)]  # 2 decimals, thousands separator: "number" alone
     return base, args
 
 
@@ -117,17 +124,30 @@ def fmt_label(fmt: str, kind: str = "text") -> str:
     return FORMATS.get(base, "")
 
 
-def _fmt_js(fmt: str, kind: str = "text") -> tuple:
+def _js_escape(text: str) -> str:
+    """Non-ASCII as \\uXXXX: viewers misread raw UTF-8 (a euro sign) inside scripts."""
+    return "".join(c if ord(c) < 128 else f"\\u{ord(c):04X}" for c in text)
+
+
+def _range_js(vmin: str, vmax: str) -> str | None:
+    if not vmin and not vmax:
+        return None
+    return f"AFRange_Validate({'true' if vmin else 'false'}, {vmin or 0}, {'true' if vmax else 'false'}, {vmax or 0});"
+
+
+def _fmt_js(fmt: str, kind: str = "text", vmin: str = "", vmax: str = "") -> tuple:
     """(format, keystroke, validate) JavaScript for a field's format; Italian separators (1.234,56)."""
     base, args = fmt_parts(fmt, kind)
     if base in NUMERIC:
         dec, sep = int(args[0]), 2 if args[1] != "0" else 3  # 2: 1.234,56  3: 1234,56
         if base == "percent":
-            return f"AFPercent_Format({dec}, {sep});", f"AFPercent_Keystroke({dec}, {sep});", None
-        # € stays a JS escape: viewers misread a raw UTF-8 euro sign inside scripts
-        cur = tr('"\\u20AC "') if base == "amount" else '""'
-        return (f"AFNumber_Format({dec}, {sep}, 0, 0, {cur}, true);",
-                f'AFNumber_Keystroke({dec}, {sep}, 0, 0, "", true);', None)
+            return f"AFPercent_Format({dec}, {sep});", f"AFPercent_Keystroke({dec}, {sep});", _range_js(vmin, vmax)
+        cur, before = "", "true"
+        if base == "amount" and args[2]:
+            before = "true" if args[3] != "0" else "false"
+            cur = _js_escape(args[2] + " " if before == "true" else " " + args[2])
+        return (f'AFNumber_Format({dec}, {sep}, 0, 0, "{cur}", {before});',
+                f'AFNumber_Keystroke({dec}, {sep}, 0, 0, "", true);', _range_js(vmin, vmax))
     if base in DATE_PATTERNS:
         fn = "AFDate" if base == "date" else "AFTime"
         return f'{fn}_FormatEx("{args[0]}");', f'{fn}_KeystrokeEx("{args[0]}");', None
@@ -138,10 +158,13 @@ def _fmt_js(fmt: str, kind: str = "text") -> tuple:
 def _fmt_from_js(js: dict) -> str:
     """The format back from the scripts, PDFlex's own or other programs' (Acrobat writes the same ones)."""
     f, k, v = js.get("F", ""), js.get("K", ""), js.get("V", "")
-    m = re.search(r'AFNumber_Format\(\s*(\d+)\s*,\s*(\d+)\s*,[^,]*,[^,]*,\s*"([^"]*)"', f)
+    m = re.search(r'AFNumber_Format\(\s*(\d+)\s*,\s*(\d+)\s*,[^,]*,[^,]*,\s*"([^"]*)"\s*(?:,\s*(\w+))?', f)
     if m:
-        dec, sep, cur = m.groups()
-        return f"{'amount' if 'u20AC' in cur or '€' in cur else 'number'}|{dec}|{0 if sep in '13' else 1}"
+        dec, sep, cur, before = m.groups()
+        cur = re.sub(r"\\u([0-9A-Fa-f]{4})", lambda u: chr(int(u.group(1), 16)), cur).strip()
+        if not cur:
+            return f"number|{dec}|{0 if sep in '13' else 1}"
+        return f"amount|{dec}|{0 if sep in '13' else 1}|{cur}|{0 if before == 'false' else 1}"
     m = re.search(r"AFPercent_Format\(\s*(\d+)\s*,\s*(\d+)", f)
     if m:
         return f"percent|{m.group(1)}|{0 if m.group(2) in '13' else 1}"
@@ -227,9 +250,14 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
                 f.default = w.field_value or ""
             if kind == "text" and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB:
                 f.comb = w.text_maxlen or 0
-            m = re.search(r"AFSimple_Calculate\(\s*\"SUM\"\s*,\s*new Array\((.*?)\)", js.get("C", ""))
+            m = re.search(r"AFSimple_Calculate\(\s*\"(SUM|PRD|AVG|MIN|MAX)\"\s*,\s*new Array\((.*?)\)", js.get("C", ""))
             if m:
-                f.calc = re.findall(r'"([^"]+)"', m.group(1))
+                f.calc_op, f.calc = m.group(1), re.findall(r'"([^"]+)"', m.group(2))
+            m = re.search(r"AFRange_Validate\(\s*(true|false)\s*,\s*([-\d.]+)\s*,\s*(true|false)\s*,\s*([-\d.]+)",
+                          js.get("V", ""))
+            if m:
+                f.vmin = m.group(2) if m.group(1) == "true" else ""
+                f.vmax = m.group(4) if m.group(3) == "true" else ""
             f.orig = copy.deepcopy(f)
             out.append(f)
     return out
@@ -317,10 +345,11 @@ def _set_inherited(doc, f: Field, key: str, value: str) -> None:
 
 def _scripts(f: Field) -> dict[str, str | None]:
     """The field's JavaScript by action key (None: no script), as PDFlex writes it."""
-    fmt, stroke, validate = _fmt_js(f.fmt, f.kind) if f.kind in ("text", "multiline", "date") else (None,) * 3
+    fmt, stroke, validate = (_fmt_js(f.fmt, f.kind, f.vmin, f.vmax) if f.kind in ("text", "multiline", "date")
+                             else (None,) * 3)
     calc = None
     if f.calc:
-        calc = "AFSimple_Calculate(\"SUM\", new Array(" + ", ".join(f'"{n}"' for n in f.calc) + "));"
+        calc = f"AFSimple_Calculate(\"{f.calc_op}\", new Array(" + ", ".join(f'"{n}"' for n in f.calc) + "));"
     return {"F": fmt, "K": stroke, "V": validate, "C": calc}
 
 
@@ -386,8 +415,9 @@ def _update_widget(doc, f: Field) -> None:
         elif f.kind != "radio" and f.default:
             w.field_value = mupdf_text(f.default)
     _safe_update(doc, w)
-    changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt), "V": (f.fmt, o.fmt),
-                                   "C": (f.calc, o.calc)}.items() if a != b]
+    changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt),
+                                   "V": ((f.fmt, f.vmin, f.vmax), (o.fmt, o.vmin, o.vmax)),
+                                   "C": ((f.calc, f.calc_op), (o.calc, o.calc_op))}.items() if a != b]
     if changed:
         _set_scripts(doc, f, changed)
 
@@ -621,7 +651,9 @@ def sample_value(fmt: str, name: str, multiline: bool = False) -> str:
     if base in NUMERIC:
         n = 12.5 if base == "percent" else 1234.5
         s = f"{n:,.{int(args[0])}f}".replace(",", " ").replace(".", ",").replace(" ", "." if args[1] != "0" else "")
-        return {"amount": "€ " + s, "percent": s + "%"}.get(base, s)
+        if base == "amount" and args[2]:
+            return f"{args[2]} {s}" if args[3] != "0" else f"{s} {args[2]}"
+        return s + "%" if base == "percent" else s
     if base in DATE_PATTERNS:
         py = {"dd": "%d", "mm": "%m", "yyyy": "%Y", "yy": "%y", "HH": "%H", "MM": "%M", "ss": "%S"}
         return datetime.now().strftime(re.sub(r"yyyy|yy|dd|mm|HH|MM|ss", lambda m: py[m.group()], args[0]))
@@ -661,7 +693,7 @@ def fill_sample(doc: pymupdf.Document) -> None:
             w.update()
 
 
-_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "comb", "image",
+_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "calc_op", "vmin", "vmax", "comb", "image",
                "font", "color", "align")
 
 

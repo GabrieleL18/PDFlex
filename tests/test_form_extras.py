@@ -2,7 +2,7 @@ import pymupdf
 import pytest
 
 from pdflex import open_pdf
-from pdflex.fields import Field, align_rects, load_fields, save_with_fields, snap
+from pdflex.fields import Field, align_rects, fmt_parts, load_fields, sample_value, save_with_fields, snap
 
 
 def _js(doc):
@@ -32,7 +32,7 @@ def test_formats_and_sum_roundtrip(make_pdf, tmp_path):
     assert "AFNumber_Format" in js and "AFSimple_Calculate" in js and "app.alert" in js
     assert "/CO" in doc.xref_get_key(doc.pdf_catalog(), "AcroForm")[1]
     got = {f.name: f for f in load_fields(doc)}
-    assert got["a"].fmt == "amount|2|1" and got["b"].fmt == "number|2|1" and got["mail"].fmt == "email"
+    assert got["a"].fmt == "amount|2|1|€|1" and got["b"].fmt == "number|2|1" and got["mail"].fmt == "email"
     assert got["tot"].calc == ["a", "b"] and got["a"].calc == []
 
 
@@ -49,7 +49,7 @@ def test_change_format_of_loaded_field(make_pdf, tmp_path):
     fields[0].fmt = "amount"
     out = tmp_path / "o.pdf"
     save_with_fields(src, fields, out)
-    assert load_fields(open_pdf(out))[0].fmt == "amount|2|1"
+    assert load_fields(open_pdf(out))[0].fmt == "amount|2|1|€|1"
 
 
 # tab order = order of the field list
@@ -100,7 +100,7 @@ def test_changing_format_sum_boxes_keeps_other_properties(make_pdf, tmp_path):
     out = tmp_path / "out.pdf"
     save_with_fields(src, list(fields.values()), out)
     got = {f.name: f for f in load_fields(open_pdf(out))}
-    assert got["a"].fmt == "amount|2|1" and got["tot"].fmt == "number|2|1" and got["tot"].calc == ["a", "b"]
+    assert got["a"].fmt == "amount|2|1|€|1" and got["tot"].fmt == "number|2|1" and got["tot"].calc == ["a", "b"]
     assert got["b"].comb == 8
     widgets = {w.field_name: w for w in open_pdf(out)[0].widgets()}
     for name in ("a", "b", "tot"):
@@ -139,3 +139,69 @@ def test_field_written_by_other_programs_keeps_its_format(make_pdf, tmp_path):
     f.rect = (20, 20, 100, 40)
     save_with_fields(src, [f], tmp_path / "out.pdf")
     assert load_fields(open_pdf(tmp_path / "out.pdf"))[0].fmt == "number|2|1"
+
+
+# currency amounts, calculation operations, min/max range
+def test_amount_currency_roundtrip(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    fields = [Field("text", 0, (10, 10, 100, 30), "usd", fmt="amount|2|1|$|0"),
+              Field("text", 0, (10, 40, 100, 60), "eur", fmt="amount"),
+              Field("text", 0, (10, 70, 100, 90), "gbp", fmt="amount|0|0|£|1")]
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, fields, out)
+    doc = open_pdf(out)
+    js = _js(doc)
+    assert 'AFNumber_Format(2, 2, 0, 0, " $", false)' in js
+    assert r'"\u00A3 "' in js
+    got = {f.name: f.fmt for f in load_fields(doc)}
+    assert got == {"usd": "amount|2|1|$|0", "eur": "amount|2|1|€|1", "gbp": "amount|0|0|£|1"}
+
+
+def test_calc_ops_and_range_roundtrip(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    fields = [Field("text", 0, (10, 10, 100, 30), "a", fmt="number", vmin="0", vmax="100.5"),
+              Field("text", 0, (10, 40, 100, 60), "b", fmt="number", vmin="", vmax="10"),
+              Field("text", 0, (10, 70, 100, 90), "m", fmt="number", calc=["a", "b"], calc_op="AVG")]
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, fields, out)
+    doc = open_pdf(out)
+    js = _js(doc)
+    assert 'AFSimple_Calculate("AVG"' in js and "AFRange_Validate(true, 0, true, 100.5)" in js
+    assert "AFRange_Validate(false, 0, true, 10)" in js
+    got = {f.name: f for f in load_fields(doc)}
+    assert (got["a"].vmin, got["a"].vmax, got["b"].vmin, got["b"].vmax) == ("0", "100.5", "", "10")
+    assert got["m"].calc_op == "AVG" and got["a"].calc_op == "SUM"
+
+
+def test_changing_calc_op_and_range_of_saved_field(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, [Field("text", 0, (10, 10, 100, 30), "a", fmt="number"),
+                           Field("text", 0, (10, 40, 100, 60), "t", fmt="number", calc=["a"])], out)
+    fields = load_fields(open_pdf(out))
+    fields[0].vmax = "5"
+    fields[1].calc_op = "MAX"
+    out2 = tmp_path / "o2.pdf"
+    save_with_fields(out, fields, out2)
+    got = {f.name: f for f in load_fields(open_pdf(out2))}
+    assert got["a"].vmax == "5" and got["t"].calc_op == "MAX"
+
+
+def test_foreign_amount_and_range_read(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    w = pymupdf.Widget()
+    w.field_type, w.field_name, w.rect = pymupdf.PDF_WIDGET_TYPE_TEXT, "x", pymupdf.Rect(10, 10, 100, 30)
+    w.script_format = 'AFNumber_Format(2, 0, 0, 0, "$", false);'
+    w.script_change = "AFRange_Validate(true, 1, false, 0);"
+    page.add_widget(w)
+    doc.save(tmp_path / "f.pdf")
+    f = load_fields(open_pdf(tmp_path / "f.pdf"))[0]
+    assert f.fmt == "amount|2|1|$|0" and f.vmin == "1" and f.vmax == ""
+
+
+def test_old_amount_format_still_euro_before():
+    assert fmt_parts("amount|2|1") == ("amount", ["2", "1", "€", "1"])
+    assert fmt_parts("number|2|1") == ("number", ["2", "1"])
+    assert sample_value("amount|2|1|$|0", "x") == "1.234,50 $"
+    assert sample_value("amount", "x") == "€ 1.234,50"

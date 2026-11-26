@@ -4,7 +4,7 @@ import pytest
 from pdflex import open_pdf
 from pdflex.fields import Field, load_fields, sample_value, save_with_fields
 
-ALL = ["", "number|0|0", "number|3|1", "amount|2|1", "percent|1|1", "date|dd/mm/yy", "date|dd/mm/yyyy HH:MM",
+ALL = ["", "number|0|0", "number|3|1", "amount|2|1|€|1", "amount|0|0|$|0", "percent|1|1", "date|dd/mm/yy", "date|dd/mm/yyyy HH:MM",
        "time|HH:MM", "cap", "cf", "phone", "email"]
 
 
@@ -15,7 +15,7 @@ def test_every_format_saved_and_read_back(make_pdf, tmp_path):
     save_with_fields(make_pdf(tmp_path, ["x"]), fields, out)
     got = {f.name: f for f in load_fields(open_pdf(out))}
     assert [got[f"f{i}"].fmt for i in range(len(ALL))] == ALL
-    assert got["f5"].kind == "date" and got["f7"].kind == "date" and got["f1"].kind == "text"
+    assert got["f6"].kind == "date" and got["f7"].kind == "date" and got["f1"].kind == "text"
 
 
 def test_change_format_of_existing_field(make_pdf, tmp_path):
@@ -52,7 +52,7 @@ def test_saved_for_filling_invisible_and_empty(make_pdf, tmp_path):
     doc[0].add_widget(w)
     doc.save(src)
     fields = load_fields(open_pdf(src)) + [
-        Field("text", 0, (10, 10, 200, 30), "importo", default="1.234,00", fmt="amount|2|1", font="Cour", font_size=11),
+        Field("text", 0, (10, 10, 200, 30), "importo", default="1.234,00", fmt="amount|2|1|€|1", font="Cour", font_size=11),
         Field("checkbox", 0, (10, 40, 24, 54), "ok", default="1"),
         Field("dropdown", 0, (10, 60, 200, 80), "citta", options=["Roma", "Milano"], default="Roma")]
     out = tmp_path / "per_compilazione.pdf"
@@ -64,7 +64,7 @@ def test_saved_for_filling_invisible_and_empty(make_pdf, tmp_path):
     got = {f.name: f for f in load_fields(open_pdf(out))}
     assert set(got) == {"vecchio", "importo", "ok", "citta"}  # all still there for the program that fills them
     assert all(f.default == "" for f in got.values())
-    assert (got["importo"].fmt, got["importo"].font, got["importo"].font_size) == ("amount|2|1", "Cour", 11)
+    assert (got["importo"].fmt, got["importo"].font, got["importo"].font_size) == ("amount|2|1|€|1", "Cour", 11)
     assert got["citta"].options == ["Roma", "Milano"]
     # once a program writes a value, it shows
     filled = open_pdf(out)[0]  # kept in a variable: a widget only holds a weak reference to its page
@@ -75,7 +75,7 @@ def test_saved_for_filling_invisible_and_empty(make_pdf, tmp_path):
 
 
 @pytest.mark.parametrize("fmt, want", [
-    ("number|2|1", "1.234,50"), ("number|0|0", "1234"), ("amount|2|1", "€ 1.234,50"), ("percent|1|1", "12,5%"),
+    ("number|2|1", "1.234,50"), ("number|0|0", "1234"), ("amount|2|1", "€ 1.234,50"), ("amount|0|0|CHF|0", "1234 CHF"), ("percent|1|1", "12,5%"),
     ("cap", "00100"), ("cf", "RSSMRA80A01H501U")])
 def test_sample_values_follow_the_format(fmt, want):
     assert sample_value(fmt, "x") == want
