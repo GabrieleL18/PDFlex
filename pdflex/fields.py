@@ -2,6 +2,7 @@
 import base64
 import copy
 import dataclasses
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field as dc_field
@@ -10,6 +11,10 @@ from pathlib import Path
 import pymupdf
 
 from pdflex import open_pdf, write_atomic
+from pdflex.formula import (
+    _truthy, check as check_formula, evaluate as eval_formula, js_prelude, parse as parse_formula, ref_text,
+    refs as formula_refs, rename_all, to_js,
+)
 from pdflex.i18n import tr
 
 FIELD_KINDS = ("text", "multiline", "checkbox", "radio", "dropdown", "date", "signature", "button")
@@ -59,10 +64,53 @@ class Field:
     fill_color: str = ""  # "" no background, else "#rrggbb"
     border_width: int = 1  # 1-3 pt (see BORDER_WIDTHS)
     border_style: str = ""  # see BORDER_STYLES
+    formula: str = ""  # text field: its value is this formula's result (pdflex.formula); "" typed by hand
+    show_if: str = ""  # shown only while this condition is true, emptied when it is not; "" always shown
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
     orig: "Field | None" = dc_field(default=None, compare=False, repr=False)
+    # a calculation written by another program (not PDFlex's, not Acrobat's simplified notation): kept untouched
+    foreign_calc: bool = dc_field(default=False, compare=False, repr=False)
+
+
+HELPER = "PDFlex_logica"  # hidden field whose calculation shows and hides the fields with a condition
+
+
+def formula_kind(f: Field) -> str:
+    """How a formula reads this field: a number, a text, ticked or not, a choice."""
+    if f.kind in ("checkbox", "radio", "dropdown"):
+        return f.kind
+    return "number" if f.kind == "text" and fmt_parts(f.fmt, f.kind)[0] in NUMERIC else "text"
+
+
+def _formula_info(fields) -> tuple[dict, dict]:
+    """kinds and radio choices, what formulas need to know about the form's fields."""
+    kinds, choices = {}, {}
+    for f in fields:
+        if f.kind not in ("image", "button", "signature"):
+            kinds[f.name] = formula_kind(f)
+        if f.kind == "radio":
+            choices.setdefault(f.name, []).append(clean_value(f.value))
+    return kinds, choices
+
+
+def _unescape(text: str) -> str:
+    return re.sub(r"\\u([0-9A-Fa-f]{4})", lambda u: chr(int(u.group(1), 16)), text)
+
+
+def _formula_js(f: Field, kinds: dict) -> str:
+    """The calculation script: the formula's text kept in a comment (so it reopens as typed), then its code."""
+    numeric = fmt_parts(f.fmt, f.kind)[0] in NUMERIC
+    put = 'event.value = (typeof r == "number") ? r : "";' if numeric else "event.value = _fmt(r);"
+    return (f"/** PDFlex: {_js_escape(f.formula).replace('*/', '* /')} **/\n(function() {{\n{js_prelude()}"
+            f"var r = {to_js(parse_formula(f.formula), kinds)};\n{put}\n}}).call(this);")
+
+
+def _from_simplified(body: str) -> str:
+    """Acrobat's "simplified field notation" (Quantita * Prezzo) as a formula: names in brackets."""
+    return re.sub(r"(?:\\.|[^\W\d])(?:\\.|[\w.])*",
+                  lambda m: ref_text(re.sub(r"\\(.)", r"\1", m.group())), body.strip())
 
 
 def to_view(page, rect) -> tuple:
@@ -311,7 +359,7 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
     for page in doc:
         for w in page.widgets():
             kind = next((k for k, t in _TYPES.items() if t == w.field_type), None)
-            if kind is None:
+            if kind is None or w.field_name == HELPER:
                 continue  # list box / push button: not editable here, kept untouched on save
             js = _field_js(doc, w) if kind == "text" else {}
             fmt = _fmt_from_js(js)
@@ -349,15 +397,27 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
             f.visibility = _visibility(int(v) if t == "int" else 0)
             for key, value in _look_of(w).items():
                 setattr(f, key, value)
-            m = re.search(r"AFSimple_Calculate\(\s*\"(SUM|PRD|AVG|MIN|MAX)\"\s*,\s*new Array\((.*?)\)", js.get("C", ""))
-            if m:
+            c = js.get("C", "")
+            m = re.search(r"AFSimple_Calculate\(\s*\"(SUM|PRD|AVG|MIN|MAX)\"\s*,\s*new Array\((.*?)\)", c)
+            mine, simple = re.search(r"/\*\* PDFlex: (.*?) \*\*/", c, re.S), re.search(r"BVCALC(.*?)EVCALC", c, re.S)
+            if mine:
+                f.formula = _unescape(mine.group(1))
+            elif simple:
+                f.formula = _from_simplified(simple.group(1))
+            elif m:
                 f.calc_op, f.calc = m.group(1), re.findall(r'"([^"]+)"', m.group(2))
+            elif c.strip():
+                f.foreign_calc = True
+            f.show_if = _inherited(doc, f, "PDFlexIf") or ""
+            if f.show_if:  # the Hidden flag of the moment is the condition's doing: the user's choice is kept apart
+                vis = _inherited(doc, f, "PDFlexVis") or ""
+                f.visibility = vis if vis in VISIBILITY else ""
             m = re.search(r"AFRange_Validate\(\s*(true|false)\s*,\s*([-\d.]+)\s*,\s*(true|false)\s*,\s*([-\d.]+)",
                           js.get("V", ""))
             if m:
                 f.vmin = m.group(2) if m.group(1) == "true" else ""
                 f.vmax = m.group(4) if m.group(3) == "true" else ""
-            f.readonly = bool(w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY) and not f.calc
+            f.readonly = bool(w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY) and not f.calc and not f.formula
             f.orig = copy.deepcopy(f)
             out.append(f)
     return out
@@ -388,6 +448,19 @@ def _check_names(fields):
     missing = sorted({n for f in fields for n in f.calc if n not in by_name})
     if missing:
         raise ValueError(tr("La somma usa campi che non esistono: ") + ", ".join(missing))
+    kinds, choices = _formula_info(fields)
+    deps = {}
+    for f in fields:
+        deps.setdefault(f.name, set()).update(f.calc)
+        for text in (f.formula, f.show_if):
+            if text:
+                msg = check_formula(text, kinds, choices)
+                if msg:
+                    raise ValueError(f"{f.name}: {msg}")
+                deps[f.name] |= formula_refs(text)
+    path = _cycle(deps)
+    if path:
+        raise ValueError(tr("Calcolo circolare: ") + " → ".join(path))
     bad = []
     for name, group in by_name.items():
         values = [clean_value(f.value) for f in group if f.kind == "radio"]
@@ -398,7 +471,30 @@ def _check_names(fields):
                          tr(' due opzioni hanno lo stesso valore, oppure una vale "Off" (riservato).'))
 
 
-def _new_widget(f: Field) -> pymupdf.Widget:
+def _cycle(deps: dict[str, set[str]]) -> list[str]:
+    """A chain of names that comes back to its start (A → B → A), or []."""
+    state = {}
+
+    def visit(n, path):
+        if state.get(n) == 1:
+            return path[path.index(n):] + [n]
+        if state.get(n) == 2 or n not in deps:
+            return []
+        state[n] = 1
+        for m in sorted(deps[n]):
+            found = visit(m, path + [n])
+            if found:
+                return found
+        state[n] = 2
+        return []
+    for n in deps:
+        found = visit(n, [])
+        if found:
+            return found
+    return []
+
+
+def _new_widget(f: Field, kinds: dict | None = None) -> pymupdf.Widget:
     w = pymupdf.Widget()
     w.field_type = _TYPES[f.kind]
     w.field_name = f.name
@@ -418,12 +514,12 @@ def _new_widget(f: Field) -> pymupdf.Widget:
         w.text_maxlen = f.maxlen
     if f.tooltip:
         w.field_label = f.tooltip
-    js = _scripts(f)
+    js = _scripts(f, kinds)
     if f.kind in ("text", "multiline", "date"):
         w.script_format, w.script_stroke, w.script_change = js["F"], js["K"], js["V"]
-    if f.calc:
+    if js["C"]:
         w.script_calc = js["C"]
-    if f.calc or f.readonly:  # a total is computed, not typed
+    if f.calc or f.formula or f.readonly:  # a total is computed, not typed
         w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
     if f.kind == "dropdown":
         w.choice_values = list(f.options)
@@ -447,42 +543,132 @@ def _set_inherited(doc, f: Field, key: str, value: str) -> None:
         doc.xref_set_key(x, key, value)
 
 
-def _scripts(f: Field) -> dict[str, str | None]:
+def _scripts(f: Field, kinds: dict | None = None) -> dict[str, str | None]:
     """The field's JavaScript by action key (None: no script), as PDFlex writes it."""
     fmt, stroke, validate = (_fmt_js(f.fmt, f.kind, f.vmin, f.vmax) if f.kind in ("text", "multiline", "date")
                              else (None,) * 3)
     calc = None
-    if f.calc:
+    if f.formula:
+        calc = _formula_js(f, kinds or {})
+    elif f.calc:
         calc = f"AFSimple_Calculate(\"{f.calc_op}\", new Array(" + ", ".join(f'"{n}"' for n in f.calc) + "));"
     return {"F": fmt, "K": stroke, "V": validate, "C": calc}
 
 
-def _set_scripts(doc, f: Field, keys) -> None:
-    """Write format / sum scripts into the field itself: every other property stays as it was."""
+def _set_scripts(doc, f: Field, keys, kinds: dict | None = None) -> None:
+    """Write format / sum scripts into the field itself: every other property stays as it was.
+    The calculation order is written once for the whole form, by build_pdf."""
     holder = f.parent or f.xref
-    scripts = _scripts(f)
+    scripts = _scripts(f, kinds)
     for key in keys:
         for x in {f.xref, f.parent} - {0}:  # the old one, wherever it was
             if doc.xref_get_key(x, f"AA/{key}")[0] != "null":
                 doc.xref_set_key(x, f"AA/{key}", "null")
         if scripts[key]:
             doc.xref_set_key(holder, f"AA/{key}", f"<</S/JavaScript/JS {pymupdf.get_pdf_str(scripts[key])}>>")
-    if "C" in keys:  # viewers recompute only the fields listed in the form's calculation order
-        cat = doc.pdf_catalog()
-        t, v = doc.xref_get_key(cat, "AcroForm/CO")
-        order = [int(n) for n in re.findall(r"(\d+) 0 R", v)] if t == "array" else []
-        order = [n for n in order if n != holder] + ([holder] if f.calc else [])
-        doc.xref_set_key(cat, "AcroForm/CO", "[" + " ".join(f"{n} 0 R" for n in order) + "]")
 
 
-def _update_widget(doc, f: Field) -> None:
+def _holder(doc, xref: int) -> int:
+    return _xref_ref(doc, xref, "Parent") or xref
+
+
+def _start_values(fields) -> dict[str, str]:
+    """The values the form opens with, as formulas read them."""
+    out = {}
+    for f in fields:
+        if f.kind == "checkbox":
+            out[f.name] = "1" if f.default == "1" else ""
+        elif f.kind == "radio":
+            if f.default == "1":
+                out[f.name] = clean_value(f.value)
+            else:
+                out.setdefault(f.name, "")
+        elif f.kind not in ("image", "button", "signature"):
+            out[f.name] = f.default
+    return out
+
+
+def _write_conditions(doc, fields, placed: dict, kinds: dict, array) -> int:
+    """Each condition into its field (/PDFlexIf, with the user's own visibility in /PDFlexVis), the fields
+    hidden or shown as the form opens, and the hidden helper field whose calculation keeps doing it while
+    the form is filled in (a check box has no calculation of its own). Returns the helper's xref, 0 if none."""
+    start = _start_values(fields)
+    conds = []
+    for f in fields:
+        if id(f) not in placed:
+            continue
+        x = placed[id(f)]
+        holder = _holder(doc, x)
+        if f.show_if:
+            doc.xref_set_key(holder, "PDFlexIf", pymupdf.get_pdf_str(f.show_if))
+            doc.xref_set_key(holder, "PDFlexVis", pymupdf.get_pdf_str(f.visibility) if f.visibility else "null")
+            on = _truthy(eval_formula(parse_formula(f.show_if), start, kinds))
+            _set_visibility(doc, x, f.visibility if on else "hidden")
+            if f.name not in [c.name for c in conds]:
+                conds.append(f)
+        elif doc.xref_get_key(holder, "PDFlexIf")[0] != "null":  # the condition was taken away
+            for key in ("PDFlexIf", "PDFlexVis"):
+                doc.xref_set_key(holder, key, "null")
+            _set_visibility(doc, x, f.visibility)
+    if not conds:
+        return 0
+    shown = {"": "display.visible", "print": "display.noView", "screen": "display.noPrint", "hidden": "display.hidden"}
+    lines = []
+    for f in conds:
+        empty = '"Off"' if f.kind in ("checkbox", "radio") else '""'
+        lines.append(f"(function() {{ var on = _t({to_js(parse_formula(f.show_if), kinds)}); "
+                     f"var f = _doc.getField({json.dumps(f.name)}); if (!f) return; "
+                     f"f.display = on ? {shown[f.visibility]} : display.hidden; "
+                     f"if (!on && f.valueAsString != {empty}) f.value = {empty}; }})();")
+    w = pymupdf.Widget()
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w.field_name = HELPER
+    w.rect = pymupdf.Rect(0, 0, 1, 1)
+    w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
+    w.border_width, w.border_color = 0, None
+    w.script_calc = "(function() {\n" + js_prelude() + "\n".join(lines) + "\n}).call(this);"
+    annot = array.add(doc[0], w)
+    _set_visibility(doc, annot.xref, "hidden")
+    return annot.xref
+
+
+def _write_calc_order(doc, fields, placed: dict, helper: int) -> None:
+    """Readers recompute only the fields in the form's calculation order (/CO), in that order: each formula
+    after the fields it reads, the conditions last. Calculations of other programs keep their place first."""
+    computed = {f.name: f for f in fields if (f.formula or f.calc) and id(f) in placed}
+    order, seen = [], set()
+
+    def visit(n):
+        if n in seen or n not in computed:
+            return
+        seen.add(n)
+        f = computed[n]
+        for r in sorted(formula_refs(f.formula)) if f.formula else f.calc:
+            visit(r)
+        order.append(_holder(doc, placed[id(f)]))
+    for n in computed:
+        visit(n)
+    if helper:
+        order.append(_holder(doc, helper))
+    cat = doc.pdf_catalog()
+    t, v = doc.xref_get_key(cat, "AcroForm/CO")
+    old = [int(n) for n in re.findall(r"(\d+) 0 R", v)] if t == "array" else []
+    alive = {_holder(doc, w.xref) for page in doc for w in page.widgets()}
+    keep = [x for x in old if x in alive and x not in order]
+    new = list(dict.fromkeys(keep + order))
+    if new or t != "null":
+        doc.xref_set_key(cat, "AcroForm/CO", "[" + " ".join(f"{n} 0 R" for n in new) + "]")
+
+
+def _update_widget(doc, f: Field, kinds: dict | None = None) -> None:
     """Change only what the user edited, so properties PDFlex does not show survive."""
     o = f.orig
     # PyMuPDF 2.1 writes these on the widget only, but viewers read them from the parent field.
     # Written first: update() below redraws the field's look from them (font, size, options)
     if f.name != o.name:
         doc.xref_set_key(f.parent or f.xref, "T", pymupdf.get_pdf_str(f.name))
-    locked, was_locked = bool(f.readonly or f.calc), bool(o.readonly or o.calc)  # a total is computed, not typed
+    locked = bool(f.readonly or f.calc or f.formula)  # a total is computed, not typed
+    was_locked = bool(o.readonly or o.calc or o.formula)
     multi, was_multi = f.kind == "multiline", o.kind == "multiline"
     if f.required != o.required or f.comb != o.comb or locked != was_locked or multi != was_multi:
         flags = int(_inherited(doc, f, "Ff") or 0)
@@ -533,9 +719,10 @@ def _update_widget(doc, f: Field) -> None:
         _set_visibility(doc, f.xref, f.visibility)
     changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt),
                                    "V": ((f.fmt, f.vmin, f.vmax), (o.fmt, o.vmin, o.vmax)),
-                                   "C": ((f.calc, f.calc_op), (o.calc, o.calc_op))}.items() if a != b]
+                                   "C": ((f.calc, f.calc_op, f.formula), (o.calc, o.calc_op, o.formula))
+                                   }.items() if a != b]
     if changed:
-        _set_scripts(doc, f, changed)
+        _set_scripts(doc, f, changed, kinds)
 
 
 def _safe_update(doc, w) -> None:
@@ -636,6 +823,7 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> 
     """The form with these fields. blank: for a program that fills it in later, fields empty and invisible.
     step(n): called as fields are placed, n of len(fields), for a progress bar."""
     _check_names(fields)
+    kinds = _formula_info(fields)[0]
     if blank:  # push buttons go too: the program that fills it in has no use for "Popola test"
         fields = [dataclasses.replace(f, default="") for f in fields if f.kind != "button"]
     doc = open_pdf(src_path)
@@ -657,7 +845,7 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> 
             if f == f.orig:
                 continue
             array.put_back()  # existing fields are changed with the whole array in place, as PyMuPDF expects
-            _update_widget(doc, f)
+            _update_widget(doc, f, kinds)
             if f.kind == "radio" and (f.value != f.orig.value or f.default != f.orig.default):
                 _set_radio_state(doc, f.xref, f.orig.value, clean_value(f.value), f.default == "1",
                                  f.orig.default == "1")
@@ -666,7 +854,7 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> 
             doc[f.page].insert_image(pymupdf.Rect(f.rect), stream=base64.b64decode(f.image), keep_proportion=True)
             continue
         page = doc[f.page]
-        annot = array.add(page, _new_widget(f))
+        annot = array.add(page, _new_widget(f, kinds))
         placed[id(f)] = annot.xref
         if f.align:  # PyMuPDF has no setting for it: written into the field, then the look redrawn
             _set_inherited(doc, dataclasses.replace(f, xref=annot.xref, parent=_xref_ref(doc, annot.xref, "Parent")),
@@ -679,7 +867,12 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> 
             # ponytail: PyMuPDF 2.1 names every new radio "on" state /None, so all buttons in a group
             # act as one. Rename the state to the button's value; drop when PyMuPDF fixes it.
             _set_radio_state(doc, annot.xref, "None", clean_value(f.value), f.default == "1", False)
+    for f in fields:  # a formula reads the other fields by their kind: rewritten in case one changed
+        if f.formula and f.xref:
+            _set_scripts(doc, f, ["C"], kinds)
+    helper = _write_conditions(doc, fields, placed, kinds, array)
     array.put_back()
+    _write_calc_order(doc, fields, placed, helper)
     _apply_tab_order(doc, [(f.page, placed[id(f)]) for f in order if id(f) in placed])
     if blank:
         _hide_fields(doc)
@@ -818,7 +1011,7 @@ def fill_sample(doc: pymupdf.Document) -> None:
 
 _BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "calc_op", "vmin",
                "vmax", "comb", "image", "font", "color", "align", "mark", "tooltip", "readonly", "maxlen", "visibility",
-               "border_color", "fill_color", "border_width", "border_style")
+               "border_color", "fill_color", "border_width", "border_style", "formula", "show_if")
 
 
 def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
@@ -881,6 +1074,9 @@ def place_block(block: list[dict], at: tuple, taken: set[str]) -> list[tuple[dic
     for d in block:
         d = {**copy.deepcopy(d), "name": renamed[d["name"]]}
         d["calc"] = [renamed.get(c, c) for c in d.get("calc", [])]
+        for key in ("formula", "show_if"):
+            if d.get(key):
+                d[key] = rename_all(d[key], renamed)
         x0, y0, x1, y1 = d.pop("rect")
         out.append((d, (at[0] + x0, at[1] + y0, at[0] + x1, at[1] + y1)))
     return out

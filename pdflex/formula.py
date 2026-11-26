@@ -28,10 +28,11 @@ _TOKEN = re.compile(r"""
     (?P<space>\s+)
   | (?P<num>\d+(?:[.,]\d+)?|[.,]\d+)
   | (?P<str>"(?:[^"]|"")*")
-  | (?P<ref>\[(?:\\.|[^\]\\])*\])
+  | (?P<ref>\[(?:\\.|\[[^\[\]\\]*\]|[^\[\]\\])*\])
   | (?P<op><>|<=|>=|[-+*/×÷()=<>;])
   | (?P<word>[^\W\d_]\w*)
 """, re.VERBOSE)
+_REF = re.compile(r"\[(?:\\.|\[[^\[\]\\]*\]|[^\[\]\\])*\]")  # brackets inside a name are fine when paired: [Nome[0]]
 
 
 def _ref_name(token: str) -> str:
@@ -39,8 +40,12 @@ def _ref_name(token: str) -> str:
 
 
 def ref_text(name: str) -> str:
-    """[name] as written in a formula: ] and \\ escaped."""
-    return "[" + name.replace("\\", "\\\\").replace("]", "\\]") + "]"
+    """[name] as written in a formula: as it is when it reads back the same ([Nome[0]]), else with
+    brackets and \\ escaped ([a\\]b])."""
+    plain = "[" + name.replace("\\", "\\\\") + "]"
+    if _REF.fullmatch(plain) and _ref_name(plain) == name:
+        return plain
+    return "[" + re.sub(r"([\\\[\]])", r"\\\1", name) + "]"
 
 
 def _tokens(text: str) -> list[tuple[str, str, int]]:
@@ -194,14 +199,19 @@ def refs(text: str) -> set[str]:
 
 def rename(text: str, old: str, new: str) -> str:
     """Every [old] becomes [new]; the rest of the text stays exactly as typed."""
+    return rename_all(text, {old: new})
+
+
+def rename_all(text: str, names: dict[str, str]) -> str:
+    """Several names at once: {A: A_2, A_2: A_2_2} does not turn A into A_2_2."""
     try:
         toks = _tokens(text)
     except FormulaError:
         return text
     out, last = [], 0
     for kind, value, pos in toks:
-        if kind == "ref" and _ref_name(value) == old:
-            out += [text[last:pos], ref_text(new)]
+        if kind == "ref" and _ref_name(value) in names and names[_ref_name(value)] != _ref_name(value):
+            out += [text[last:pos], ref_text(names[_ref_name(value)])]
             last = pos + len(value)
     return "".join(out) + text[last:]
 
