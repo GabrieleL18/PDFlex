@@ -637,3 +637,12 @@ def test_paste_wide_field_in_grid_goes_down(qapp, tmp_path):
     t.select_many([f])
     t.copy_selected()
     assert t.paste()[0].rect == pytest.approx((102, 132, 248, 158))
+
+
+def test_paste_nearly_square_checkbox_goes_down(qapp, tmp_path):
+    """Detected check boxes are rarely exactly square: one a little taller than wide is still copied down a list."""
+    t = _grid(tmp_path, (100, 150, 200, 250), (100, 130, 160, 190))
+    f = t.add_field("checkbox", 0, (110, 105, 120, 115.2))
+    t.select_many([f])
+    t.copy_selected()
+    assert t.paste()[0].rect == pytest.approx((110, 135, 120, 145.2))

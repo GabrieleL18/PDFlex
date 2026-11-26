@@ -82,7 +82,7 @@ class Logic:
         """The values with the totals and formulas worked out and the hidden fields emptied, and the hidden ones.
         ponytail: repeats until nothing changes (about n² for a big form); a single pass in dependency order
         if that ever matters."""
-        vals = dict(values)
+        vals = dict(values)  # what formulas read: a number result stays unrounded, as in readers
         hidden: set[str] = set()
         for _ in range(len(self.kinds) + 1):
             before = dict(vals)
@@ -90,12 +90,15 @@ class Logic:
             for n in hidden:
                 vals[n] = ""
             for n, node in self.computed.items():
-                vals[n] = format_value(evaluate(node, vals, self.kinds), self.formats.get(n, ""))
+                r = evaluate(node, vals, self.kinds)
+                keep = isinstance(r, float) and self.kinds.get(n) == "number"
+                vals[n] = r if keep else format_value(r, self.formats.get(n, ""))
             for n in hidden:
                 vals[n] = ""
             if vals == before:
                 break
-        return vals, hidden
+        shown = {n: format_value(v, self.formats.get(n, "")) if isinstance(v, float) else v for n, v in vals.items()}
+        return shown, hidden
 
     def apply(self, doc) -> None:
         """Work it all out on the filled document: computed values written, hidden fields emptied and hidden."""

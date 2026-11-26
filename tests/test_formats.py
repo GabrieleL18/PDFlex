@@ -75,7 +75,7 @@ def test_saved_for_filling_invisible_and_empty(make_pdf, tmp_path):
 
 
 @pytest.mark.parametrize("fmt, want", [
-    ("number|2|1", "1.234,50"), ("number|0|0", "1234"), ("amount|2|1", "€ 1.234,50"), ("amount|0|0|CHF|0", "1234 CHF"), ("percent|1|1", "12,5%"),
+    ("number|2|1", "1.234,50"), ("number|0|0", "1235"), ("amount|2|1", "€ 1.234,50"), ("amount|0|0|CHF|0", "1235 CHF"), ("percent|1|1", "12,5%"),
     ("cap", "00100"), ("cf", "RSSMRA80A01H501U")])
 def test_sample_values_follow_the_format(fmt, want):
     assert sample_value(fmt, "x") == want

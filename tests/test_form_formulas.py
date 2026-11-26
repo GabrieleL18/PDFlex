@@ -183,3 +183,27 @@ def test_saved_scripts_run(make_pdf, tmp_path):
     assert off["display"]["Dettaglio"] == 1
     on = _run_js(js[HELPER], {"Altro": "Yes", "Dettaglio": "testo"})
     assert on["display"]["Dettaglio"] == 3  # shown again as the user chose it: print only
+
+
+def test_formula_ignores_a_field_its_condition_hides(make_pdf, tmp_path):
+    """Readers run the formulas before the helper empties a field just hidden: the formula must already
+    read it as empty, or the total keeps the old value until the next edit."""
+    fields = [Field("checkbox", 0, (10, 10, 30, 30), "Altro"),
+              Field("text", 0, (10, 40, 100, 60), "Importo", fmt="number|2|1"),
+              Field("text", 0, (10, 70, 100, 90), "Dettaglio", fmt="number|2|1", show_if="[Altro] = SÌ"),
+              Field("text", 0, (10, 100, 100, 120), "Totale", fmt="number|2|1", formula="SOMMA([Importo]; [Dettaglio])")]
+    doc = open_pdf(_save(make_pdf, tmp_path, fields))
+    js = _field_js(doc, _widget(doc, "Totale"))["C"]
+    assert _run_js(js, {"Altro": "Off", "Importo": "10", "Dettaglio": "5"})["value"] == 10
+    assert _run_js(js, {"Altro": "Yes", "Importo": "10", "Dettaglio": "5"})["value"] == 15
+
+
+def test_blank_export_keeps_conditional_fields_visible(make_pdf, tmp_path):
+    """The program that fills the export runs no scripts: a field hidden by its condition would stay hidden."""
+    fields = [Field("checkbox", 0, (10, 10, 30, 30), "Altro"),
+              Field("text", 0, (10, 40, 100, 60), "Dettaglio", show_if="[Altro] = SÌ")]
+    out = tmp_path / "gestionale.pdf"
+    save_with_fields(make_pdf(tmp_path, ["x"]), fields, out, blank=True)
+    doc = open_pdf(out)
+    assert HELPER not in [w.field_name for p in doc for w in p.widgets()]
+    assert not int(doc.xref_get_key(_widget(doc, "Dettaglio").xref, "F")[1] or 0) & 2

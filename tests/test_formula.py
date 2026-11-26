@@ -133,3 +133,21 @@ def test_js_agrees_with_python(text, values):
     out = subprocess.run(["node", "-e", js], capture_output=True, text=True, encoding="utf-8")
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == py
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node.js not installed")
+@pytest.mark.parametrize("text,raw,expected", [("[Q] * 100", 0.125, "12,5"), ("[Q] * 2", 3.125, "6,25"),
+                                               ("[Q] + 1", -0.125, "0,88")])
+def test_js_reads_raw_reader_numbers(text, raw, expected):
+    """Readers keep a number field's value as a plain number, and valueAsString as "0.125": never 125."""
+    js = ("var self = {getField: function(n) { return {value: " + repr(raw) + ", valueAsString: '" + repr(raw) + "'}; }};\n"
+          "(function() {\n" + js_prelude() + "\nvar r = " + to_js(parse(text), KINDS) + ";\n"
+          "console.log(_fmt(r)); }).call(self);")
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True, encoding="utf-8")
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == expected == as_text(evaluate(parse(text), {"Q": raw}, KINDS))
+
+
+def test_read_number_leading_zero_is_decimal():
+    assert read_number("0.125") == 0.125 and read_number("-0.125") == -0.125
+    assert read_number("1.234") == 1234  # Italian thousands still

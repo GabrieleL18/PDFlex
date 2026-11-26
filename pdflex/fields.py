@@ -99,11 +99,12 @@ def _unescape(text: str) -> str:
     return re.sub(r"\\u([0-9A-Fa-f]{4})", lambda u: chr(int(u.group(1), 16)), text)
 
 
-def _formula_js(f: Field, kinds: dict) -> str:
-    """The calculation script: the formula's text kept in a comment (so it reopens as typed), then its code."""
+def _formula_js(f: Field, kinds: dict, hide: dict | None = None) -> str:
+    """The calculation script: the formula's text kept in a comment (so it reopens as typed), then its code.
+    hide: see js_prelude."""
     numeric = fmt_parts(f.fmt, f.kind)[0] in NUMERIC
     put = 'event.value = (typeof r == "number") ? r : "";' if numeric else "event.value = _fmt(r);"
-    return (f"/** PDFlex: {_js_escape(f.formula).replace('*/', '* /')} **/\n(function() {{\n{js_prelude()}"
+    return (f"/** PDFlex: {_js_escape(f.formula).replace('*/', '* /')} **/\n(function() {{\n{js_prelude(hide)}"
             f"var r = {to_js(parse_formula(f.formula), kinds)};\n{put}\n}}).call(this);")
 
 
@@ -543,23 +544,23 @@ def _set_inherited(doc, f: Field, key: str, value: str) -> None:
         doc.xref_set_key(x, key, value)
 
 
-def _scripts(f: Field, kinds: dict | None = None) -> dict[str, str | None]:
+def _scripts(f: Field, kinds: dict | None = None, hide: dict | None = None) -> dict[str, str | None]:
     """The field's JavaScript by action key (None: no script), as PDFlex writes it."""
     fmt, stroke, validate = (_fmt_js(f.fmt, f.kind, f.vmin, f.vmax) if f.kind in ("text", "multiline", "date")
                              else (None,) * 3)
     calc = None
     if f.formula:
-        calc = _formula_js(f, kinds or {})
+        calc = _formula_js(f, kinds or {}, hide)
     elif f.calc:
         calc = f"AFSimple_Calculate(\"{f.calc_op}\", new Array(" + ", ".join(f'"{n}"' for n in f.calc) + "));"
     return {"F": fmt, "K": stroke, "V": validate, "C": calc}
 
 
-def _set_scripts(doc, f: Field, keys, kinds: dict | None = None) -> None:
+def _set_scripts(doc, f: Field, keys, kinds: dict | None = None, hide: dict | None = None) -> None:
     """Write format / sum scripts into the field itself: every other property stays as it was.
     The calculation order is written once for the whole form, by build_pdf."""
     holder = f.parent or f.xref
-    scripts = _scripts(f, kinds)
+    scripts = _scripts(f, kinds, hide)
     for key in keys:
         for x in {f.xref, f.parent} - {0}:  # the old one, wherever it was
             if doc.xref_get_key(x, f"AA/{key}")[0] != "null":
@@ -588,10 +589,16 @@ def _start_values(fields) -> dict[str, str]:
     return out
 
 
-def _write_conditions(doc, fields, placed: dict, kinds: dict, array) -> int:
+def _hide_js(fields, kinds) -> dict[str, str]:
+    """Field name -> its condition as JavaScript, for js_prelude."""
+    return {f.name: to_js(parse_formula(f.show_if), kinds) for f in fields if f.show_if}
+
+
+def _write_conditions(doc, fields, placed: dict, kinds: dict, array, blank: bool = False) -> int:
     """Each condition into its field (/PDFlexIf, with the user's own visibility in /PDFlexVis), the fields
     hidden or shown as the form opens, and the hidden helper field whose calculation keeps doing it while
-    the form is filled in (a check box has no calculation of its own). Returns the helper's xref, 0 if none."""
+    the form is filled in (a check box has no calculation of its own). Returns the helper's xref, 0 if none.
+    blank: for a program that runs no scripts: no conditions, every field as the user set it."""
     start = _start_values(fields)
     conds = []
     for f in fields:
@@ -599,14 +606,14 @@ def _write_conditions(doc, fields, placed: dict, kinds: dict, array) -> int:
             continue
         x = placed[id(f)]
         holder = _holder(doc, x)
-        if f.show_if:
+        if f.show_if and not blank:
             doc.xref_set_key(holder, "PDFlexIf", pymupdf.get_pdf_str(f.show_if))
             doc.xref_set_key(holder, "PDFlexVis", pymupdf.get_pdf_str(f.visibility) if f.visibility else "null")
             on = _truthy(eval_formula(parse_formula(f.show_if), start, kinds))
             _set_visibility(doc, x, f.visibility if on else "hidden")
             if f.name not in [c.name for c in conds]:
                 conds.append(f)
-        elif doc.xref_get_key(holder, "PDFlexIf")[0] != "null":  # the condition was taken away
+        elif blank or doc.xref_get_key(holder, "PDFlexIf")[0] != "null":  # the condition was taken away
             for key in ("PDFlexIf", "PDFlexVis"):
                 doc.xref_set_key(holder, key, "null")
             _set_visibility(doc, x, f.visibility)
@@ -626,7 +633,7 @@ def _write_conditions(doc, fields, placed: dict, kinds: dict, array) -> int:
     w.rect = pymupdf.Rect(0, 0, 1, 1)
     w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
     w.border_width, w.border_color = 0, None
-    w.script_calc = "(function() {\n" + js_prelude() + "\n".join(lines) + "\n}).call(this);"
+    w.script_calc = "(function() {\n" + js_prelude(_hide_js(conds, kinds)) + "\n".join(lines) + "\n}).call(this);"
     annot = array.add(doc[0], w)
     _set_visibility(doc, annot.xref, "hidden")
     return annot.xref
@@ -867,10 +874,12 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> 
             # ponytail: PyMuPDF 2.1 names every new radio "on" state /None, so all buttons in a group
             # act as one. Rename the state to the button's value; drop when PyMuPDF fixes it.
             _set_radio_state(doc, annot.xref, "None", clean_value(f.value), f.default == "1", False)
-    for f in fields:  # a formula reads the other fields by their kind: rewritten in case one changed
-        if f.formula and f.xref:
-            _set_scripts(doc, f, ["C"], kinds)
-    helper = _write_conditions(doc, fields, placed, kinds, array)
+    hide = {} if blank else _hide_js([f for f in fields if id(f) in placed], kinds)
+    for f in fields:  # a formula reads the other fields by their kind and conditions: rewritten every time
+        if f.formula and id(f) in placed:
+            x = placed[id(f)]
+            _set_scripts(doc, dataclasses.replace(f, xref=x, parent=_xref_ref(doc, x, "Parent")), ["C"], kinds, hide)
+    helper = _write_conditions(doc, fields, placed, kinds, array, blank)
     array.put_back()
     _write_calc_order(doc, fields, placed, helper)
     _apply_tab_order(doc, [(f.page, placed[id(f)]) for f in order if id(f) in placed])
@@ -965,7 +974,8 @@ def fmt_number(n: float, fmt: str) -> str:
     base, args = fmt_parts(fmt)
     if base == "percent":
         n *= 100
-    s = f"{n:,.{int(args[0])}f}".replace(",", " ").replace(".", ",").replace(" ", "." if args[1] != "0" else "")
+    from pdflex.formula import _round
+    s = f"{_round(n, int(args[0])):,.{int(args[0])}f}".replace(",", " ").replace(".", ",").replace(" ", "." if args[1] != "0" else "")
     if base == "amount" and args[2]:
         return f"{args[2]} {s}" if args[3] != "0" else f"{s} {args[2]}"
     return s + "%" if base == "percent" else s

@@ -95,3 +95,12 @@ def test_fill_dialog_live(qapp, make_pdf, tmp_path):
     dlg.redraw()
     assert dlg.form.isRowVisible(boxes["Dettaglio"])
     dlg.done(0)
+
+
+def test_chained_formulas_use_the_unrounded_result(make_pdf, tmp_path):
+    """Like readers: a formula over another formula's field reads 3.125, not the "€ 3,13" it shows."""
+    extra = [Field("text", 0, (10, 160, 100, 180), "Cento", fmt="number|2|1", formula="[Totale] * 100")]
+    logic = form_logic(open_pdf(_form(make_pdf, tmp_path, extra)))
+    values, _ = logic.run({"Quantità": "2,5", "Prezzo": "1,25", "Altro": "", "Dettaglio": ""})
+    assert values["Totale"] == "€ 3,13"  # half up, as ARROTONDA and readers' plain numbers
+    assert values["Cento"] == "312,50"

@@ -267,7 +267,7 @@ def read_number(s) -> float | None:
         s = s[:-1]
     if "," in s:
         s = s.replace(".", "").replace(",", ".", 1)
-    elif re.match(r"^-?\d{1,3}(\.\d{3})+$", s):
+    elif re.match(r"^-?[1-9]\d{0,2}(\.\d{3})+$", s):  # "0.125" is a decimal, not thousands
         s = s.replace(".", "")
     if not _NUM.match(s):
         return None
@@ -300,6 +300,8 @@ def as_text(v) -> str:
 
 def _value(name: str, values: dict, kinds: dict):
     v = values.get(name, "")
+    if kinds.get(name) == "number" and isinstance(v, float):
+        return v  # another formula's result, unrounded: what readers keep too
     v = "" if v is None else str(v)
     kind = kinds.get(name, "text")
     if kind == "checkbox":
@@ -399,18 +401,24 @@ def evaluate(node, values: dict[str, str], kinds: dict[str, str]):
 
 # ---------------------------------------------------------------- JavaScript
 
-def js_prelude() -> str:
-    """The helpers every generated script starts with; the same rules as above, line by line."""
-    return ("""var _doc = this;
+def js_prelude(hide: dict[str, str] | None = None) -> str:
+    """The helpers every generated script starts with; the same rules as above, line by line.
+    hide: field name -> its "show only if" condition as JavaScript. Such a field reads as empty while its
+    condition is false, even before the helper empties it (readers run the formulas first)."""
+    conds = ", ".join(f"{json.dumps(n)}: function() {{ return {js}; }}" for n, js in (hide or {}).items())
+    return ("var _hide = {" + conds + "}, _busy = {};\n" + """var _doc = this;
+function _hid(n) { var c = _hide[n]; if (!c || _busy[n]) return false; _busy[n] = 1;
+  try { return !_t(c()); } finally { delete _busy[n]; } }
 function _rn(s) { if (typeof s == "number") return s; if (typeof s == "boolean") return s ? 1 : 0;
   s = String(s).replace(/[\\s\\u00a0\\u20ac$\\u00a3]|CHF/gi, ""); var pc = /%$/.test(s); if (pc) s = s.slice(0, -1);
   if (s.indexOf(",") >= 0) s = s.replace(/\\./g, "").replace(",", ".");
-  else if (/^-?\\d{1,3}(\\.\\d{3})+$/.test(s)) s = s.replace(/\\./g, "");
+  else if (/^-?[1-9]\\d{0,2}(\\.\\d{3})+$/.test(s)) s = s.replace(/\\./g, "");
   if (!/^[-+]?(\\d+\\.?\\d*|\\.\\d+)$/.test(s)) return null; var n = parseFloat(s); return pc ? n / 100 : n; }
-function _v(name, kind) { var f = _doc.getField(name); if (!f) return kind == "checkbox" ? false : (kind == "number" ? null : "");
+function _v(name, kind) { var f = _doc.getField(name);
+  if (!f || _hid(name)) return kind == "checkbox" ? false : (kind == "number" ? null : "");
   var v = (typeof f.valueAsString == "string") ? f.valueAsString : f.value; v = (v === null || v === undefined) ? "" : String(v);
   if (kind == "checkbox") return ["", "off", "0", "no", "false", "falso", "n"].indexOf(v.replace(/^\\s+|\\s+$/g, "").toLowerCase()) < 0;
-  if (kind == "number") return /\\S/.test(v) ? _rn(v) : null;
+  if (kind == "number") return typeof f.value == "number" ? f.value : (/\\S/.test(v) ? _rn(v) : null);
   if (kind == "radio" && v == "Off") return ""; return v; }
 function _num(x) { if (x === null || x === "") return 0; var n = _rn(x); return n === null ? NaN : n; }
 function _t(x) { if (typeof x == "string") return x !== ""; return !!x && x === x; }

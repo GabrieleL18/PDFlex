@@ -1462,7 +1462,7 @@ class EditorTab(QWidget):
 
     def paste(self) -> list[Field]:
         """Ctrl+V. Another page: the same place. The same page, the first that works of:
-        the next free row of the table the copied fields are in (the next free column first, for a block
+        the next free row of the table the copied fields are in (the next free column first, for a block clearly
         taller than wide: fields stacked in a column go to the column beside it); the move the user made to the last pasted
         fields, done again; a little lower-right (back over the copied ones when that would leave the sheet).
         The fields keep their places among themselves."""
@@ -1487,7 +1487,7 @@ class EditorTab(QWidget):
                                     [(t[1], t[0], t[3], t[2]) for t in taken], page.rect.width)
                     return None if dx is None else (home[0] + dx, home[1])
 
-                for go in ((side, down) if h > w else (down, side)):
+                for go in ((side, down) if h > 1.2 * w else (down, side)):  # clearly a column, not a near-square box
                     if (table := go()) is not None:
                         break
             made = [f for f in clip["made"] if any(f is g for g in self.fields)]
