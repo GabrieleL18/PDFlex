@@ -55,6 +55,10 @@ class Field:
     readonly: bool = False  # a computed total is read-only anyway, whatever this says
     maxlen: int = 0  # most characters a text field takes (0 no limit; with comb the boxes are the limit)
     visibility: str = ""  # see VISIBILITY
+    border_color: str = ""  # "" the usual grey, "none" no border, else "#rrggbb"
+    fill_color: str = ""  # "" no background, else "#rrggbb"
+    border_width: int = 1  # 1-3 pt (see BORDER_WIDTHS)
+    border_style: str = ""  # see BORDER_STYLES
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
@@ -99,6 +103,53 @@ ALIGN = {0: tr("Sinistra"), 1: tr("Centro"), 2: tr("Destra")}
 MARKS = {"": tr("Spunta"), "8": tr("Croce"), "l": tr("Punto"), "n": tr("Quadrato"), "u": tr("Rombo"), "H": tr("Stella")}
 VISIBILITY = {"": tr("Visibile"), "hidden": tr("Nascosto"), "print": tr("Solo in stampa"), "screen": tr("Solo a schermo")}
 _VIS_FLAGS = {"": 4, "hidden": 2, "print": 36, "screen": 0}  # annotation flags: Hidden 2, Print 4, NoView 32
+BORDER_STYLES = {"": tr("Pieno"), "dashed": tr("Tratteggiato"), "beveled": tr("In rilievo"), "inset": tr("Incassato"),
+                 "underline": tr("Sottolineato")}
+BORDER_WIDTHS = {1: tr("Sottile"), 2: tr("Medio"), 3: tr("Spesso")}
+_BS = {"": "S", "dashed": "D", "beveled": "B", "inset": "I", "underline": "U"}  # PDF border styles
+_GREY = (0.6, 0.6, 0.6)  # the border every field gets unless chosen otherwise
+LOOK_KEYS = ("border_color", "fill_color", "border_width", "border_style")
+
+
+def _hex_any(rgb) -> str:
+    """"#rrggbb" from PyMuPDF's 0..1 floats, black included; "" when there is no colour."""
+    rgb = list(rgb or [])[:3]
+    if len(rgb) == 1:
+        rgb *= 3
+    return "#" + "".join(f"{round(c * 255):02x}" for c in rgb) if len(rgb) == 3 else ""
+
+
+def _apply_look(doc, w, f) -> None:
+    """Border and background of the widget `w` from the field `f` (drawn by the update that follows)."""
+    if f.border_color == "none":
+        w.border_width, w.border_color = 0, None
+    else:
+        w.border_width = f.border_width or 1
+        w.border_color = _rgb(f.border_color) if f.border_color else _GREY
+    w.fill_color = _rgb(f.fill_color) if f.fill_color else None
+    w.border_style = _BS.get(f.border_style, "S")
+    w.border_dashes = [3, 3] if f.border_style == "dashed" else None
+    if doc is not None:  # PyMuPDF leaves an old colour in place when it is taken away
+        for key, gone in (("MK/BC", f.border_color == "none"), ("MK/BG", not f.fill_color)):
+            if gone and doc.xref_get_key(w.xref, key)[0] != "null":
+                doc.xref_set_key(w.xref, key, "null")
+        if f.border_style != "dashed" and doc.xref_get_key(w.xref, "BS/D")[0] != "null":
+            doc.xref_set_key(w.xref, "BS/D", "null")
+
+
+def _look_of(w) -> dict:
+    bc, width = list(w.border_color or []), w.border_width or 0
+    if len(bc) == 1:
+        bc *= 3
+    if not bc or not width:
+        border = "none"
+    elif all(abs(c - g) < 0.01 for c, g in zip(bc, _GREY)):
+        border = ""
+    else:
+        border = _hex_any(bc)
+    style = {v: k for k, v in _BS.items()}.get((w.border_style or "S")[:1].upper(), "")
+    return {"border_color": border, "fill_color": _hex_any(w.fill_color), "border_style": style,
+            "border_width": min(max(round(width), 1), 3)}
 
 
 def _visibility(flags: int) -> str:
@@ -296,6 +347,8 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
             f.tooltip = w.field_label or ""
             t, v = doc.xref_get_key(w.xref, "F")
             f.visibility = _visibility(int(v) if t == "int" else 0)
+            for key, value in _look_of(w).items():
+                setattr(f, key, value)
             m = re.search(r"AFSimple_Calculate\(\s*\"(SUM|PRD|AVG|MIN|MAX)\"\s*,\s*new Array\((.*?)\)", js.get("C", ""))
             if m:
                 f.calc_op, f.calc = m.group(1), re.findall(r'"([^"]+)"', m.group(2))
@@ -353,8 +406,7 @@ def _new_widget(f: Field) -> pymupdf.Widget:
     w.text_fontsize = f.font_size
     w.text_font = f.font or "Helv"
     w.text_color = _rgb(f.color)
-    w.border_width = 1
-    w.border_color = (0.6, 0.6, 0.6)  # visible box for whoever fills the form
+    _apply_look(None, w, f)  # by default a grey box, visible for whoever fills the form
     if f.required:
         w.field_flags |= pymupdf.PDF_FIELD_IS_REQUIRED
     if f.kind == "multiline":
@@ -469,6 +521,8 @@ def _update_widget(doc, f: Field) -> None:
     w = page.load_widget(f.xref)
     if f.rect != o.rect:
         w.rect = pymupdf.Rect(f.rect)
+    if any(getattr(f, k) != getattr(o, k) for k in LOOK_KEYS):
+        _apply_look(doc, w, f)
     if f.default != o.default:
         if f.kind == "checkbox":
             w.field_value = f.default == "1"
@@ -763,7 +817,8 @@ def fill_sample(doc: pymupdf.Document) -> None:
 
 
 _BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "calc_op", "vmin",
-               "vmax", "comb", "image", "font", "color", "align", "mark", "tooltip", "readonly", "maxlen", "visibility")
+               "vmax", "comb", "image", "font", "color", "align", "mark", "tooltip", "readonly", "maxlen", "visibility",
+               "border_color", "fill_color", "border_width", "border_style")
 
 
 def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:
