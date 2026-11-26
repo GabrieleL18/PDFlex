@@ -7,12 +7,13 @@ A Windows app to make fillable PDF forms, compare two versions of a document and
 ## What it does
 
 - **Forms**: draw fields (text, date, check boxes, choices, menus, signature) or press *Detect fields* to make them from `____` lines and empty boxes. Also:
-  - formats (number, amount, percentage with the decimals you choose; date and time; postcode, tax code, phone, email), automatic sums, font, size, colour and alignment of the text;
+  - formats (number, amount in €, $, £ or CHF before or after the number, percentage with the decimals you choose; date and time; postcode, tax code, phone, email), smallest and largest number accepted, totals (sum, average, minimum, maximum, product), font, size, colour and alignment of the text;
+  - for every field: width and height in points, tooltip, read-only, visible / hidden / print only / screen only, most characters; check boxes with a check, cross, dot, square, diamond or star;
   - *Save form*: the PDF with the fields as you see them, to reopen in PDFlex or to have someone fill in;
   - *Export for software*: a copy with empty fields, no borders and no buttons, for a program that fills them in by itself;
-  - align several fields (Ctrl+click to select them), guides while dragging and a 5-point grid;
-  - copy and paste fields, saved blocks of fields to reuse in other forms, fields imported from another PDF;
-  - drag-and-drop Tab order and undo/redo (Ctrl+Z / Ctrl+Y);
+  - select several fields (Ctrl+click) to align them or change their properties all at once ("(mixed)" where they differ), guides while dragging and a 5-point grid;
+  - copy and paste fields (a copied table row goes into the next free row; elsewhere each paste repeats the move you made), saved blocks of fields to reuse in other forms, fields imported from another PDF;
+  - Tab order by drag and drop, by rows or by columns, with its numbers shown on the fields; undo/redo (Ctrl+Z / Ctrl+Y);
   - preview with sample data;
   - *Fill in*: fill the fields by hand, with the filled form beside them, and save a copy.
 - **Compare**: shows the differences side by side, scrolling together. You can:
@@ -29,7 +30,7 @@ A Windows app to make fillable PDF forms, compare two versions of a document and
 - **Batch**: a PDF form + an Excel/CSV file gives one filled PDF per row (columns go to the fields with the same name), or a single PDF with all the forms, ready to print.
 - **Pages**: merge PDFs, reorder, rotate, delete, extract and split pages. In *Options* you can add page numbers, a header and a watermark and make the file smaller.
 
-If PDFlex closes unexpectedly, the next time it opens it offers to pick up where you left off. A new version is downloaded by itself; it installs when you press the button, and PDFlex reopens.
+Saving shows a short note at the bottom of the window that goes away by itself. If PDFlex closes unexpectedly, the next time it opens it offers to pick up where you left off. A new version is downloaded by itself; it installs when you press the button, and PDFlex reopens.
 
 ## Install
 
