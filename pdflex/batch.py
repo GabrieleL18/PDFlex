@@ -137,7 +137,7 @@ def batch_fill(template: str | Path, rows: list[dict], mapping: dict[str, str], 
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressDialog,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QProgressDialog, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -177,6 +177,17 @@ class BatchTab(QWidget):
         self.match = QLabel(tr("Le colonne vengono abbinate ai campi con lo stesso nome (maiuscole e spazi non contano)."),
                             objectName="Muted")
         self.match.setWordWrap(True)
+        # one row per field: the column it is filled from, chosen here when the names differ
+        self._col_boxes: dict[str, QComboBox] = {}
+        self.cols = QWidget()
+        self.cols_form = QFormLayout(self.cols)
+        self.cols_form.setContentsMargins(0, 0, 8, 0)
+        self.cols_scroll = QScrollArea()
+        self.cols_scroll.setWidget(self.cols)
+        self.cols_scroll.setWidgetResizable(True)
+        self.cols_scroll.setFrameShape(QFrame.NoFrame)
+        self.cols_scroll.setMaximumHeight(240)
+        self.cols_title = QLabel(tr("Campi e colonne"), objectName="H2")
         self.name_col = QComboBox()
         self.flatten = ui.Toggle(tr("Rendi i PDF non modificabili (i campi diventano testo)"))
         self.merge = ui.Toggle(tr("Un solo PDF con tutti i moduli, uno dopo l'altro (da stampare)"))
@@ -194,6 +205,8 @@ class BatchTab(QWidget):
         pl.setContentsMargins(20, 16, 20, 16)
         pl.setSpacing(10)
         pl.addWidget(self.match)
+        pl.addWidget(self.cols_title)
+        pl.addWidget(self.cols_scroll)
         pl.addLayout(name_row)
         pl.addWidget(self.merge)
         pl.addWidget(self.flatten)
@@ -224,13 +237,18 @@ class BatchTab(QWidget):
 
     def set_template(self, path: str):
         doc = open_pdf(path)
+        from pdflex.fields import HELPER
+        from pdflex.logic import form_logic
+        computed = form_logic(doc).computed  # worked out on every copy, never taken from a column
         names = list(dict.fromkeys(w.field_name for page in doc for w in page.widgets()
                                    if w.field_type not in (pymupdf.PDF_WIDGET_TYPE_SIGNATURE,
-                                                           pymupdf.PDF_WIDGET_TYPE_BUTTON)))
+                                                           pymupdf.PDF_WIDGET_TYPE_BUTTON)
+                                   and w.field_name != HELPER and w.field_name not in computed))
         if not names:
             raise ValueError(tr("questo PDF non ha campi da compilare. Aggiungili prima nella sezione Moduli."))
         self.template, self.field_names = path, names
         self.drop_pdf.set_file(path)
+        self._rebuild_columns()
         self._update()
 
     def set_table(self, path: str):
@@ -240,10 +258,37 @@ class BatchTab(QWidget):
         self.name_col.addItem(tr("(numerati: modulo_001, modulo_002...)"), None)
         for h in self.headers:
             self.name_col.addItem(h, h)
+        self._rebuild_columns()
         self._update()
 
+    def _rebuild_columns(self):
+        """A menu of columns for every field, set to the column with its name when there is one."""
+        while self.cols_form.rowCount():
+            self.cols_form.removeRow(0)
+        self._col_boxes = {}
+        auto = match_columns(self.field_names, self.headers) if self.template and self.headers else {}
+        for name in self.field_names if self.headers else []:
+            box = QComboBox()
+            box.addItem(tr("(nessuna)"), None)
+            for h in self.headers:
+                box.addItem(h, h)
+            box.setCurrentIndex(max(box.findData(auto.get(name)), 0))
+            box.currentIndexChanged.connect(self._update)
+            self._col_boxes[name] = box
+            self.cols_form.addRow(name, box)
+        shown = bool(self._col_boxes)
+        self.cols_title.setVisible(shown)
+        self.cols_scroll.setVisible(shown)
+
+    def column_box(self, field: str) -> QComboBox | None:
+        return self._col_boxes.get(field)
+
+    def current_mapping(self) -> dict[str, str]:
+        """Field name -> the column chosen for it."""
+        return {n: b.currentData() for n, b in self._col_boxes.items() if b.currentData()}
+
     def _update(self):
-        self.mapping = match_columns(self.field_names, self.headers) if self.template and self.headers else {}
+        self.mapping = self.current_mapping() if self.template and self.headers else {}
         ready = bool(self.mapping and self.rows)
         if self.template and self.headers:
             missing = [n for n in self.field_names if n not in self.mapping]
@@ -251,8 +296,7 @@ class BatchTab(QWidget):
             if missing:
                 text += tr(" Restano vuoti: ") + ", ".join(missing[:12]) + ("..." if len(missing) > 12 else "")
             if not self.mapping:
-                text = (tr("Nessuna colonna ha il nome di un campo. Rinomina le colonne come i campi: ")
-                        + ", ".join(self.field_names[:12]))
+                text = tr("Nessuna colonna ha il nome di un campo: scegli qui sotto la colonna di ogni campo.")
             self.match.setText(text)
         merge = self.merge.isChecked()
         self.b_run.setText(tr("Crea il PDF") if merge else tr("Crea {0} PDF").format(len(self.rows)) if ready else tr("Crea i PDF"))

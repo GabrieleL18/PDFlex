@@ -78,3 +78,39 @@ def test_filled_copy_keeps_checkbox_mark(make_pdf, tmp_path):
     t, v = doc.xref_get_key(w.xref, "AP/N")
     on = [int(x) for k, x in re.findall(r"/(\w+)\s+(\d+) 0 R", v) if k != "Off"]
     assert w.field_value not in (False, "Off") and b"(8) Tj" in doc.xref_stream(on[0])
+
+
+def _batch_tab(qapp, make_pdf, tmp_path, fields, csv_text):
+    from pdflex.batch import BatchTab
+    out = tmp_path / "m.pdf"
+    save_with_fields(make_pdf(tmp_path, ["Modulo"]), fields, out)
+    table = tmp_path / "dati.csv"
+    table.write_text(csv_text, encoding="utf-8")
+    tab = BatchTab()
+    tab.set_template(str(out))
+    tab.set_table(str(table))
+    return tab
+
+
+def test_mapping_table_prefilled_and_editable(qapp, make_pdf, tmp_path):
+    tab = _batch_tab(qapp, make_pdf, tmp_path, [Field("text", 0, (10, 10, 200, 30), "Nome"),
+                                                Field("text", 0, (10, 40, 200, 60), "Codice")],
+                     "nome;cod_cliente\nMario;C1\n")
+    assert tab.column_box("Nome").currentText() == "nome"
+    assert tab.column_box("Codice").currentData() is None
+    assert "1 campi su 2" in tab.match.text()
+    box = tab.column_box("Codice")
+    box.setCurrentIndex(box.findData("cod_cliente"))
+    assert tab.current_mapping() == {"Nome": "nome", "Codice": "cod_cliente"}
+    assert "2 campi su 2" in tab.match.text() and tab.b_run.isEnabled()
+
+
+def test_computed_fields_not_listed(qapp, make_pdf, tmp_path):
+    from pdflex.fields import HELPER
+    tab = _batch_tab(qapp, make_pdf, tmp_path,
+                     [Field("text", 0, (10, 10, 200, 30), "Prezzo"),
+                      Field("text", 0, (10, 40, 200, 60), "Totale", formula="[Prezzo] * 2"),
+                      Field("text", 0, (10, 70, 200, 90), "Nota", show_if="[Prezzo] > 1")],
+                     "Prezzo;Totale\n3;99\n")
+    assert tab.field_names == ["Prezzo", "Nota"]
+    assert tab.column_box("Totale") is None and tab.column_box(HELPER) is None
