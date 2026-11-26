@@ -30,7 +30,7 @@ from pdflex.detect import row_lines, table_step
 from pdflex.fill import FillDialog
 from pdflex.signature import SignatureDialog
 from pdflex.ui import (
-    Toggle, add_recent, ask_text, info, load_json, message, recent_files, save_json, warn,
+    Toggle, add_recent, ask_text, info, load_json, message, recent_files, save_json, toast, warn,
     ACCENT, DropZone, button, dot, icon, page_shadow, pdf_from_drop, render_page,
 )
 from pdflex.i18n import tr
@@ -953,6 +953,7 @@ class EditorTab(QWidget):
         except (ValueError, OSError) as e:
             warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return False
+        toast(self, tr("Salvato"), Path(path).name)
         return True
 
     def ask_export(self) -> bool:
@@ -974,7 +975,9 @@ class EditorTab(QWidget):
         except (ValueError, OSError) as e:
             warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return False
-        info(self, tr("Salvato in {0}.\nI campi sono invisibili e vuoti, con nomi, formati e caratteri: pronti per essere compilati da un altro programma.").format(path))
+        toast(self, tr("Salvato per il gestionale"), Path(path).name + "\n" +
+              tr("I campi sono invisibili e vuoti, con nomi, formati e caratteri: pronti per essere compilati da "
+                 "un altro programma."), ms=7000)
         return True
 
     def export(self, path: str) -> None:

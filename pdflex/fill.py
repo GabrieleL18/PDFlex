@@ -67,7 +67,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QVBoxLayout, QWidget,
 )
 
-from pdflex.ui import DocView, Toggle, button, info, warn  # noqa: E402
+from pdflex.ui import DocView, Toggle, button, toast, warn  # noqa: E402
 
 
 class FillDialog(QDialog):
@@ -178,7 +178,7 @@ class FillDialog(QDialog):
         except (ValueError, OSError, RuntimeError) as e:
             warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return
-        info(self, tr("Salvato in {0}").format(path))
+        toast(self.parentWidget() or self, tr("Salvato"), Path(path).name)  # this window closes now
         self.accept()
 
     def done(self, r):

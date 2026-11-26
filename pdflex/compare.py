@@ -433,7 +433,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex import ui  # noqa: E402
-from pdflex.ui import DocView, button, info, warn  # noqa: E402
+from pdflex.ui import DocView, button, info, toast, warn  # noqa: E402
 
 KIND_NAMES = KIND_TITLES
 KIND_COLORS = {"delete": ui.RED, "insert": ui.GREEN, "replace": ui.AMBER, "move": "#2F6FDB", "format": "#7A4FD1",
@@ -1180,7 +1180,7 @@ class CompareTab(QWidget):
             except (ValueError, OSError, RuntimeError) as e:
                 warn(self, tr("Esportazione non riuscita: {0}").format(e))
                 return
-            info(self, tr("Confronto esportato in {0}").format(path))
+            toast(self, tr("Esportato"), Path(path).name)
 
     def ask_export_xlsx(self):
         default = str(Path(self.new_path).with_name(Path(self.new_path).stem + tr("_modifiche.xlsx")))
@@ -1191,7 +1191,7 @@ class CompareTab(QWidget):
             except OSError as e:
                 warn(self, tr("Esportazione non riuscita (il file è aperto in Excel?): {0}").format(e))
                 return
-            info(self, tr("Elenco esportato in {0}").format(path))
+            toast(self, tr("Esportato"), Path(path).name)
 
     def export_xlsx(self, path: str) -> None:
         export_changes_xlsx(self.changes, path, Path(self.old_path).name, Path(self.new_path).name)

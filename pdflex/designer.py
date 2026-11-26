@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from pdflex import design, open_pdf, recovery, ui, write_atomic
 from pdflex.editor import PAGE_MARGIN, THUMB_W
-from pdflex.ui import ACCENT, DropZone, button, page_shadow, pdf_from_drop, render_page
+from pdflex.ui import ACCENT, DropZone, button, page_shadow, pdf_from_drop, render_page, toast
 from pdflex.i18n import tr
 
 KINDS = {"line": tr("Linea"), "rect": tr("Rettangolo"), "shape": tr("Forma"), "image": tr("Immagine"), "text": tr("Testo")}
@@ -794,6 +794,7 @@ class DesignTab(QWidget):
         except OSError as e:
             ui.warn(self, tr("Salvataggio non riuscito: {0}").format(e))
             return False
+        toast(self, tr("Salvato"), Path(path).name)
         return True
 
     def save(self, path: str) -> None:

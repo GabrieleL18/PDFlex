@@ -109,7 +109,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex import ui  # noqa: E402
-from pdflex.ui import button, info, render_page, warn  # noqa: E402
+from pdflex.ui import button, render_page, toast, warn  # noqa: E402
 
 THUMB = 320  # px, longest side of a rendered thumbnail; the size slider only scales it down
 
@@ -521,11 +521,11 @@ class PagesTab(QWidget):
             except (ValueError, OSError, RuntimeError) as e:
                 warn(self, tr("Salvataggio non riuscito: {0}").format(e))
                 return
-            info(self, tr("Salvato in {0}").format(path))
+            toast(self, tr("Salvato"), Path(path).name)
 
     def ask_split(self):
         first = Path(self.refs()[0].path)
         out = QFileDialog.getExistingDirectory(self, tr("Cartella per le pagine singole"), str(first.parent))
         if out:
             made = split(self.refs(), out, first.stem, self.extras)
-            info(self, tr("Creati {0} PDF in {1}").format(len(made), out))
+            toast(self, tr("Creati {0} PDF").format(len(made)), out)

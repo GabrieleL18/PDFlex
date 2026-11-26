@@ -140,7 +140,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from pdflex import ui  # noqa: E402
-from pdflex.ui import button, info, warn  # noqa: E402
+from pdflex.ui import button, toast, warn  # noqa: E402
 
 
 class BatchTab(QWidget):
@@ -274,9 +274,10 @@ class BatchTab(QWidget):
             return
         if self.merge.isChecked():
             if made:
-                info(self, tr("Salvato {0}: {1} moduli compilati, uno dopo l'altro.").format(out, len(self.rows)))
+                toast(self, tr("Salvato"), Path(out).name + "\n" +
+                      tr("{0} moduli compilati, uno dopo l'altro.").format(len(self.rows)))
         else:
-            info(self, tr("Creati {0} PDF in {1}").format(len(made), out))
+            toast(self, tr("Creati {0} PDF").format(len(made)), out)
 
     def run(self, out: str) -> list[Path]:
         """Make the PDFs into the folder `out`, or the single merged file `out`; returns the files made."""

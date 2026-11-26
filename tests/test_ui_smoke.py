@@ -461,3 +461,39 @@ def test_leaving_a_section_closes_its_file_after_asking(qapp, tmp_path, monkeypa
     assert w.go(w.compare) and w.tabs.currentWidget() is w.compare and w.editor.doc is None
     assert w.go(w.pages)  # nothing open: no question
     w.close()
+
+
+def test_toast_shows_and_replaces(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QWidget
+    from pdflex import ui
+    w = QWidget()
+    w.resize(800, 600)
+    w.show()
+    t1 = ui.toast(w, "Salvato", "a.pdf", ms=50)
+    assert t1.isVisible() and t1.parent() is w.window()
+    t2 = ui.toast(w, "Salvato", "b.pdf")
+    assert not t1.isVisible() and t2.isVisible()
+    assert t2.geometry().bottom() < w.height() and abs(t2.geometry().center().x() - w.width() / 2) < 2
+    QTest.qWait(400)
+    assert t2.isVisible()  # 4 s by default
+    QTest.mouseClick(t2, Qt.LeftButton)
+    QTest.qWait(400)
+    assert not t2.isVisible()
+    t3 = ui.toast(w, "Salvato", ms=50)
+    QTest.qWait(400)
+    assert not t3.isVisible()  # goes away by itself
+
+
+def test_editor_save_shows_toast(qapp, make_pdf, tmp_path, monkeypatch):
+    from pdflex import editor
+    tab = editor.EditorTab()
+    tab.open(str(make_pdf(tmp_path, ["x"])))
+    tab.add_field("text", 0, (10, 10, 100, 30))
+    out = tmp_path / "salvato.pdf"
+    monkeypatch.setattr(editor.QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    seen = []
+    monkeypatch.setattr(editor, "toast", lambda parent, title, detail="", ms=4000: seen.append((title, detail)))
+    assert tab.ask_save()
+    assert seen == [("Salvato", "salvato.pdf")]

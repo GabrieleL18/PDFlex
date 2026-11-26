@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import (
-    QBuffer, QByteArray, QEventLoop, QIODevice, QLineF, QPoint, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal,
+    QBuffer, QByteArray, QEvent, QEventLoop, QIODevice, QLineF, QPoint, QPointF, QRectF, QSize, Qt, QTimer,
+    QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
@@ -17,7 +18,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect, QGraphicsScene, QGraphicsView, QLabel,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QMessageBox, QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect, QGraphicsScene, QGraphicsView, QLabel,
     QProgressDialog, QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionSlider, QStyleOptionViewItem,
     QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget,
 )
@@ -693,6 +695,126 @@ def ask_text(parent, title: str, label: str, text: str = "") -> str | None:
     d.setOkButtonText("OK")
     d.setCancelButtonText(tr("Annulla"))
     return d.textValue().strip() if d.exec() else None
+
+
+def _check_badge(tint: str, size: int) -> QPixmap:
+    """A filled circle with a white tick: "done"."""
+    pm = QPixmap(size * 2, size * 2)  # drawn at twice the size: sharp on high-DPI screens
+    pm.setDevicePixelRatio(2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(tint))
+    p.drawEllipse(QRectF(0, 0, size, size))
+    p.setPen(QPen(QColor("#FFFFFF"), size / 11, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPolyline([QPointF(size * .29, size * .52), QPointF(size * .44, size * .67), QPointF(size * .72, size * .37)])
+    p.end()
+    return pm
+
+
+class Toast(QWidget):
+    """A short "done" note at the bottom of the window: goes away by itself, stays while the mouse is over
+    it, a click closes it. Nothing to press, nothing in the way."""
+
+    def __init__(self, win: QWidget, title: str, detail: str, ms: int):
+        super().__init__(win)
+        self.setAccessibleName(f"{title}. {detail}")
+        self.setCursor(Qt.PointingHandCursor)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 10, 16, 20)  # room for the shadow
+        card = QFrame(objectName="ToastCard")
+        card.setStyleSheet(f"#ToastCard {{ background: {color('surface')}; border: 1px solid {color('border')};"
+                           " border-radius: 12px; }")
+        card.setGraphicsEffect(QGraphicsDropShadowEffect(card, blurRadius=28, offset=QPointF(0, 6),
+                                                         color=QColor(0, 0, 0, 70)))
+        outer.addWidget(card)
+        row = QHBoxLayout(card)
+        row.setContentsMargins(14, 12, 20, 12)
+        row.setSpacing(12)
+        badge = QLabel()
+        badge.setPixmap(_check_badge(color("green"), 30))
+        row.addWidget(badge, 0, Qt.AlignTop if detail else Qt.AlignVCenter)
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        head = QLabel(title)
+        head.setStyleSheet(f"color: {color('ink')}; font-size: 15px; font-weight: 600; background: transparent;")
+        texts.addWidget(head)
+        if detail:
+            body = QLabel(detail, wordWrap=True)
+            body.setMaximumWidth(420)
+            body.setStyleSheet(f"color: {color('muted')}; font-size: 13px; background: transparent;")
+            texts.addWidget(body)
+        row.addLayout(texts)
+        self.fade = QGraphicsOpacityEffect(self, opacity=0.0)
+        self.setGraphicsEffect(self.fade)
+        self.anim = QVariantAnimation(self, duration=180, valueChanged=self._step)
+        self.timer = QTimer(self, singleShot=True, interval=ms, timeout=self.dismiss)
+        self.closing = False
+        win.installEventFilter(self)
+
+    def _step(self, v):
+        self.fade.setOpacity(v)
+        self.move(self.x(), self._y + round((1 - v) * 10))  # rises a little as it appears
+
+    def place(self):
+        win = self.parentWidget()
+        self.adjustSize()
+        self._y = win.height() - self.height() - 12
+        self.move((win.width() - self.width()) // 2, self._y)
+
+    def show_up(self):
+        self.place()
+        self.show()
+        self.raise_()
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.start()
+        self.timer.start()
+
+    def dismiss(self):
+        if self.closing:
+            return
+        self.closing = True
+        self.timer.stop()
+        self.anim.stop()
+        self.anim.setStartValue(self.fade.opacity())
+        self.anim.setEndValue(0.0)
+        self.anim.finished.connect(self.close)
+        self.anim.start()
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.Resize and not self.closing:
+            self.place()
+        return False
+
+    def enterEvent(self, e):
+        self.timer.stop()
+
+    def leaveEvent(self, e):
+        if not self.closing:
+            self.timer.start()
+
+    def mousePressEvent(self, e):
+        self.dismiss()
+
+
+def toast(parent: QWidget, title: str, detail: str = "", ms: int = 4000) -> Toast:
+    """Show a "done" note (e.g. Salvato + the file name) at the bottom of parent's window; a new one replaces
+    the one showing."""
+    win = parent.window()
+    old = getattr(win, "_pdflex_toast", None)
+    if old is not None:
+        try:
+            old.timer.stop()
+            old.hide()
+            old.deleteLater()
+        except RuntimeError:  # already gone with its window
+            pass
+    t = Toast(win, title, detail, ms)
+    win._pdflex_toast = t
+    t.show_up()
+    return t
 
 
 def info(parent, text: str) -> None:

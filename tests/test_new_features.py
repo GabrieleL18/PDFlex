@@ -101,7 +101,7 @@ def test_fill_dialog_from_editor(qapp, make_pdf, tmp_path, monkeypatch):
         d.findChild(fill.QLineEdit).setText("Mario")
         out = tmp_path / "compilato.pdf"
         monkeypatch.setattr(fill.QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
-        monkeypatch.setattr(fill, "info", lambda *a: None)
+        monkeypatch.setattr(fill, "toast", lambda *a, **k: None)
         d.ask_save()
         seen["out"] = out
     monkeypatch.setattr(fill.FillDialog, "exec", run)
