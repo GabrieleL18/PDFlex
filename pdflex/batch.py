@@ -8,7 +8,7 @@ from pathlib import Path
 import pymupdf
 
 from pdflex import open_pdf, write_atomic
-from pdflex.fields import clean_value, mupdf_text
+from pdflex.fields import _safe_update, clean_value, mupdf_text
 from pdflex.i18n import tr
 
 TRUE_WORDS = {"1", "x", "s", "si", "sì", "yes", "y", "true", "vero", "ok"}
@@ -76,7 +76,7 @@ def fill_form(doc, row: dict, mapping: dict) -> None:
                 w.field_value = on if value and clean_value(value) == on else False
             else:
                 w.field_value = value
-            w.update()
+            _safe_update(doc, w)  # keeps its scripts and its check box mark
 
 
 def _file_name(row, name_col, i, stem) -> str:

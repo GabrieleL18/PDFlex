@@ -50,6 +50,11 @@ class Field:
     font: str = ""  # "" Helvetica, "TiRo" Times, "Cour" Courier (same width for every letter)
     color: str = ""  # text colour "#rrggbb"; "" black
     align: int = 0  # 0 left, 1 centre, 2 right
+    mark: str = ""  # check box: the ZapfDingbats character drawn when ticked (see MARKS); "" the check mark
+    tooltip: str = ""  # shown when the mouse is over the field
+    readonly: bool = False  # a computed total is read-only anyway, whatever this says
+    maxlen: int = 0  # most characters a text field takes (0 no limit; with comb the boxes are the limit)
+    visibility: str = ""  # see VISIBILITY
     # where it came from in the source PDF (0 = drawn here); not part of equality
     xref: int = dc_field(default=0, compare=False, repr=False)
     parent: int = dc_field(default=0, compare=False, repr=False)
@@ -91,6 +96,40 @@ DATE_PATTERNS = {"date": {"dd/mm/yyyy": tr("gg/mm/aaaa"), "dd/mm/yy": tr("gg/mm/
                  "time": {"HH:MM": tr("hh:mm"), "HH:MM:ss": tr("hh:mm:ss")}}
 FONTS = {"": "Helvetica", "TiRo": "Times", "Cour": tr("Courier (larghezza fissa)")}
 ALIGN = {0: tr("Sinistra"), 1: tr("Centro"), 2: tr("Destra")}
+MARKS = {"": tr("Spunta"), "8": tr("Croce"), "l": tr("Punto"), "n": tr("Quadrato"), "u": tr("Rombo"), "H": tr("Stella")}
+VISIBILITY = {"": tr("Visibile"), "hidden": tr("Nascosto"), "print": tr("Solo in stampa"), "screen": tr("Solo a schermo")}
+_VIS_FLAGS = {"": 4, "hidden": 2, "print": 36, "screen": 0}  # annotation flags: Hidden 2, Print 4, NoView 32
+
+
+def _visibility(flags: int) -> str:
+    if flags & 2:
+        return "hidden"
+    if flags & 32:
+        return "print"
+    return "" if flags & 4 else "screen"
+
+
+def _set_visibility(doc, xref: int, vis: str) -> None:
+    """Only the Hidden / Print / NoView bits change: the others (locked...) stay."""
+    t, v = doc.xref_get_key(xref, "F")
+    flags = int(v) if t == "int" else 0
+    doc.xref_set_key(xref, "F", str(flags & ~(2 | 4 | 32) | _VIS_FLAGS[vis]))
+
+
+def _mark_of(doc, xref: int) -> str:
+    t, v = doc.xref_get_key(xref, "MK/CA")
+    return v if t == "string" and v not in ("3", "4") else ""  # 3 and 4: the check marks
+
+
+def _apply_mark(doc, xref: int, mark: str) -> None:
+    """The check box's character: /MK/CA for viewers that redraw it, and the drawn look. PyMuPDF 2.1 always
+    draws the check (3), whatever /MK/CA says, so the character is swapped in the look it made."""
+    doc.xref_set_key(xref, "MK/CA", pymupdf.get_pdf_str(mark))
+    t, v = doc.xref_get_key(xref, "AP/N")
+    for state, x in re.findall(r"/(\w+)\s+(\d+) 0 R", v if t == "dict" else ""):
+        if state != "Off":
+            x = int(x)
+            doc.update_stream(x, re.sub(rb"\((.)\) Tj", b"(" + mark.encode() + b") Tj", doc.xref_stream(x)))
 # the scripts are the standard Acrobat ones (AFNumber_Format...), the ones every PDF form library recognises
 _EMAIL_V = ('if (event.value && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(event.value)) '
             '{ app.alert("Indirizzo email non valido"); event.rc = false; }')
@@ -250,6 +289,13 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
                 f.default = w.field_value or ""
             if kind == "text" and w.field_flags & pymupdf.PDF_TX_FIELD_IS_COMB:
                 f.comb = w.text_maxlen or 0
+            elif kind in ("text", "multiline", "date"):
+                f.maxlen = w.text_maxlen or 0
+            if kind == "checkbox":
+                f.mark = _mark_of(doc, w.xref)
+            f.tooltip = w.field_label or ""
+            t, v = doc.xref_get_key(w.xref, "F")
+            f.visibility = _visibility(int(v) if t == "int" else 0)
             m = re.search(r"AFSimple_Calculate\(\s*\"(SUM|PRD|AVG|MIN|MAX)\"\s*,\s*new Array\((.*?)\)", js.get("C", ""))
             if m:
                 f.calc_op, f.calc = m.group(1), re.findall(r'"([^"]+)"', m.group(2))
@@ -258,6 +304,7 @@ def load_fields(doc: pymupdf.Document) -> list[Field]:
             if m:
                 f.vmin = m.group(2) if m.group(1) == "true" else ""
                 f.vmax = m.group(4) if m.group(3) == "true" else ""
+            f.readonly = bool(w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY) and not f.calc
             f.orig = copy.deepcopy(f)
             out.append(f)
     return out
@@ -315,12 +362,17 @@ def _new_widget(f: Field) -> pymupdf.Widget:
     if f.kind == "text" and f.comb:
         w.text_maxlen = f.comb
         w.field_flags |= pymupdf.PDF_TX_FIELD_IS_COMB
+    elif f.kind in ("text", "multiline") and f.maxlen:
+        w.text_maxlen = f.maxlen
+    if f.tooltip:
+        w.field_label = f.tooltip
     js = _scripts(f)
     if f.kind in ("text", "multiline", "date"):
         w.script_format, w.script_stroke, w.script_change = js["F"], js["K"], js["V"]
     if f.calc:
         w.script_calc = js["C"]
-        w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY  # a total is computed, not typed
+    if f.calc or f.readonly:  # a total is computed, not typed
+        w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
     if f.kind == "dropdown":
         w.choice_values = list(f.options)
     if f.kind in ("text", "multiline", "date") or (f.kind == "dropdown" and f.default in f.options):
@@ -378,16 +430,22 @@ def _update_widget(doc, f: Field) -> None:
     # Written first: update() below redraws the field's look from them (font, size, options)
     if f.name != o.name:
         doc.xref_set_key(f.parent or f.xref, "T", pymupdf.get_pdf_str(f.name))
-    if f.required != o.required or f.comb != o.comb or bool(f.calc) != bool(o.calc):
+    locked, was_locked = bool(f.readonly or f.calc), bool(o.readonly or o.calc)  # a total is computed, not typed
+    if f.required != o.required or f.comb != o.comb or locked != was_locked:
         flags = int(_inherited(doc, f, "Ff") or 0)
         for bit, on, was in ((pymupdf.PDF_FIELD_IS_REQUIRED, f.required, o.required),
                              (pymupdf.PDF_TX_FIELD_IS_COMB, f.comb, o.comb),
-                             (pymupdf.PDF_FIELD_IS_READ_ONLY, f.calc, o.calc)):  # a total is computed, not typed
+                             (pymupdf.PDF_FIELD_IS_READ_ONLY, locked, was_locked)):
             if bool(on) != bool(was):
                 flags = flags | bit if on else flags & ~bit
         _set_inherited(doc, f, "Ff", str(flags))
-    if f.comb != o.comb:
-        _set_inherited(doc, f, "MaxLen", str(f.comb) if f.comb else "null")
+    if f.comb != o.comb or f.maxlen != o.maxlen:
+        limit = f.comb or f.maxlen
+        _set_inherited(doc, f, "MaxLen", str(limit) if limit else "null")
+    if f.tooltip != o.tooltip:
+        _set_inherited(doc, f, "TU", pymupdf.get_pdf_str(f.tooltip) if f.tooltip else "null")
+    if f.kind == "checkbox" and f.mark != o.mark:  # drawn by _safe_update below
+        doc.xref_set_key(f.xref, "MK/CA", pymupdf.get_pdf_str(f.mark or "3"))
     if f.font_size != o.font_size or f.font != o.font or f.color != o.color:
         da = _inherited(doc, f, "DA") or "0 0 0 rg /Helv 0 Tf"
         if f.color != o.color:
@@ -415,6 +473,8 @@ def _update_widget(doc, f: Field) -> None:
         elif f.kind != "radio" and f.default:
             w.field_value = mupdf_text(f.default)
     _safe_update(doc, w)
+    if f.visibility != o.visibility:
+        _set_visibility(doc, f.xref, f.visibility)
     changed = [k for k, (a, b) in {"F": (f.fmt, o.fmt), "K": (f.fmt, o.fmt),
                                    "V": ((f.fmt, f.vmin, f.vmax), (o.fmt, o.vmin, o.vmax)),
                                    "C": ((f.calc, f.calc_op), (o.calc, o.calc_op))}.items() if a != b]
@@ -424,12 +484,16 @@ def _update_widget(doc, f: Field) -> None:
 
 def _safe_update(doc, w) -> None:
     """w.update(), keeping the widget's own actions. update() rewrites them from what PyMuPDF read, and it
-    reads none of them: without this, moving a field made in another program would wipe its format script."""
+    reads none of them: without this, moving a field made in another program would wipe its format script.
+    A check box keeps its mark too (update() always draws the check)."""
     saved = {}
     for key in ("AA", "A"):
         t, v = doc.xref_get_key(w.xref, key)
         saved[key] = (t, v, doc.xref_object(int(v.split()[0])) if t == "xref" else None)
+    mark = _mark_of(doc, w.xref) if w.field_type == pymupdf.PDF_WIDGET_TYPE_CHECKBOX else ""
     w.update()
+    if mark:
+        _apply_mark(doc, w.xref, mark)
     for key, (t, v, obj) in saved.items():
         if t == "dict":
             doc.xref_set_key(w.xref, key, v)
@@ -552,6 +616,9 @@ def build_pdf(src_path, fields: list[Field], blank: bool = False, step=None) -> 
             _set_inherited(doc, dataclasses.replace(f, xref=annot.xref, parent=_xref_ref(doc, annot.xref, "Parent")),
                            "Q", str(f.align))
             _safe_update(doc, page.load_widget(annot.xref))
+        _set_visibility(doc, annot.xref, f.visibility)
+        if f.kind == "checkbox" and f.mark:
+            _apply_mark(doc, annot.xref, f.mark)
         if f.kind == "radio":
             # ponytail: PyMuPDF 2.1 names every new radio "on" state /None, so all buttons in a group
             # act as one. Rename the state to the button's value; drop when PyMuPDF fixes it.
@@ -693,8 +760,8 @@ def fill_sample(doc: pymupdf.Document) -> None:
             w.update()
 
 
-_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "calc_op", "vmin", "vmax", "comb", "image",
-               "font", "color", "align")
+_BLOCK_KEYS = ("kind", "name", "required", "default", "font_size", "options", "value", "fmt", "calc", "calc_op", "vmin",
+               "vmax", "comb", "image", "font", "color", "align", "mark", "tooltip", "readonly", "maxlen", "visibility")
 
 
 def make_block(fields: list[Field], rects: list[tuple]) -> list[dict]:

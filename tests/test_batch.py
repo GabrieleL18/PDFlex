@@ -64,3 +64,17 @@ def test_same_names_do_not_overwrite(make_pdf, tmp_path):
     rows = [{"nome": "Mario"}, {"nome": "Mario"}]
     out = batch_fill(_template(tmp_path, make_pdf), rows, {"nome": "nome"}, tmp_path / "out", name_col="nome")
     assert [p.name for p in out] == ["Mario.pdf", "Mario_2.pdf"]
+
+
+def test_filled_copy_keeps_checkbox_mark(make_pdf, tmp_path):
+    import re
+    from pdflex import open_pdf
+    from pdflex.fields import Field, save_with_fields
+    from pdflex.fill import fill_values
+    src = tmp_path / "m.pdf"
+    save_with_fields(make_pdf(tmp_path, ["x"]), [Field("checkbox", 0, (10, 10, 30, 30), "c", mark="8")], src)
+    doc = fill_values(src.read_bytes(), {"c": "1"})
+    w = next(doc[0].widgets())
+    t, v = doc.xref_get_key(w.xref, "AP/N")
+    on = [int(x) for k, x in re.findall(r"/(\w+)\s+(\d+) 0 R", v) if k != "Off"]
+    assert w.field_value not in (False, "Off") and b"(8) Tj" in doc.xref_stream(on[0])

@@ -1,3 +1,4 @@
+import re
 import pymupdf
 import pytest
 
@@ -205,3 +206,79 @@ def test_old_amount_format_still_euro_before():
     assert fmt_parts("number|2|1") == ("number", ["2", "1"])
     assert sample_value("amount|2|1|$|0", "x") == "1.234,50 $"
     assert sample_value("amount", "x") == "€ 1.234,50"
+
+
+# checkbox mark, tooltip, read-only, visibility, max length
+def _on_stream(doc, xref) -> bytes:
+    t, v = doc.xref_get_key(xref, "AP/N")
+    keys = re.findall(r"/(\w+)\s+(\d+) 0 R", v)
+    return next(doc.xref_stream(int(x)) for k, x in keys if k != "Off")
+
+
+def test_widget_props_roundtrip(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    fields = [Field("checkbox", 0, (10, 10, 30, 30), "c", default="1", mark="8"),
+              Field("text", 0, (10, 40, 100, 60), "t", tooltip="Il tuo nome", readonly=True, maxlen=12,
+                    visibility="print"),
+              Field("text", 0, (10, 70, 100, 90), "h", visibility="hidden"),
+              Field("text", 0, (10, 100, 100, 120), "s", visibility="screen"),
+              Field("text", 0, (10, 130, 100, 150), "v")]
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, fields, out)
+    doc = open_pdf(out)
+    got = {f.name: f for f in load_fields(doc)}
+    assert got["c"].mark == "8" and b"(8) Tj" in _on_stream(doc, got["c"].xref)
+    t = got["t"]
+    assert (t.tooltip, t.readonly, t.maxlen, t.visibility) == ("Il tuo nome", True, 12, "print")
+    assert got["h"].visibility == "hidden" and got["s"].visibility == "screen" and got["v"].visibility == ""
+    assert doc.xref_get_key(t.xref, "F")[1] == "36"  # NoView + Print
+    assert (got["v"].tooltip, got["v"].readonly, got["v"].maxlen) == ("", False, 0)
+
+
+def test_widget_props_changed_on_saved_field(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, [Field("checkbox", 0, (10, 10, 30, 30), "c", default="1"),
+                           Field("text", 0, (10, 40, 100, 60), "t")], out)
+    fields = load_fields(open_pdf(out))
+    fields[0].mark = "H"
+    t = fields[1]
+    t.tooltip, t.readonly, t.maxlen, t.visibility = "Aiuto", True, 5, "hidden"
+    out2 = tmp_path / "o2.pdf"
+    save_with_fields(out, fields, out2)
+    doc = open_pdf(out2)
+    got = {f.name: f for f in load_fields(doc)}
+    assert got["c"].mark == "H" and b"(H) Tj" in _on_stream(doc, got["c"].xref)
+    assert (got["t"].tooltip, got["t"].readonly, got["t"].maxlen, got["t"].visibility) == ("Aiuto", True, 5, "hidden")
+
+
+def test_mark_survives_move(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, [Field("checkbox", 0, (10, 10, 30, 30), "c", default="1", mark="H")], out)
+    f = load_fields(open_pdf(out))[0]
+    f.rect = (50, 50, 70, 70)
+    out2 = tmp_path / "o2.pdf"
+    save_with_fields(out, [f], out2)
+    doc = open_pdf(out2)
+    assert b"(H) Tj" in _on_stream(doc, load_fields(doc)[0].xref)
+
+
+def test_calc_field_stays_readonly_without_flag(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, [Field("text", 0, (10, 10, 100, 30), "a", fmt="number"),
+                           Field("text", 0, (10, 40, 100, 60), "t", fmt="number", calc=["a"])], out)
+    doc = open_pdf(out)
+    got = {f.name: f for f in load_fields(doc)}
+    assert got["t"].readonly is False
+    assert int(doc.xref_get_key(got["t"].xref, "Ff")[1] if doc.xref_get_key(got["t"].xref, "Ff")[0] != "null"
+               else doc.xref_get_key(got["t"].parent, "Ff")[1]) & 1
+
+
+def test_old_checkbox_reads_as_check(make_pdf, tmp_path):
+    src = make_pdf(tmp_path, ["x"])
+    out = tmp_path / "o.pdf"
+    save_with_fields(src, [Field("checkbox", 0, (10, 10, 30, 30), "c", default="1")], out)
+    f = load_fields(open_pdf(out))[0]
+    assert f.mark == "" and f == f.orig
