@@ -99,8 +99,8 @@ class FieldItem(QGraphicsRectItem):
             self._paint_info(painter, r, QColor(color).darker(150))
         number = self.tab._order_no.get(id(self.field))
         if number:
-            d = max(10.0, min(16.0, r.height() - 2, r.width() - 2))
-            badge = QRectF(r.left() + 1, r.top() + 1, d, d)
+            d = 12.0  # on the corner, half outside: small check boxes keep their mark visible
+            badge = QRectF(r.left() - d / 2, r.top() - d / 2, d, d)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(ACCENT))
             painter.drawEllipse(badge)
@@ -705,6 +705,8 @@ class EditorTab(QWidget):
                 if isinstance(part, str):
                     line.addWidget(QLabel(part, objectName="Muted"))
                 else:
+                    part.setMinimumWidth(30)  # the two share the panel's width, however narrow
+                    part.setSizePolicy(QSizePolicy.Ignored, part.sizePolicy().verticalPolicy())
                     line.addWidget(part, 1)
             return row
         size_row = pair(self.p_w, "×", self.p_h)
