@@ -26,6 +26,7 @@ from pdflex.fields import (
     save_with_fields, snap, suggest_save_path, to_view,
 )
 from pdflex import recovery, ui
+from pdflex.detect import row_lines, table_step
 from pdflex.fill import FillDialog
 from pdflex.signature import SignatureDialog
 from pdflex.ui import (
@@ -1368,22 +1369,49 @@ class EditorTab(QWidget):
             return
         rects = [to_view(self.doc[f.page], f.rect) for f in self.selection]
         home = (min(r[0] for r in rects), min(r[1] for r in rects))  # where the copied fields are
-        self._clip = (make_block(self.selection, rects), home, self.page_no, home)
+        # at: where the last paste went; src: what it was measured from; made: what it made (to see if
+        # the user moved it); step: the move the user showed, repeated by the next pastes
+        self._clip = {"block": make_block(self.selection, rects), "home": home, "page": self.page_no, "at": home,
+                      "src": home, "made": [], "placed": None, "step": None}
 
     def paste(self) -> list[Field]:
-        """Ctrl+V: same place on another page, a little lower-right on the same page (again and again).
-        The fields keep their places among themselves: when the next step would push them off the sheet,
-        they go back over the copied ones instead."""
+        """Ctrl+V. Another page: the same place. The same page, the first that works of:
+        the next free row of the table the copied fields are in; the move the user made to the last pasted
+        fields, done again; a little lower-right (back over the copied ones when that would leave the sheet).
+        The fields keep their places among themselves."""
         clip = getattr(self, "_clip", None)
-        if not self.doc or not clip or not clip[0]:
+        if not self.doc or not clip or not clip["block"]:
             return []
-        block, (x, y), page, home = clip
-        if page == self.page_no:
-            x, y = x + 10, y + 10
-            if self._fit((x, y), block) != (x, y):
-                x, y = home
-        self._clip = (block, (x, y), self.page_no, home)
-        return self._place(block, (x, y))
+        block, home, at = clip["block"], clip["home"], clip["at"]
+        if clip["page"] == self.page_no:
+            page = self.doc[self.page_no]
+            dy = None
+            if page.rotation == 0:  # the table's lines are read in the page's own coordinates
+                w, h = max(d["rect"][2] for d in block), max(d["rect"][3] for d in block)
+                taken = [to_view(page, f.rect) for f in self.fields if f.page == self.page_no]
+                dy = table_step(row_lines(page), (home[0], home[1], home[0] + w, home[1] + h), taken,
+                                page.rect.height)
+            made = [f for f in clip["made"] if any(f is g for g in self.fields)]
+            now = self._top_left(made) if made and len(made) == len(clip["made"]) else None
+            if dy is not None:
+                at = (home[0], home[1] + dy)
+            elif now and clip["placed"] and (abs(now[0] - clip["placed"][0]) > 0.01 or
+                                             abs(now[1] - clip["placed"][1]) > 0.01):
+                clip["step"] = (now[0] - clip["src"][0], now[1] - clip["src"][1])  # the user moved them
+                clip["src"], at = now, (now[0] + clip["step"][0], now[1] + clip["step"][1])
+            elif clip["step"]:
+                clip["src"], at = at, (at[0] + clip["step"][0], at[1] + clip["step"][1])
+            else:
+                clip["src"], at = at, (at[0] + 10, at[1] + 10)
+                if self._fit(at, block) != at:
+                    at = home
+        made = self._place(block, at)
+        clip.update(at=at, page=self.page_no, made=made, placed=self._top_left(made) if made else None)
+        return made
+
+    def _top_left(self, fields: list[Field]) -> tuple[float, float]:
+        rects = [to_view(self.doc[f.page], f.rect) for f in fields]
+        return min(r[0] for r in rects), min(r[1] for r in rects)
 
     def _fit(self, at, block) -> tuple[float, float]:
         """`at` moved just enough for the whole block to be on the page (the block moves as one)."""

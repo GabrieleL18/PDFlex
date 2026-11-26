@@ -146,3 +146,37 @@ def test_modello_redditi_boxes(tmp_path):
     cognome = next(f for f in found.values() if f.name.startswith("cognome"))
     nome = next(f for f in found.values() if f.name.startswith("nome"))
     assert round(cognome.rect[0]) == 60 and round(cognome.rect[2]) == 204 and round(nome.rect[2]) == 334
+
+
+# paste into the next table row
+from pdflex.detect import row_lines, table_step  # noqa: E402
+
+H = [(50, 400, y) for y in (100, 120, 140, 160)]
+
+
+def test_table_step_next_row():
+    assert table_step(H, (60, 102, 200, 118), [], 800) == 20
+
+
+def test_table_step_skips_taken_rows():
+    assert table_step(H, (60, 102, 200, 118), [(60, 122, 200, 138)], 800) == 40
+
+
+def test_table_step_none_at_last_row():
+    assert table_step(H, (60, 142, 200, 158), [], 800) is None
+
+
+def test_table_step_ignores_short_lines():
+    assert table_step([(50, 80, y) for y in (100, 120, 140)], (60, 102, 200, 118), [], 800) is None
+
+
+def test_table_step_block_of_two_rows():
+    assert table_step(H + [(50, 400, 180)], (60, 102, 200, 138), [], 800) == 40
+
+
+def test_row_lines_reads_cell_rectangles():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for y in (100, 120):
+        page.draw_rect((50, y, 400, y + 20))
+    assert sorted({round(line[2]) for line in row_lines(page)}) == [100, 120, 140]

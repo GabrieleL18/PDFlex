@@ -341,6 +341,50 @@ def _code_length(label: str, rect, fmt: str) -> tuple[int, str]:
     return (n, "cf" if n == 16 else fmt) if rect.width >= n * 6 else (0, fmt)
 
 
+def row_lines(page: pymupdf.Page) -> list[tuple[float, float, float]]:
+    """(x0, x1, y) of every horizontal edge on the page: drawn lines, and the top and bottom of boxes
+    (tables are often drawn as one rectangle per cell)."""
+    drawings = page.get_drawings()
+    out = list(_lines(drawings)[0])
+    for d in drawings:
+        for item in d["items"]:
+            if item[0] == "re":
+                r = pymupdf.Rect(item[1])
+            elif item[0] == "qu" and item[1].is_rectangular:
+                r = item[1].rect
+            else:
+                continue
+            if r.height >= 2 and r.width >= 3:  # thinner ones are lines, already in
+                out += [(r.x0, r.x1, r.y0), (r.x0, r.x1, r.y1)]
+    return out
+
+
+def table_step(hlines, box: tuple, taken: list[tuple], page_height: float) -> float | None:
+    """How far down `box` moves to sit in the next free row of the table it is in, at the same place in
+    the row; None when it is in no table, or no row below is free. Rows come from the lines spanning at
+    least 80% of the box; a box spanning n rows moves n rows at a time."""
+    x0, y0, x1, y1 = box
+    ys = []
+    for y in sorted(y for a, b, y in hlines if min(b, x1) - max(a, x0) >= 0.8 * (x1 - x0)):
+        if not ys or y - ys[-1] > 1:  # the same line drawn twice, or a cell's edge and its neighbour's
+            ys.append(y)
+    above = [i for i, y in enumerate(ys) if y <= y0 + 1]
+    below = [i for i, y in enumerate(ys) if y >= y1 - 1]
+    if not above or not below:
+        return None
+    ia, ib = above[-1], below[0]
+    n = ib - ia
+    k = 1
+    while n > 0 and ib + k * n < len(ys):
+        dy = ys[ia + k * n] - ys[ia]
+        top, bottom = y0 + dy, y1 + dy
+        free = not any(t[0] < x1 - 0.5 and t[2] > x0 + 0.5 and t[1] < bottom - 0.5 and t[3] > top + 0.5 for t in taken)
+        if bottom <= ys[ib + k * n] + 1 and bottom <= page_height and free:
+            return dy
+        k += 1
+    return None
+
+
 def detect_fields(page: pymupdf.Page, existing: list[Field]) -> list[Field]:
     """Fields suggested for this page (PDF coordinates), skipping spots that already have one."""
     words = page.get_text("words")

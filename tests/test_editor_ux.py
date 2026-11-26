@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 
+import pymupdf
 import pytest
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtTest import QTest
@@ -512,3 +513,35 @@ def test_order_toggle_draws_numbers(tab):
     QTest.qWait(50)
     assert tab.c_order.isChecked() and tab._order_no
     tab.view.grab()  # paints every field with its number: must not fail
+
+
+# paste: next table row, or the move the user made
+def test_paste_goes_to_next_table_row(qapp, tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for y in (100, 120, 140, 160):
+        page.draw_line((50, y), (500, y))
+    doc.save(tmp_path / "tab.pdf")
+    t = EditorTab()
+    t.open(str(tmp_path / "tab.pdf"))
+    a = t.add_field("text", 0, (60, 102, 200, 118))
+    a.name = "Nome[0]"
+    t.select_many([a])
+    t.copy_selected()
+    p1 = t.paste()[0]
+    p2 = t.paste()[0]
+    assert (p1.name, p2.name) == ("Nome[1]", "Nome[2]")
+    assert p1.rect == pytest.approx((60, 122, 200, 138)) and p2.rect == pytest.approx((60, 142, 200, 158))
+    p3 = t.paste()[0]  # no row left: a little lower-right, as before
+    assert p3.rect[1] != pytest.approx(162) and p3.rect[0] == pytest.approx(70)
+
+
+def test_paste_repeats_manual_move(tab):
+    f = tab.add_field("text", 0, (10, 10, 100, 30))
+    tab.select_many([f])
+    tab.copy_selected()
+    p1 = tab.paste()[0]
+    tab._move([p1], -10, 30)  # the user puts it 40 below the copied one
+    p2 = tab.paste()[0]
+    p3 = tab.paste()[0]
+    assert p2.rect[:2] == pytest.approx((10, 90)) and p3.rect[:2] == pytest.approx((10, 130))
