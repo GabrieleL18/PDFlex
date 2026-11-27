@@ -639,4 +639,14 @@ EN = {
     "Funzione sconosciuta: {0}": "Unknown function: {0}",
     "{0}: numero di valori sbagliato": "{0}: wrong number of values",
     "«{0}» non è una delle scelte di {1}": "«{0}» is not one of the choices of {1}",
+    # Editor: blocks
+    "Griglia": "Grid",
+    "Riquadro con titolo": "Box with title",
+    "Sezione": "Section",
+    "Tabella": "Table",
+    "Titolo": "Title",
+    "Totali": "Totals",
+    "Continua": "Continue",
+    "Il blocco diventa forme separate. Continuare?": "The block becomes separate shapes. Continue?",
+    "PDFlex non è riuscito a disegnare il blocco.": "PDFlex could not draw the block.",
 }
