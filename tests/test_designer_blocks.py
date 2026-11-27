@@ -268,3 +268,12 @@ def test_divider_dragged_with_the_mouse(qapp, tmp_path):
     _drag(v, v.mapFromScene(175 * z, 200 * z), v.mapFromScene(140 * z, 200 * z))  # first column line, to 140
     qapp.processEvents()  # the change is made once the mouse is let go
     assert tab.blocks[0][1].cols[0] * 300 == pytest.approx(40, abs=1)
+
+
+def test_every_editor_button_has_an_icon(qapp, tmp_path):
+    from PySide6.QtWidgets import QAbstractButton
+    tab = _block(tmp_path, "tabella")
+    tab.select(tab.blocks[0][2])
+    bare = [b.text() or b.toolTip() for b in tab.findChildren(QAbstractButton)
+            if b.icon().isNull() and not isinstance(b, ui.Toggle)]
+    assert bare == []

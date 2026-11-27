@@ -552,7 +552,7 @@ class BlockGallery(QFrame):
         self.buttons: dict[str, QToolButton] = {}
         for pid, name in blocks.PRESETS:
             b = QToolButton(text=name, toolButtonStyle=Qt.ToolButtonTextUnderIcon, iconSize=QSize(96, 64),
-                            autoRaise=True)
+                            autoRaise=True, icon=ui.icon("table" if pid != "rettangolo" else "rect"))
             b.clicked.connect(lambda _=False, p=pid: self.pick(p))
             lay.addWidget(b)
             self.buttons[pid] = b
@@ -771,8 +771,8 @@ class DesignTab(QWidget):
         self.p_font.addItems(list(design.FONTS))
         self.p_font.setPlaceholderText(tr("Font del PDF"))  # shown when the text's own font is none of these
         self.p_font.activated.connect(self._font_edited)
-        self.p_bold = button(tr("Grassetto"), None, tip=tr("Grassetto"))
-        self.p_italic = button(tr("Corsivo"), None, tip=tr("Corsivo"))
+        self.p_bold = button(tr("Grassetto"), "bold", tip=tr("Grassetto"))
+        self.p_italic = button(tr("Corsivo"), "italic", tip=tr("Corsivo"))
         self.p_looks = QHBoxLayout()
         for b in (self.p_bold, self.p_italic):
             b.setCheckable(True)
@@ -781,8 +781,8 @@ class DesignTab(QWidget):
         self.p_width = QLineEdit()
         self.p_width.setValidator(QDoubleValidator(0, 100, 1, self.p_width))
         self.p_width.editingFinished.connect(self._width_edited)
-        self.p_color = button("", None, tip=tr("Colore del tratto o del testo"))
-        self.p_fill = button("", None, tip=tr("Colore di riempimento"))
+        self.p_color = button("", "palette", tip=tr("Colore del tratto o del testo"))
+        self.p_fill = button("", "palette", tip=tr("Colore di riempimento"))
         self.p_color.clicked.connect(lambda: self._pick("color"))
         self.p_fill.clicked.connect(lambda: self._pick("fill"))
         self.form.addRow(tr("Testo"), self.p_text)
@@ -814,8 +814,8 @@ class DesignTab(QWidget):
         self.p_dash.activated.connect(self._dash_edited)
         self.form.addRow(tr("Tratto"), self.p_dash)
         self.p_heads = QHBoxLayout()
-        self.p_head0 = button(tr("All'inizio"), None, tip=tr("Una punta di freccia sul primo estremo"))
-        self.p_head1 = button(tr("Alla fine"), None, tip=tr("Una punta di freccia sul secondo estremo"))
+        self.p_head0 = button(tr("All'inizio"), "arrow-start", tip=tr("Una punta di freccia sul primo estremo"))
+        self.p_head1 = button(tr("Alla fine"), "arrow-end", tip=tr("Una punta di freccia sul secondo estremo"))
         for b in (self.p_head0, self.p_head1):
             b.setCheckable(True)
             b.clicked.connect(self._heads_edited)
@@ -841,7 +841,7 @@ class DesignTab(QWidget):
         self.p_head_col.toggled.connect(lambda on: self._block_set(header_col=on))
         self.form.addRow(self.p_head_row)
         self.form.addRow(self.p_head_col)
-        self.p_lines = button("", None, tip=tr("Colore delle linee tra le celle"))
+        self.p_lines = button("", "palette", tip=tr("Colore delle linee tra le celle"))
         self.p_lines.clicked.connect(self._pick_lines)
         self.form.addRow(tr("Linee interne"), self.p_lines)
         self.p_line_width = QLineEdit()
@@ -853,7 +853,7 @@ class DesignTab(QWidget):
         self.p_text_size.setValidator(QDoubleValidator(2, 72, 1, self.p_text_size))
         self.p_text_size.editingFinished.connect(lambda: self._block_number(self.p_text_size, "text_size"))
         self.form.addRow(tr("Testo delle celle (pt)"), self.p_text_size)
-        self.b_unblock = button(tr("Separa blocco"), None, tip=tr("Diventa forme e testi separati, come se li avessi "
+        self.b_unblock = button(tr("Separa blocco"), "unblock", tip=tr("Diventa forme e testi separati, come se li avessi "
                                                                    "disegnati uno per uno"))
         self.b_unblock.clicked.connect(self.unblock_selected)
         self.form.addRow(self.b_unblock)
@@ -864,9 +864,9 @@ class DesignTab(QWidget):
         self.p_cell_btns = QWidget()
         cb = QHBoxLayout(self.p_cell_btns)
         cb.setContentsMargins(0, 0, 0, 0)
-        self.b_merge = button(tr("Unisci celle"), None, tip=tr("Le celle scelte diventano una (Maiusc+clic per "
+        self.b_merge = button(tr("Unisci celle"), "merge", tip=tr("Le celle scelte diventano una (Maiusc+clic per "
                                                                 "sceglierne più di una)"))
-        self.b_split = button(tr("Dividi cella"), None, tip=tr("La cella unita torna nelle celle di prima"))
+        self.b_split = button(tr("Dividi cella"), "split", tip=tr("La cella unita torna nelle celle di prima"))
         self.b_merge.clicked.connect(self.merge_cells)
         self.b_split.clicked.connect(self.split_cell)
         cb.addWidget(self.b_merge)
@@ -905,7 +905,7 @@ class DesignTab(QWidget):
         self.p_turn.setPlaceholderText("es. 15")
         self.p_turn.setMaximumWidth(64)
         self.p_turn.returnPressed.connect(self._turn_edited)
-        b_turn = button(tr("Ruota"), None, tip=tr("Ruota della quantità scritta (negativa: in senso antiorario)"))
+        b_turn = button(tr("Ruota"), "turn", tip=tr("Ruota della quantità scritta (negativa: in senso antiorario)"))
         b_turn.clicked.connect(self._turn_edited)
         b_left = button("", "rotate-left", "Ghost", tr("Ruota di 90° in senso antiorario"))
         b_right = button("", "rotate-right", "Ghost", tr("Ruota di 90° in senso orario"))
@@ -925,15 +925,15 @@ class DesignTab(QWidget):
                      ("back", tr("In fondo"), tr("Sotto a tutto (anche allo sfondo bianco, se la pagina ne ha uno)")))):
             line = QHBoxLayout()
             for where, text, tip in row:
-                b = button(text, None, tip=tip)
+                b = button("", where, "Ghost", tip)  # front, forward, backward, back: the glyphs have these names
                 b.clicked.connect(lambda _=False, where=where: self.restack_selected(where))
                 line.addWidget(b)
             ll.addLayout(line)
         al.addWidget(self.layers_box)
         marks = QHBoxLayout()
-        self.b_group = button(tr("Raggruppa"), None, tip=tr("Si selezionano, si spostano e si copiano insieme (Ctrl+G)"))
+        self.b_group = button(tr("Raggruppa"), "group", tip=tr("Si selezionano, si spostano e si copiano insieme (Ctrl+G)"))
         self.b_group.clicked.connect(self.group_selected)
-        self.b_pin = button(tr("Blocca"), None, tip=tr("Non si sposta e non si cambia per sbaglio (Ctrl+L)"))
+        self.b_pin = button(tr("Blocca"), "lock", tip=tr("Non si sposta e non si cambia per sbaglio (Ctrl+L)"))
         self.b_pin.clicked.connect(self.pin_selected)
         marks.addWidget(self.b_group)
         marks.addWidget(self.b_pin)
@@ -1806,7 +1806,7 @@ class DesignTab(QWidget):
     @staticmethod
     def _swatch(b, hex_color: str):
         b.setText(hex_color.upper() if hex_color else tr("Nessuno"))
-        b.setIcon(ui.dot(hex_color) if hex_color else QIcon())
+        b.setIcon(ui.dot(hex_color) if hex_color else ui.icon("palette"))
 
     # ---- blocks: rows, columns, cells
     def _one_block(self) -> tuple | None:

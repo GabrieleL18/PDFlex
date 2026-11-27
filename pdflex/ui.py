@@ -239,6 +239,25 @@ _ICONS = {
     "text-left": '<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>',
     "text-center": '<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>',
     "text-right": '<path d="M4 6h16M10 10h10M4 14h16M10 18h10"/>',
+    "bold": '<path d="M7 5h5.5a3.5 3.5 0 0 1 0 7H7zM7 12h6.5a3.5 3.5 0 0 1 0 7H7z"/>',
+    "italic": '<path d="M10 5h8M6 19h8M14 5l-4 14"/>',
+    "arrow-start": '<path d="M20 12H4M9 7l-5 5 5 5"/>',
+    "arrow-end": '<path d="M4 12h16M15 7l5 5-5 5"/>',
+    "front": '<path d="M12 3v8M8.5 6.5 12 3l3.5 3.5"/><path d="M4 14.5l8 4 8-4M4 18.5l8 4 8-4"/>',
+    "forward": '<path d="M12 4v9M8.5 7.5 12 4l3.5 3.5"/><path d="M4 16.5l8 4 8-4"/>',
+    "backward": '<path d="M12 4v9M8.5 9.5 12 13l3.5-3.5"/><path d="M4 16.5l8 4 8-4"/>',
+    "back": '<path d="M12 2.5v8.5M8.5 7.5 12 11l3.5-3.5"/><path d="M4 14.5l8 4 8-4M4 18.5l8 4 8-4"/>',
+    "group": '<rect x="3.5" y="3.5" width="17" height="17" rx="2" stroke-dasharray="2.5 2.5"/>'
+             '<rect x="7" y="7" width="5.5" height="5.5" rx="1"/><rect x="11.5" y="11.5" width="5.5" height="5.5" rx="1"/>',
+    "lock": '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+    "turn": '<path d="M4.5 19.5h15M4.5 19.5l10-12"/><path d="M10.5 19.5a6 6 0 0 0-2-4.5"/>',
+    "merge": '<rect x="3.5" y="6.5" width="17" height="11" rx="2"/><path d="M6.5 12h3.5M17.5 12H14M8.5 10l2 2-2 2M15.5 10l-2 2 2 2"/>',
+    "split": '<rect x="3.5" y="6.5" width="17" height="11" rx="2"/><path d="M12 6.5v11M10 12H6.5M14 12h3.5M8 10l-2 2 2 2M16 10l2 2-2 2"/>',
+    "unblock": '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/>'
+               '<rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+    "palette": '<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.4 0 2-1 1.6-2.1-.5-1.3.4-2.4 1.8-2.4H18a2.5 2.5 0 0 0 2.5-2.5'
+               'C20.5 7.3 16.7 3.5 12 3.5z"/><circle cx="7.5" cy="11.5" r="1"/><circle cx="10" cy="7.5" r="1"/>'
+               '<circle cx="14.5" cy="7.5" r="1"/>',
 }
 
 APP_ICON_SVG = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
