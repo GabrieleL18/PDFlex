@@ -286,12 +286,30 @@ _BASE14 = {"": "helv", "TiRo": "tiro", "Cour": "cour"}  # fields.FONTS keys -> P
 _BUILT_IN = {"Helvetica": ("helv", "hebo", "heit", "hebi"), "Times": ("tiro", "tibo", "tiit", "tibi"),
              "Courier": ("cour", "cobo", "coit", "cobi")}
 _WINDOWS = {
-    "Arial": ("arial", "arialbd", "ariali", "arialbi"), "Calibri": ("calibri", "calibrib", "calibrii", "calibriz"),
+    "Arial": ("arial", "arialbd", "ariali", "arialbi"),
+    "Book Antiqua": ("bkant", "antquab", "antquai", "antquabi"),
+    "Bookman Old Style": ("bookos", "bookosb", "bookosi", "bookosbi"),
+    "Calibri": ("calibri", "calibrib", "calibrii", "calibriz"),
     "Cambria": ("cambria", "cambriab", "cambriai", "cambriaz"),
-    "Consolas": ("consola", "consolab", "consolai", "consolaz"), "Garamond": ("gara", "garabd", "garait", "gara"),
+    "Candara": ("candara", "candarab", "candarai", "candaraz"),
+    "Century": ("century",) * 4,
+    "Century Gothic": ("gothic", "gothicb", "gothici", "gothicbi"),
+    "Comic Sans MS": ("comic", "comicbd", "comici", "comicz"),
+    "Consolas": ("consola", "consolab", "consolai", "consolaz"),
+    "Constantia": ("constan", "constanb", "constani", "constanz"),
+    "Corbel": ("corbel", "corbelb", "corbeli", "corbelz"),
+    "Franklin Gothic": ("framd", "framd", "framdit", "framdit"),
+    "Garamond": ("gara", "garabd", "garait", "gara"),
     "Georgia": ("georgia", "georgiab", "georgiai", "georgiaz"),
+    "Impact": ("impact",) * 4,
+    "Ink Free": ("inkfree",) * 4,
+    "Lucida Console": ("lucon",) * 4,
+    "Palatino Linotype": ("pala", "palab", "palai", "palabi"),
+    "Segoe Print": ("segoepr", "segoeprb", "segoepr", "segoeprb"),
+    "Segoe Script": ("segoesc", "segoescb", "segoesc", "segoescb"),
     "Segoe UI": ("segoeui", "segoeuib", "segoeuii", "segoeuiz"),
-    "Tahoma": ("tahoma", "tahomabd", "tahoma", "tahomabd"), "Times New Roman": ("times", "timesbd", "timesi", "timesbi"),
+    "Tahoma": ("tahoma", "tahomabd", "tahoma", "tahomabd"),
+    "Times New Roman": ("times", "timesbd", "timesi", "timesbi"),
     "Trebuchet MS": ("trebuc", "trebucbd", "trebucit", "trebucbi"),
     "Verdana": ("verdana", "verdanab", "verdanai", "verdanaz"),
 }
@@ -474,16 +492,21 @@ def _own_font(page, o: Obj) -> pymupdf.Font | None:
     return pymupdf.Font(fontbuffer=buf) if buf else None
 
 
+def font_for(spec: str) -> pymupdf.Font:
+    """The font a font_spec (or a fields.FONTS key) names."""
+    if spec in _BASE14:
+        return pymupdf.Font(_BASE14[spec])
+    if spec.lower().endswith((".ttf", ".otf")):
+        font = pymupdf.Font(fontfile=spec)
+        font.from_file = True  # _write puts in only the letters it uses
+        return font
+    return pymupdf.Font(spec)
+
+
 def _text_font(page, o: Obj, span: dict, override: str | None, text: str) -> pymupdf.Font:
     """The font new words are written with: the text's own one when it can write them, else the closest built-in."""
     if override is not None:
-        if override in _BASE14:
-            return pymupdf.Font(_BASE14[override])
-        if override.lower().endswith((".ttf", ".otf")):
-            font = pymupdf.Font(fontfile=override)
-            font.from_file = True  # _write puts in only the letters it uses
-            return font
-        return pymupdf.Font(override)
+        return font_for(override)
     font = _own_font(page, o)
     if font is not None:
         missing = missing_letters(page, o, text)

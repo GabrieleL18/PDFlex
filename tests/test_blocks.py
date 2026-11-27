@@ -61,6 +61,7 @@ def test_presets():
 
 
 import dataclasses  # noqa: E402
+import pathlib  # noqa: E402
 
 import pymupdf  # noqa: E402
 
@@ -127,3 +128,30 @@ def design_words(o):
 def test_preview_pixmap(qapp):
     pm = bl.preview(bl.preset("griglia", (0, 0, 300, 150)), 96, 64)
     assert not pm.isNull() and pm.width() <= 96 and pm.height() <= 64
+
+
+def _span_fonts(page):
+    return {s["font"] for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]}
+
+
+def test_block_text_in_another_font():
+    doc, page = _page()
+    b = dataclasses.replace(bl.preset("riquadro", (100, 100, 300, 200)), font="Times")
+    bl.draw(page, b)
+    assert any("Times" in f or "NimbusRoman" in f for f in _span_fonts(page))  # MuPDF's built-in Times
+    assert [design_words(o) for o in bl.own_texts(design.page_objects(page)[0], b)] == ["Titolo"]
+    assert bl.from_json({k: v for k, v in bl.to_json(b).items() if k != "font"}).font == "Helvetica"  # older notes
+
+
+@pytest.mark.skipif("Georgia" not in design.FONTS, reason="a Windows font")
+def test_block_text_in_a_windows_font():
+    doc, page = _page()
+    b = dataclasses.replace(bl.preset("riquadro", (100, 100, 300, 200)), font="Georgia")
+    bl.draw(page, b)
+    assert any("Georgia" in f for f in _span_fonts(page))
+    assert [design_words(o) for o in bl.own_texts(design.page_objects(page)[0], b)] == ["Titolo"]
+
+
+@pytest.mark.skipif(not (pathlib.Path("C:/Windows/Fonts/comic.ttf")).exists(), reason="Windows fonts")
+def test_more_windows_fonts():
+    assert {"Candara", "Comic Sans MS", "Palatino Linotype", "Century Gothic", "Book Antiqua"} <= set(design.FONTS)

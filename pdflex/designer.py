@@ -181,6 +181,13 @@ def _label(o: design.Obj) -> str:
     return ("🔒 " if o.state == "locked" else "📌 " if o.data.get("pinned") else "") + text
 
 
+def _font_items(combo: QComboBox) -> None:
+    """The families of design.FONTS, each shown in its own letters."""
+    for i, family in enumerate(design.FONTS):
+        combo.addItem(family)
+        combo.setItemData(i, QFont(family), Qt.FontRole)
+
+
 def _hex(rgb) -> str:
     return QColor.fromRgbF(*rgb).name() if rgb else ""
 
@@ -768,7 +775,7 @@ class DesignTab(QWidget):
         self.p_size.setValidator(QDoubleValidator(1, 400, 1, self.p_size))
         self.p_size.editingFinished.connect(self._size_edited)
         self.p_font = QComboBox()
-        self.p_font.addItems(list(design.FONTS))
+        _font_items(self.p_font)
         self.p_font.setPlaceholderText(tr("Font del PDF"))  # shown when the text's own font is none of these
         self.p_font.activated.connect(self._font_edited)
         self.p_bold = button(tr("Grassetto"), "bold", tip=tr("Grassetto"))
@@ -853,6 +860,10 @@ class DesignTab(QWidget):
         self.p_text_size.setValidator(QDoubleValidator(2, 72, 1, self.p_text_size))
         self.p_text_size.editingFinished.connect(lambda: self._block_number(self.p_text_size, "text_size"))
         self.form.addRow(tr("Testo delle celle (pt)"), self.p_text_size)
+        self.p_block_font = QComboBox()
+        _font_items(self.p_block_font)
+        self.p_block_font.activated.connect(lambda _: self._block_set(font=self.p_block_font.currentText()))
+        self.form.addRow(tr("Font delle celle"), self.p_block_font)
         self.b_unblock = button(tr("Separa blocco"), "unblock", tip=tr("Diventa forme e testi separati, come se li avessi "
                                                                    "disegnati uno per uno"))
         self.b_unblock.clicked.connect(self.unblock_selected)
@@ -1693,7 +1704,8 @@ class DesignTab(QWidget):
                 self.form.setRowVisible(w, blk)
         for w in (self.p_rows, self.p_cols):
             self.form.setRowVisible(w, blk or rect is not None)
-        for w in (self.p_head_row, self.p_head_col, self.p_lines, self.p_line_width, self.p_text_size, self.b_unblock):
+        for w in (self.p_head_row, self.p_head_col, self.p_lines, self.p_line_width, self.p_text_size, self.p_block_font,
+                  self.b_unblock):
             self.form.setRowVisible(w, blk)
         for w in (self.p_cell_text, self.p_cell_btns):
             self.form.setRowVisible(w, cell)
@@ -1715,6 +1727,7 @@ class DesignTab(QWidget):
             self.p_round.setText(f"{b.radius:.1f}")
             self.p_line_width.setText(f"{b.line_width:.1f}")
             self.p_text_size.setText(f"{b.text_size:.1f}")
+            self.p_block_font.setCurrentIndex(max(self.p_block_font.findText(b.font), 0))
         elif rect is not None:
             self.p_rows.setValue(1)
             self.p_cols.setValue(1)
@@ -1929,7 +1942,7 @@ class DesignTab(QWidget):
         """Sample words in the empty cells of the blocks of the page, grey: to see how they will look."""
         z = self.zoom
         for _, b, _ in self.blocks:
-            font = QFont("Arial")
+            font = QFont(b.font)  # as the cells will look
             font.setPixelSize(max(1, round(b.text_size * z)))
             font.setItalic(True)
             for r0, c0, _, _, (x0, y0, x1, y1) in blocks.cells(b):

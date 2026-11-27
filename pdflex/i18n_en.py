@@ -673,6 +673,7 @@ EN = {
     "Trascina per allargare il blocco": "Drag to resize the block",
     "Trascina per spostare la linea tra le celle": "Drag to move the line between the cells",
     "Testo di prova": "Sample text",
+    "Font delle celle": "Cell font",
     "Intestazione": "Header",
     "Mostra un testo d'esempio nelle celle vuote dei blocchi: solo sullo schermo, nel PDF salvato non c'è":
         "Shows sample text in the empty cells of blocks: on screen only, it is not in the saved PDF",

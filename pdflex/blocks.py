@@ -29,6 +29,7 @@ class Block:
     line_width: float = 0.5
     text_size: float = 8
     text_color: str = "#1F2A44"
+    font: str = "Helvetica"  # a family of design.FONTS; headers in its bold
 
 
 def _edges(start: float, length: float, fr: list) -> list[float]:
@@ -245,12 +246,12 @@ def _paint(page, b: Block) -> None:
         text = b.texts.get(f"{r0},{c0}", "").strip()
         if not text:
             continue
-        if _is_head(b, r0, c0):
-            font = pymupdf.Font("hebo")
+        head = _is_head(b, r0, c0)
+        font = design.font_for(design.font_spec(b.font if b.font in design.FONTS else "Helvetica", bold=head))
+        if head:
             w = font.text_length(text, size)
             origin = ((cx0 + cx1 - w) / 2, (cy0 + cy1) / 2 + size * 0.35)
         else:
-            font = pymupdf.Font("helv")
             origin = (cx0 + 4, cy0 + 4 + size * 0.8)
         design._write(page, origin, text, font, size, color)
 

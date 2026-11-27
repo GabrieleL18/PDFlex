@@ -277,3 +277,12 @@ def test_every_editor_button_has_an_icon(qapp, tmp_path):
     bare = [b.text() or b.toolTip() for b in tab.findChildren(QAbstractButton)
             if b.icon().isNull() and not isinstance(b, ui.Toggle)]
     assert bare == []
+
+
+def test_block_font_from_the_panel(qapp, tmp_path):
+    tab = _block(tmp_path, "riquadro")
+    tab.select(tab.blocks[0][2])
+    assert tab.form.isRowVisible(tab.p_block_font) and tab.p_block_font.currentText() == "Helvetica"
+    tab.p_block_font.setCurrentText("Times")
+    tab.p_block_font.activated.emit(tab.p_block_font.currentIndex())
+    assert tab.blocks[0][1].font == "Times" and tab.p_block_font.currentText() == "Times"
