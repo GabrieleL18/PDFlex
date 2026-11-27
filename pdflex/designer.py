@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QIcon, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QFont, QFontMetricsF, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
-    QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -664,10 +664,16 @@ class DesignTab(QWidget):
         self.b_paste.clicked.connect(self.paste)
         self.b_find = button("", "search", "Ghost", tr("Trova e sostituisci un testo in tutto il PDF (Ctrl+H)"))
         self.b_find.clicked.connect(self.find_replace)
+        self.b_sample = button(tr("Testo di prova"), "eye", "Ghost",
+                               tr("Mostra un testo d'esempio nelle celle vuote dei blocchi: solo sullo schermo, "
+                                  "nel PDF salvato non c'è"))
+        self.b_sample.setCheckable(True)
+        self.b_sample.toggled.connect(lambda _: self.refresh())
+        self.samples = []  # the sample words on the screen (scene items, never in the PDF)
         self.b_close = button(tr("Chiudi"), "close", "Ghost", tr("Chiudi il documento (Ctrl+W)"))
         self.b_close.clicked.connect(self.close_doc)
         for w in (self.b_open, self.b_save, self.b_forms, self.b_undo, self.b_redo, self.b_paste, self.b_find,
-                  self.b_close):
+                  self.b_sample, self.b_close):
             bl.addWidget(w)
         bl.addWidget(self.file_label, 1)
         for w in (self.b_prev, self.page_label, self.b_next, self.b_zout, self.b_zin):
@@ -1875,6 +1881,34 @@ class DesignTab(QWidget):
         if self.cell_mode is not None and self.picked:
             self._in_cells(blocks.split(self.cell_mode[1], *self.picked[0]))
 
+    def _draw_samples(self) -> None:
+        """Sample words in the empty cells of the blocks of the page, grey: to see how they will look."""
+        z = self.zoom
+        for _, b, _ in self.blocks:
+            font = QFont("Arial")
+            font.setPixelSize(max(1, round(b.text_size * z)))
+            font.setItalic(True)
+            for r0, c0, _, _, (x0, y0, x1, y1) in blocks.cells(b):
+                if b.texts.get(f"{r0},{c0}", "").strip():
+                    continue
+                head = blocks._is_head(b, r0, c0)
+                font.setBold(head)
+                fm = QFontMetricsF(font)
+                words = fm.elidedText(tr("Intestazione") if head else tr("Testo di prova"), Qt.ElideRight,
+                                      max((x1 - x0 - 8) * z, 1))
+                i = QGraphicsSimpleTextItem(words)
+                i.setFont(font)
+                i.setBrush(QColor("#9AA3B2"))
+                w = fm.horizontalAdvance(words)
+                if head:
+                    i.setPos(((x0 + x1) / 2) * z - w / 2, ((y0 + y1) / 2) * z - fm.height() / 2)
+                else:
+                    i.setPos((x0 + 4) * z, (y0 + 4 + 0.8 * b.text_size) * z - fm.ascent())
+                i.setZValue(800)
+                i.setAcceptedMouseButtons(Qt.NoButton)
+                self.scene.addItem(i)
+                self.samples.append(i)
+
     def _show_extras(self, entry: tuple | None) -> None:
         """Over the page: the dividers of the block selected, or the outlines of its cells while picking them."""
         for i in self.extras:
@@ -1981,7 +2015,7 @@ class DesignTab(QWidget):
     def refresh(self):
         self.scene.blockSignals(True)
         self.scene.clear()
-        self.items, self.extras = [], []
+        self.items, self.extras, self.samples = [], [], []
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
         self.thumbs.setVisible(has)
@@ -2014,6 +2048,8 @@ class DesignTab(QWidget):
                 self.scene.addItem(item)
                 item.setSelected(any(o is s for s in self.selection))
                 self.items.append(item)
+            if self.b_sample.isChecked():
+                self._draw_samples()
         else:
             self.file_label.setText("")
             self.page_label.setText("")

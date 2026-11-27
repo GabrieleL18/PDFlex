@@ -190,3 +190,18 @@ def test_unblock(qapp, tmp_path):
     tab.select(tab.blocks[0][2])
     tab.b_unblock.click()
     assert tab.blocks == [] and len(tab.objects) > 5
+
+
+def test_sample_text_on_screen_only(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")  # no text of its own
+    assert not tab.b_sample.isChecked() and tab.samples == []
+    tab.b_sample.click()
+    assert tab.samples and all(i.scene() is tab.scene for i in tab.samples)
+    assert len(tab.samples) == 4 * 6  # every empty cell: 4 headers and 20 body cells
+    out = tmp_path / "prova.pdf"
+    tab.save(str(out))
+    assert pymupdf.open(out)[0].get_text().strip() == ""  # never written to the PDF
+    tab.go_page(0)
+    assert tab.samples  # still on after the page is drawn again
+    tab.b_sample.click()
+    assert tab.samples == []
