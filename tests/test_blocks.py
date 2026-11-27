@@ -161,3 +161,31 @@ def test_block_text_in_a_windows_font():
 @pytest.mark.skipif(not (pathlib.Path("C:/Windows/Fonts/comic.ttf")).exists(), reason="Windows fonts")
 def test_more_windows_fonts():
     assert {"Candara", "Comic Sans MS", "Palatino Linotype", "Century Gothic", "Book Antiqua"} <= set(design.FONTS)
+
+
+def test_block_visible_inside_a_frame():  # review: a grid drawn in a filled frame was hidden by the frame
+    doc, page = _page()
+    page.draw_rect((50, 50, 550, 400), color=(0, 0, 1), fill=(0.8, 0.8, 0.8))
+    bl.draw(page, bl.preset("riquadro", (100, 100, 400, 250)))
+    pix = page.get_pixmap(clip=(250, 200, 251, 201))
+    assert pix.pixel(0, 0) != (204, 204, 204)
+
+
+def test_block_visible_over_a_background_image():
+    doc, page = _page()
+    img = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 10, 10), False)
+    img.set_rect(img.irect, (200, 30, 30))
+    page.insert_image(page.rect, pixmap=img, keep_proportion=False)
+    bl.draw(page, bl.preset("riquadro", (100, 100, 400, 250)))
+    pix = page.get_pixmap(clip=(250, 200, 251, 201))
+    assert pix.pixel(0, 0) != (200, 30, 30)
+
+
+@pytest.mark.skipif("Arial" not in design.FONTS, reason="a Windows font")
+def test_windows_font_cells_go_in_once():  # review: one font copy per cell made big files
+    doc, page = _page()
+    b = bl.preset("tabella", (100, 100, 400, 250))
+    b = dataclasses.replace(b, font="Arial", texts={f"{r},{c}": f"v{r}{c}" for r in range(6) for c in range(4)})
+    bl.draw(page, b)
+    assert len(page.get_xobjects()) <= 2  # one show_pdf_page: its wrapper and its form (one per cell: 48)
+    assert len(bl.own_texts(design.page_objects(page)[0], b)) == 24

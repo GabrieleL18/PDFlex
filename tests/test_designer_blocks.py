@@ -6,6 +6,14 @@ from pdflex import design, ui
 from pdflex.designer import DesignTab, DividerItem, _marks
 
 
+@pytest.fixture(autouse=True)
+def _no_dialogs(monkeypatch):
+    """A warning would wait for a click: here it fails the test instead."""
+    def warn(parent, text, *a, **k):
+        raise AssertionError(text)
+    monkeypatch.setattr(ui, "warn", warn)
+
+
 def _tab(tmp_path, pages=1):
     doc = pymupdf.open()
     for _ in range(pages):
@@ -286,3 +294,70 @@ def test_block_font_from_the_panel(qapp, tmp_path):
     tab.p_block_font.setCurrentText("Times")
     tab.p_block_font.activated.emit(tab.p_block_font.currentIndex())
     assert tab.blocks[0][1].font == "Times" and tab.p_block_font.currentText() == "Times"
+
+
+def test_block_over_an_identical_box(qapp, tmp_path):  # review: keys of the box and the block's border collided
+    doc = pymupdf.open()
+    doc.new_page().draw_rect((100, 100, 400, 250), color=(0, 0, 0))
+    path = tmp_path / "box.pdf"
+    doc.save(path)
+    tab = DesignTab()
+    tab.open(str(path))
+    tab.set_mode("rect")
+    tab.drawn((100, 100, 400, 250))
+    tab.use_preset("tabella")
+    assert len(tab.blocks) == 1
+    assert tab.apply_block(tab.blocks[0], bl.set_count(tab.blocks[0][1], "rows", 7))
+    assert len(tab.blocks[0][1].rows) == 7
+
+
+def test_paste_a_block_twice(qapp, tmp_path):
+    tab = _block(tmp_path, "riquadro", pages=2)
+    tab.select(tab.blocks[0][2])
+    tab.copy_selected()
+    tab.go_page(1)
+    tab.paste()
+    tab.paste()
+    assert len(tab.blocks) == 2
+    for i in range(2):
+        e = next(x for x in tab.blocks if x[0] == i)
+        assert tab.apply_block(e, bl.set_count(e[1], "rows", 2 + i))
+    assert sorted(len(x[1].rows) for x in tab.blocks) == [2, 3]
+
+
+def test_align_moves_a_block_whole(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")
+    tab.select(tab.blocks[0][2])
+    tab.align_selected("left")  # one object alone: to the page's left side
+    assert len(tab.blocks) == 1 and tab.blocks[0][1].rect[0] == pytest.approx(0, abs=0.5)
+    xs = sorted(round(o.rect[0]) for o in tab.objects if o.kind == "line" and o.rect[0] == o.rect[2])
+    assert xs == [75, 150, 225]
+
+
+def test_group_a_block_with_a_box(qapp, tmp_path):
+    tab = _block(tmp_path, "riquadro")
+    tab.set_mode("rect")
+    tab.drawn((450, 100, 500, 150))
+    tab.gallery.hide()
+    box = next(o for o in tab.objects if o.kind == "rect" and o.rect[0] > 440)
+    tab.select(tab.blocks[0][2] + [box])
+    assert tab.b_group.text() == "Raggruppa"
+    tab.group_selected()
+    assert len(_marks(tab.doc)["groups"]["0"]) == 1 and len(tab.blocks) == 1
+
+
+def test_typing_a_count_waits_for_the_whole_number(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    assert not tab.p_rows.keyboardTracking() and not tab.p_cols.keyboardTracking()
+
+
+def test_cell_mode_ends_when_another_block_is_selected(qapp, tmp_path):
+    tab = _block(tmp_path, "riquadro")
+    tab.set_mode("rect")
+    tab.drawn((100, 400, 300, 500))
+    tab.use_preset("riquadro")
+    a = next(e for e in tab.blocks if e[1].rect[1] < 300)
+    b = next(e for e in tab.blocks if e[1].rect[1] > 300)
+    tab.enter_cells(a, 0, 0)
+    tab.select(b[2])
+    assert tab.cell_mode is None

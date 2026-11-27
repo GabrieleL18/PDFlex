@@ -240,18 +240,22 @@ def _paint(page, b: Block) -> None:
         shape.finish(color=_rgb(b.border), fill=None, width=b.border_width, closePath=True)
     shape.commit()
     size, color = b.text_size, _rgb(b.text_color) or (0, 0, 0)
+    family = b.font if b.font in design.FONTS else "Helvetica"
+    fonts = {head: design.font_for(design.font_spec(family, bold=head)) for head in (False, True)}  # once each
+    lines = []
     for r0, c0, _, _, (cx0, cy0, cx1, cy1) in cells(b):
         text = b.texts.get(f"{r0},{c0}", "").strip()
         if not text:
             continue
         head = _is_head(b, r0, c0)
-        font = design.font_for(design.font_spec(b.font if b.font in design.FONTS else "Helvetica", bold=head))
+        font = fonts[head]
         if head:
             w = font.text_length(text, size)
             origin = ((cx0 + cx1 - w) / 2, (cy0 + cy1) / 2 + size * 0.35)
         else:  # on the left, in the middle of its height
             origin = (cx0 + 4, (cy0 + cy1) / 2 + size * 0.35)
-        design._write(page, origin, text, font, size, color)
+        lines.append((origin, text, font, size))
+    design.write_lines(page, lines, color)
 
 
 def _runs(n: int, keep) -> list[tuple[int, int]]:
@@ -267,13 +271,13 @@ def _runs(n: int, keep) -> list[tuple[int, int]]:
 
 
 def draw(page, b: Block) -> None:
-    """The block as plain shapes and text, underneath the page's content (just above a page-size background
-    sheet, when there is one): what the PDF or the user put on it stays visible."""
+    """The block as plain shapes and text, just above the topmost filled shape or image it overlaps (a page
+    background, a frame, a scanned page) and under everything else: what is on it stays visible."""
     from pdflex import content
-    area = page.rect.get_area()
-    sheets = [d["seqno"] for d in page.get_cdrawings()
-              if d.get("fill") is not None and pymupdf.Rect(d["rect"]).get_area() >= 0.9 * area]
-    data, pos, ctm = content.place(page, "after", max(sheets)) if sheets else content.place(page, "back")
+    box = pymupdf.Rect(b.rect)
+    under = [k for k, (kind, r) in enumerate(page.get_bboxlog())
+             if kind in ("fill-path", "fill-image", "fill-shade") and not (pymupdf.Rect(r) & box).is_empty]
+    data, pos, ctm = content.place(page, "after", max(under)) if under else content.place(page, "back")
     mark = content.isolate(page, data)
     _paint(page, b)
     content.splice(page, data, pos, ctm, mark)

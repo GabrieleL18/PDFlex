@@ -5,6 +5,7 @@ and never touched, so they are all still there in the saved file."""
 import dataclasses
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 import pymupdf
@@ -62,12 +63,13 @@ def _union(objs) -> pymupdf.Rect:
     return r
 
 
-def _find_parts(objs: list, keys) -> list | None:
-    """The shapes with these keys, each taken once (a block's fill and border have the same outline); None
-    when one is missing."""
+def _find_parts(objs: list, keys, taken: list = ()) -> list | None:
+    """The shapes with these keys, each taken once (a block's fill and border have the same outline) and none of
+    taken (another block's); None when one is missing."""
     parts = []
     for k in keys or [None]:
-        o = next((o for o in objs if k and o.kind != "text" and _is(o, k) and not any(o is p for p in parts)), None)
+        o = next((o for o in objs if k and o.kind != "text" and _is(o, k) and not any(o is p for p in parts)
+                  and not any(o is t for t in taken)), None)
         if o is None:
             return None
         parts.append(o)
@@ -77,11 +79,12 @@ def _find_parts(objs: list, keys) -> list | None:
 def _page_blocks(doc, n: int, objs: list) -> list[tuple]:
     """The blocks of page n (see blocks.py) found among its objects: (index in the note, block where it is now,
     its parts, own texts included). A block with a shape missing is not one any more: left out."""
-    found = []
+    found, taken = [], []
     for i, e in enumerate(_marks(doc).get("blocks", {}).get(str(n), [])):
-        parts = _find_parts(objs, e.get("keys"))
+        parts = _find_parts(objs, e.get("keys"), taken)
         if parts is None:
             continue
+        taken += parts
         b, now, was = blocks.from_json(e["block"]), _union(parts), pymupdf.Rect(e["drawn"])
         sx = now.width / was.width if was.width else 1
         sy = now.height / was.height if was.height else 1
@@ -98,11 +101,17 @@ def _put_block(page, idx: int | None, old: list, new) -> None:
     replaced (None: a new entry). Entries whose shapes are gone are dropped from the note on the way."""
     if old:
         design.delete(page, old)
-    before = design.page_objects(page)[0]
+    had = Counter(tuple(_key(o)) for o in design.page_objects(page)[0] if o.kind != "text")
     blocks.draw(page, new)
-    after = design.page_objects(page)[0]
-    fresh = [o for o in after if o.kind != "text" and not any(b.kind == o.kind and _same_key(_key(b), _key(o))
-                                                                   for b in before)]
+    fresh = []  # what the block added: counted, as a shape just like one already there is new too
+    for o in design.page_objects(page)[0]:
+        k = tuple(_key(o))
+        if o.kind == "text":
+            continue
+        if had[k] > 0:
+            had[k] -= 1
+        else:
+            fresh.append(o)
     if not fresh:
         raise design.EditError(tr("PDFlex non è riuscito a disegnare il blocco."))
     rec = {"block": blocks.to_json(new), "keys": [_key(o) for o in fresh], "drawn": list(_union(fresh))}
@@ -116,8 +125,13 @@ def _add_blocks(page, recs: list[dict], idx: int | None = None) -> None:
     if idx is not None and idx < len(lst):
         lst[idx], recs = recs[0], recs[1:]
     lst += recs
-    objs = design.page_objects(page)[0]
-    marks["blocks"][p] = [e for e in lst if _find_parts(objs, e.get("keys")) is not None]
+    objs, taken, kept = design.page_objects(page)[0], [], []
+    for e in lst:
+        parts = _find_parts(objs, e.get("keys"), taken)
+        if parts is not None:
+            taken += parts
+            kept.append(e)
+    marks["blocks"][p] = kept
     _put_marks(page.parent, marks)
 
 
@@ -840,6 +854,7 @@ class DesignTab(QWidget):
         self.p_rows, self.p_cols = QSpinBox(), QSpinBox()
         for s, axis, name in ((self.p_rows, "rows", tr("Righe")), (self.p_cols, "cols", tr("Colonne"))):
             s.setRange(1, 60)
+            s.setKeyboardTracking(False)  # "12" typed: not 1 first (which would drop the texts of the other rows)
             s.valueChanged.connect(lambda n, axis=axis: self._count_edited(axis, n))
             self.form.addRow(name, s)
         self.p_head_row = ui.Toggle(tr("Prima riga come intestazione"))
@@ -1152,7 +1167,7 @@ class DesignTab(QWidget):
         found = ([o for o in self.objects if any(_is(o, k) for k in keys)] for keys in marks.get("groups", {}).get(p, []))
         self.groups = [g for g in found if len(g) > 1]
         self.blocks = _page_blocks(self.doc, self.page_no, self.objects) if self.doc else []
-        self.groups += [parts for _, _, parts in self.blocks if len(parts) > 1]  # a click takes the whole block
+
 
     def block_of(self, obj) -> tuple | None:
         """The block obj is part of (an entry of self.blocks), or None."""
@@ -1169,7 +1184,8 @@ class DesignTab(QWidget):
         idx = entry[0] if entry else None
         if not self._edit(lambda page: _put_block(page, idx, old, new), keep=[tuple(new.rect)]):
             return False
-        mine = next((e for e in self.blocks if all(abs(a - b) < 1 for a, b in zip(e[1].rect, new.rect))), None)
+        here = [e for e in self.blocks if all(abs(a - b) < 1 for a, b in zip(e[1].rect, new.rect))]
+        mine = next((e for e in here if e[0] == idx), here[-1] if here else None)  # a new one is the last
         if mine:
             self.select(mine[2])
         return True
@@ -1314,23 +1330,41 @@ class DesignTab(QWidget):
         if objs:
             self._edit(paste, keep=[tuple(pymupdf.Rect(o.rect) + (d, d, d, d)) for o in objs])
 
-    def _lined_up(self, fn, moves: list, *args) -> None:
+    def _units(self, objs: list) -> list[tuple]:
+        """objs as what lines up: (a stand-in object, the objects it moves). A block is one, its outline."""
+        units, done = [], set()
+        for o in objs:
+            if id(o) in done:
+                continue
+            e = self.block_of(o)
+            parts = [p for p in e[2] if any(p is x for x in objs)] if e else [o]
+            done |= {id(p) for p in parts}
+            units.append((dataclasses.replace(o, rect=tuple(_union(parts))) if len(parts) > 1 else o, parts))
+        return units
+
+    def _move_units(self, units: list, moves: list) -> None:
+        """moves (stand-in, dx, dy) made on the page, each unit's objects by the same amount, as one step."""
+        each = [(p, dx, dy) for u, dx, dy in moves for s, parts in units if s is u for p in parts]
+        if not each:
+            return
         objs = self._free()
-        keep = {id(o): tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o, dx, dy in moves}
-        self._edit(fn, objs, *args, keep=[keep.get(id(o), o.rect) for o in objs], follow=objs)
+        keep = {id(o): tuple(pymupdf.Rect(o.rect) + (dx, dy, dx, dy)) for o, dx, dy in each}
+
+        def shift(page):
+            design._replace(page, [o for o, _, _ in each],
+                            [(pymupdf.Matrix(1, 0, 0, 1, dx, dy), {}, None) for _, dx, dy in each])
+        self._edit(shift, keep=[keep.get(id(o), o.rect) for o in objs], follow=objs)
 
     def align_selected(self, how: str) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
-        objs = self._free()
-        moves = design.alignment(self.doc[self.page_no], objs, how) if objs else []
-        if moves:
-            self._lined_up(design.align, moves, how)
+        units = self._units(self._free())
+        if units:
+            self._move_units(units, design.alignment(self.doc[self.page_no], [u for u, _ in units], how))
 
     def distribute_selected(self, axis: str) -> None:
         self.view.flush_nudge()
-        moves = design.distribution(self._free(), axis)
-        if moves:
-            self._lined_up(design.distribute, moves, axis)
+        units = self._units(self._free())
+        self._move_units(units, design.distribution([u for u, _ in units], axis))
 
     def rotate_selected(self, degrees: float) -> None:
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
@@ -1382,7 +1416,7 @@ class DesignTab(QWidget):
             gone = [_key(o) for g in mine for o in g]
 
             def change(marks, p):
-                marks.setdefault("groups", {})[p] = [g for g in marks["groups"].get(p, [])
+                marks.setdefault("groups", {})[p] = [g for g in marks.get("groups", {}).get(p, [])
                                                      if not any(_same_key(k, x) for k in g for x in gone)]
         elif len(objs) > 1:
             def change(marks, p):
@@ -1692,7 +1726,8 @@ class DesignTab(QWidget):
 
     def _show_props(self):
         self._show_obj_props()
-        if self.cell_mode is not None and self._one_block() is None:  # the block is not selected any more
+        now = self._one_block()
+        if self.cell_mode is not None and (now is None or now[0] != self.cell_mode[0]):  # its block not selected
             self.cell_mode, self.picked = None, []
         e, rect = self._one_block(), self._plain_rect()
         cell, blk = self.cell_mode is not None, e is not None and self.cell_mode is None
@@ -1993,7 +2028,8 @@ class DesignTab(QWidget):
     # ---- drawing the page
     def _whole_groups(self, objs: list) -> list:
         """objs with the rest of their groups, also selected on the page."""
-        more = [o for g in self.groups if any(o is s for o in g for s in objs) for o in g
+        wholes = self.groups + [parts for _, _, parts in self.blocks]  # a click takes the whole block too
+        more = [o for g in wholes if any(o is s for o in g for s in objs) for o in g
                 if not any(o is s for s in objs)]
         if more:
             self.scene.blockSignals(True)

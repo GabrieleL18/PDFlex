@@ -518,6 +518,22 @@ def _text_font(page, o: Obj, span: dict, override: str | None, text: str) -> pym
     return pymupdf.Font({"helv": "hebo", "tiro": "tibo", "cour": "cobo"}[base] if "bold" in name else base)
 
 
+def write_lines(page, lines: list[tuple], color) -> None:
+    """Several lines (origin, text, font, size), left to right. Those in fonts from files go in together: one
+    copy of each font, cut to the letters they use, not one per line."""
+    files = [ln for ln in lines if getattr(ln[2], "from_file", False)]
+    for origin, text, font, size in (ln for ln in lines if not getattr(ln[2], "from_file", False)):
+        _write(page, origin, text, font, size, color)
+    if files:
+        tw = pymupdf.TextWriter(page.rect)
+        for origin, text, font, size in files:
+            tw.append(pymupdf.Point(origin), text, font=font, fontsize=size)
+        tmp = pymupdf.open()
+        tw.write_text(tmp.new_page(width=page.rect.width, height=page.rect.height), color=color)
+        tmp.subset_fonts()
+        page.show_pdf_page(page.rect, tmp, 0)
+
+
 def _write(page, origin, text: str, font: pymupdf.Font, fontsize: float, color, way=(1, 0), alpha=1.0) -> None:
     """way: the direction it reads in, on the page ((1, 0): left to right)."""
     # TextWriter, not insert_text: insert_text writes the built-in fonts in Latin-1 and loses "€"
