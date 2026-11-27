@@ -131,6 +131,9 @@ QLabel#KeysGroup {{ color: {accent}; font-weight: 600; }}
 #DropZone {{ border: 2px dashed {border_strong}; border-radius: 16px; background: {surface}; }}
 #DropZone:hover, #DropZone[hot="true"] {{ border-color: {accent}; background: {hot_bg}; }}
 QMenu {{ background: {surface}; color: {ink}; border: 1px solid {border}; padding: 4px; }}
+QFrame#Gallery {{ background: {surface}; border: 1px solid {border}; border-radius: 8px; }}
+QFrame#Gallery QToolButton {{ color: {ink}; padding: 4px; border-radius: 6px; }}
+QFrame#Gallery QToolButton:hover {{ background: {hover}; }}
 QMenu::item {{ padding: 6px 20px 6px 8px; border-radius: 6px; }}
 QMenu::item:selected {{ background: {accent_soft}; color: {ink}; }}
 QMenu::item:disabled {{ color: {disabled}; }}

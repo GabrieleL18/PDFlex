@@ -114,3 +114,17 @@ def test_block_survives_save_and_reopen(qapp, tmp_path):
     tab2 = DesignTab()
     tab2.open(str(out))
     assert len(tab2.blocks) == 1 and tab2.blocks[0][1].header_col
+
+
+def test_gallery_after_drawing_a_rectangle(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    tab.show()
+    tab.set_mode("rect")
+    tab.drawn((100, 100, 400, 250))
+    assert tab.gallery.isVisible() and list(tab.gallery.buttons) == [p for p, _ in bl.PRESETS]
+    assert not tab.gallery.buttons["tabella"].icon().isNull()
+    tab.gallery.buttons["griglia"].click()
+    assert not tab.gallery.isVisible() and tab.blocks[0][1].header_col
+    tab.set_mode("rect")
+    tab.drawn((10, 10, 25, 18))  # too small for a block: no gallery
+    assert not tab.gallery.isVisible()

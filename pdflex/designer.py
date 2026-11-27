@@ -430,6 +430,39 @@ class PageView(QGraphicsView):
                        straight=bool(e.modifiers() & Qt.ShiftModifier))
 
 
+class BlockGallery(QFrame):
+    """The ready-made blocks, shown by the rectangle just drawn: a click turns it into one, Rettangolo (or Esc,
+    or a click elsewhere) leaves it as it is."""
+
+    def __init__(self, tab):
+        super().__init__(tab, Qt.Popup)
+        self.tab = tab
+        self.setObjectName("Gallery")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        self.buttons: dict[str, QToolButton] = {}
+        for pid, name in blocks.PRESETS:
+            b = QToolButton(text=name, toolButtonStyle=Qt.ToolButtonTextUnderIcon, iconSize=QSize(96, 64),
+                            autoRaise=True)
+            b.clicked.connect(lambda _=False, p=pid: self.pick(p))
+            lay.addWidget(b)
+            self.buttons[pid] = b
+
+    def show_at(self, rect: tuple, point) -> None:
+        """Previews of rect as each block, the gallery at point (global, on screen)."""
+        for pid, b in self.buttons.items():
+            blk = blocks.preset(pid, rect)
+            b.setIcon(QIcon(blocks.preview(blk, 96, 64)) if blk else ui.icon("rect"))
+        self.adjustSize()
+        self.move(point)
+        self.show()
+
+    def pick(self, pid: str) -> None:
+        self.hide()
+        self.tab.use_preset(pid)
+
+
 class DesignTab(QWidget):
     open_in_forms = Signal(str)  # path of the saved PDF, for the window to open in Moduli
 
@@ -553,6 +586,7 @@ class DesignTab(QWidget):
         self.scene = QGraphicsScene(self)
         self.scene.selectionChanged.connect(self._selection_changed)
         self.view = PageView(self.scene, self)
+        self.gallery = BlockGallery(self)
         self.drop = DropZone(tr("Apri un PDF per modificarne la grafica"), glyph="page")
         self.drop.picked.connect(self.open)
         empty = QWidget(objectName="Desk")
@@ -1345,6 +1379,9 @@ class DesignTab(QWidget):
             r = pymupdf.Rect(rect).normalize()
             if r.width >= 2 and r.height >= 2 and self._edit(design.add_rect, tuple(r)):
                 self.last_drawn = next((o for o in self.objects if o.kind == "rect" and _kept(o, tuple(r))), None)
+                if self.last_drawn and r.width >= 20 and r.height >= 12:  # big enough to hold a block
+                    at = self.view.mapFromScene(QPointF(r.x0 * self.zoom, (r.y1 + 6) * self.zoom))
+                    self.gallery.show_at(tuple(r), self.view.viewport().mapToGlobal(at))
         elif mode == "text":
             text = ui.ask_text(self, tr("Testo"), tr("Scrivi il testo da aggiungere:"))
             if text:
