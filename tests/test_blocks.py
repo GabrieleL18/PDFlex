@@ -189,3 +189,21 @@ def test_windows_font_cells_go_in_once():  # review: one font copy per cell made
     bl.draw(page, b)
     assert len(page.get_xobjects()) <= 2  # one show_pdf_page: its wrapper and its form (one per cell: 48)
     assert len(bl.own_texts(design.page_objects(page)[0], b)) == 24
+
+
+@pytest.mark.parametrize("how", ["top", "middle", "bottom"])
+def test_cell_text_aligned_vertically(how):
+    doc, page = _page()
+    b = bl.Block((100, 100, 300, 220), [1.0], [1.0], texts={"0,0": "Riga"}, valign=how)
+    bl.draw(page, b)
+    y0, y1 = next((s["bbox"][1], s["bbox"][3]) for blk in page.get_text("dict")["blocks"]
+                  for ln in blk.get("lines", []) for s in ln["spans"] if "Riga" in s["text"])
+    mid = (y0 + y1) / 2
+    want = {"top": 100 + 3 + 4, "middle": 160, "bottom": 220 - 3 - 4}[how]
+    assert abs(mid - want) < 3, (how, y0, y1)
+
+
+def test_valign_defaults_to_middle_for_older_notes():
+    b = bl.Block((0, 0, 10, 10), [1.0], [1.0])
+    assert b.valign == "middle"
+    assert bl.from_json({k: v for k, v in bl.to_json(b).items() if k != "valign"}).valign == "middle"

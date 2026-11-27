@@ -30,6 +30,7 @@ class Block:
     text_size: float = 8
     text_color: str = "#1F2A44"
     font: str = "Helvetica"  # a family of design.FONTS; headers in its bold
+    valign: str = "middle"  # where the text sits in its cell's height: "top", "middle", "bottom"
 
 
 def _edges(start: float, length: float, fr: list) -> list[float]:
@@ -204,6 +205,15 @@ def _path(shape, r: tuple, k: float, corners=(1, 1, 1, 1)) -> None:
     turn(P(x0, y0 + tl), P(x0, y0), P(x0 + tl, y0), tl)
 
 
+def baseline(b: Block, cy0: float, cy1: float) -> float:
+    """The y of a cell's text line, by b.valign."""
+    if b.valign == "top":
+        return cy0 + 3 + b.text_size * 0.8
+    if b.valign == "bottom":
+        return cy1 - 3 - b.text_size * 0.2
+    return (cy0 + cy1) / 2 + b.text_size * 0.35
+
+
 def _is_head(b: Block, r: int, c: int) -> bool:
     return (b.header_row and r == 0) or (b.header_col and c == 0)
 
@@ -249,11 +259,8 @@ def _paint(page, b: Block) -> None:
             continue
         head = _is_head(b, r0, c0)
         font = fonts[head]
-        if head:
-            w = font.text_length(text, size)
-            origin = ((cx0 + cx1 - w) / 2, (cy0 + cy1) / 2 + size * 0.35)
-        else:  # on the left, in the middle of its height
-            origin = (cx0 + 4, (cy0 + cy1) / 2 + size * 0.35)
+        x = (cx0 + cx1 - font.text_length(text, size)) / 2 if head else cx0 + 4  # headers centred, the rest left
+        origin = (x, baseline(b, cy0, cy1))
         lines.append((origin, text, font, size))
     design.write_lines(page, lines, color)
 

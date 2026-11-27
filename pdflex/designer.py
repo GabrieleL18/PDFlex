@@ -879,6 +879,21 @@ class DesignTab(QWidget):
         _font_items(self.p_block_font)
         self.p_block_font.activated.connect(lambda _: self._block_set(font=self.p_block_font.currentText()))
         self.form.addRow(tr("Font delle celle"), self.p_block_font)
+        self.p_valign = QWidget()
+        vl = QHBoxLayout(self.p_valign)
+        vl.setContentsMargins(0, 0, 0, 0)
+        group, self.valign_btns = QButtonGroup(self), {}
+        for how, glyph, tip in (("top", "align-top", tr("In alto nella cella")),
+                                ("middle", "align-vcenter", tr("Al centro della cella")),
+                                ("bottom", "align-bottom", tr("In basso nella cella"))):
+            b = button("", glyph, "Ghost", tip)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, how=how: self._block_set(valign=how))
+            group.addButton(b)
+            vl.addWidget(b)
+            self.valign_btns[how] = b
+        vl.addStretch()
+        self.form.addRow(tr("Allineamento verticale"), self.p_valign)
         self.b_unblock = button(tr("Separa blocco"), "unblock", tip=tr("Diventa forme e testi separati, come se li avessi "
                                                                    "disegnati uno per uno"))
         self.b_unblock.clicked.connect(self.unblock_selected)
@@ -1740,7 +1755,7 @@ class DesignTab(QWidget):
         for w in (self.p_rows, self.p_cols):
             self.form.setRowVisible(w, blk or rect is not None)
         for w in (self.p_head_row, self.p_head_col, self.p_lines, self.p_line_width, self.p_text_size, self.p_block_font,
-                  self.b_unblock):
+                  self.p_valign, self.b_unblock):
             self.form.setRowVisible(w, blk)
         for w in (self.p_cell_text, self.p_cell_btns):
             self.form.setRowVisible(w, cell)
@@ -1763,6 +1778,7 @@ class DesignTab(QWidget):
             self.p_line_width.setText(f"{b.line_width:.1f}")
             self.p_text_size.setText(f"{b.text_size:.1f}")
             self.p_block_font.setCurrentIndex(max(self.p_block_font.findText(b.font), 0))
+            self.valign_btns.get(b.valign, self.valign_btns["middle"]).setChecked(True)
         elif rect is not None:
             self.p_rows.setValue(1)
             self.p_cols.setValue(1)
@@ -1991,11 +2007,8 @@ class DesignTab(QWidget):
                 i = QGraphicsSimpleTextItem(words)
                 i.setFont(font)
                 i.setBrush(QColor("#9AA3B2"))
-                w = fm.horizontalAdvance(words)
-                if head:
-                    i.setPos(((x0 + x1) / 2) * z - w / 2, ((y0 + y1) / 2) * z - fm.height() / 2)
-                else:
-                    i.setPos((x0 + 4) * z, ((y0 + y1) / 2 + 0.35 * b.text_size) * z - fm.ascent())
+                x = ((x0 + x1) / 2) * z - fm.horizontalAdvance(words) / 2 if head else (x0 + 4) * z
+                i.setPos(x, blocks.baseline(b, y0, y1) * z - fm.ascent())  # where the cell's own text will sit
                 i.setZValue(800)
                 i.setAcceptedMouseButtons(Qt.NoButton)
                 self.scene.addItem(i)

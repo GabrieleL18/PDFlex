@@ -361,3 +361,12 @@ def test_cell_mode_ends_when_another_block_is_selected(qapp, tmp_path):
     tab.enter_cells(a, 0, 0)
     tab.select(b[2])
     assert tab.cell_mode is None
+
+
+def test_block_valign_from_the_panel(qapp, tmp_path):
+    tab = _block(tmp_path, "riquadro")
+    tab.select(tab.blocks[0][2])
+    assert tab.form.isRowVisible(tab.p_valign)
+    assert tab.valign_btns["middle"].isChecked()
+    tab.valign_btns["bottom"].click()
+    assert tab.blocks[0][1].valign == "bottom" and tab.valign_btns["bottom"].isChecked()
