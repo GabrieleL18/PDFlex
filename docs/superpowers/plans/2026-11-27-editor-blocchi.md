@@ -358,9 +358,9 @@
   def test_drag_outer_side_scales(qapp, tmp_path):
       tab = _block(tmp_path, "tabella"); tab.show(); tab.select(tab.blocks[0][2])
       d = next(i for i in tab.scene.items() if isinstance(i, DividerItem) and i.axis == "cols" and i.index == 3)
-      d.drop_at(700)                                              # right side from 400 to 700: twice as wide
+      d.drop_at(500)                                              # right side from 400 to 500 (an A4 page is 595 wide)
       b = tab.blocks[0][1]
-      assert b.rect[2] == pytest.approx(700, abs=0.5) and b.cols == pytest.approx([0.25] * 4)
+      assert b.rect[2] == pytest.approx(500, abs=0.5) and b.cols == pytest.approx([0.25] * 4)
 
   def test_unblock(qapp, tmp_path):
       tab = _block(tmp_path, "tabella"); tab.select(tab.blocks[0][2]); tab.b_unblock.click()
