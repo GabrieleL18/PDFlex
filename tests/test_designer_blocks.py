@@ -205,3 +205,66 @@ def test_sample_text_on_screen_only(qapp, tmp_path):
     assert tab.samples  # still on after the page is drawn again
     tab.b_sample.click()
     assert tab.samples == []
+
+
+def _shown(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    tab.resize(1200, 900)
+    tab.show()
+    qapp.processEvents()
+    return tab
+
+
+def test_drawing_snaps_to_an_edge(qapp, tmp_path):
+    from tests.test_designer import _drag
+    tab = _shown(qapp, tmp_path)
+    tab.set_mode("rect")
+    tab.drawn((300, 100, 400, 200))  # a box to catch
+    tab.gallery.close()
+    tab.set_mode("rect")
+    z, v = tab.zoom, tab.view
+    start, end = v.mapFromScene(100 * z, 300 * z), v.mapFromScene(402.5 * z, 350 * z)  # 2.5 pt past its right edge
+    _drag(v, start, end)
+    new = max(tab.objects, key=lambda o: o.rect[1])
+    assert new.rect[2] == pytest.approx(400, abs=0.3) and tab.guides == []
+
+
+def test_size_tag_while_drawing(qapp, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    tab = _shown(qapp, tmp_path)
+    tab.set_mode("rect")
+    z, v = tab.zoom, tab.view
+    start, end = v.mapFromScene(100 * z, 300 * z), v.mapFromScene(180 * z, 340 * z)
+    QTest.mousePress(v.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(v.viewport(), end)
+    assert tab.size_tag.isVisible() and "pt" in tab.size_tag.text() and "80" in tab.size_tag.text()
+    QTest.mouseRelease(v.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+    assert tab.size_tag is None or not tab.size_tag.isVisible()
+
+
+def test_resizing_snaps_to_an_edge(qapp, tmp_path):
+    from tests.test_designer import _drag
+    tab = _shown(qapp, tmp_path)
+    for r in ((300, 100, 400, 200), (100, 300, 200, 350)):
+        tab.set_mode("rect")
+        tab.drawn(r)
+        tab.gallery.close()
+    low = max(tab.objects, key=lambda o: o.rect[1])
+    tab.select([low])
+    z, v = tab.zoom, tab.view
+    _drag(v, v.mapFromScene(200 * z, 325 * z), v.mapFromScene(402.5 * z, 325 * z))  # right side, near 400
+    low = max(tab.objects, key=lambda o: o.rect[1])
+    assert low.rect[2] == pytest.approx(400, abs=0.3)
+
+
+def test_divider_dragged_with_the_mouse(qapp, tmp_path):
+    from tests.test_designer import _drag
+    tab = _shown(qapp, tmp_path)
+    tab.set_mode("rect")
+    tab.drawn((100, 100, 400, 250))
+    tab.use_preset("tabella")
+    z, v = tab.zoom, tab.view
+    _drag(v, v.mapFromScene(175 * z, 200 * z), v.mapFromScene(140 * z, 200 * z))  # first column line, to 140
+    qapp.processEvents()  # the change is made once the mouse is let go
+    assert tab.blocks[0][1].cols[0] * 300 == pytest.approx(40, abs=1)

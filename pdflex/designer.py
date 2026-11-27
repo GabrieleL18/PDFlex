@@ -315,8 +315,7 @@ class ObjItem(QGraphicsRectItem):
         self.grab = self._handle_at(e.pos()) if self.isSelected() else None
         self.start, self.start_rect = self.pos(), QRectF(self.rect())
         super().mousePressEvent(e)
-        if self.grab is None:
-            self.tab.start_drag()
+        self.tab.start_drag()
 
     def mouseMoveEvent(self, e):
         if self.grab == "turn":
@@ -332,9 +331,12 @@ class ObjItem(QGraphicsRectItem):
         self.prepareGeometryChange()
         if self.obj.kind == "line":  # the band shows the line from the other end to the mouse
             other = self.handles()[1 - self.grab]
-            self.setRect(QRectF(other, e.pos()).normalized())
+            self.end = self.tab.snap_point(e.scenePos()) - self.pos()
+            self.setRect(QRectF(other, self.end).normalized())
             return
-        r, (fx, fy), x, y = QRectF(self.start_rect), SPOTS[self.grab], e.pos().x(), e.pos().y()
+        fx, fy = SPOTS[self.grab]
+        at = self.tab.snap_point(e.scenePos(), tuple(a for a, f in ((0, fx), (1, fy)) if f in (0, 1))) - self.pos()
+        r, x, y = QRectF(self.start_rect), at.x(), at.y()
         if fx == 0:  # only the sides this handle is on move; the box never turns inside out
             r.setLeft(min(x, r.right() - 4))
         elif fx == 1:
@@ -344,6 +346,7 @@ class ObjItem(QGraphicsRectItem):
         elif fy == 1:
             r.setBottom(max(y, r.top() + 4))
         self.setRect(r)
+        self.tab.show_size(r, e.scenePos())
 
     def mouseReleaseEvent(self, e):
         if self.grab == "turn":
@@ -356,10 +359,11 @@ class ObjItem(QGraphicsRectItem):
             return
         super().mouseReleaseEvent(e)
         self.tab.end_drag()
+        self.tab.hide_size()
         z = self.zoom
         if self.grab is not None:
             if self.obj.kind == "line":
-                ends = [self.handles()[i] if i != self.grab else e.pos() for i in (0, 1)]
+                ends = [self.handles()[i] if i != self.grab else getattr(self, "end", e.pos()) for i in (0, 1)]
                 a, b = (pt + self.pos() for pt in ends)
                 self.tab.resize_object(self.obj, (a.x() / z, a.y() / z, b.x() / z, b.y() / z))
             else:
@@ -432,13 +436,18 @@ class PageView(QGraphicsView):
             self.tab.leave_cells()
         if self.tab.mode == "select" or e.button() != Qt.LeftButton or not self.tab.doc:
             return super().mousePressEvent(e)
-        self.start = self.mapToScene(e.position().toPoint())
+        self.tab.start_drag()
+        self.start = self.end = self.tab.snap_point(self.mapToScene(e.position().toPoint()))
+        self.tab.end_drag()
         self.band = self.scene().addRect(QRectF(self.start, self.start), QPen(QColor(ACCENT), 1.5, Qt.DashLine),
                                          QBrush(QColor(59, 63, 174, 30)))
 
     def mouseMoveEvent(self, e):
         if self.band:
-            self.band.setRect(QRectF(self.start, self.mapToScene(e.position().toPoint())).normalized())
+            self.end = self.tab.snap_point(self.mapToScene(e.position().toPoint()))
+            r = QRectF(self.start, self.end).normalized()
+            self.band.setRect(r)
+            self.tab.show_size(r, self.end)
         else:
             super().mouseMoveEvent(e)
 
@@ -447,7 +456,9 @@ class PageView(QGraphicsView):
             return super().mouseReleaseEvent(e)
         self.scene().removeItem(self.band)
         self.band = None
-        end, z = self.mapToScene(e.position().toPoint()), self.tab.zoom
+        self.tab.end_drag()
+        self.tab.hide_size()
+        end, z = self.end, self.tab.zoom
         self.tab.drawn((self.start.x() / z, self.start.y() / z, end.x() / z, end.y() / z),
                        straight=bool(e.modifiers() & Qt.ShiftModifier))
 
@@ -468,6 +479,7 @@ class DividerItem(QGraphicsRectItem):
         self.hover, self.start = False, None
         self.setPen(Qt.NoPen)
         self.setZValue(950)
+        tab.start_drag()  # the block is selected: what it catches is everything else
         self.setAcceptHoverEvents(True)
         self.setCursor(Qt.SplitHCursor if axis == "cols" else Qt.SplitVCursor)
         n = len(getattr(entry[1], axis))
@@ -496,13 +508,16 @@ class DividerItem(QGraphicsRectItem):
         e.accept()
 
     def mouseMoveEvent(self, e):
-        d = e.scenePos() - self.start
-        self.setPos(d.x() if self.axis == "cols" else 0, d.y() if self.axis == "rows" else 0)
+        cols, z = self.axis == "cols", self.tab.zoom
+        line = self.rect().center() + e.scenePos() - self.start  # where the line is dragged to
+        at = self.tab.snap_point(line, (0,) if cols else (1,))
+        self.moved = ((at.x() if cols else at.y()) - self.at * z) / z
+        self.setPos(self.moved * z if cols else 0, 0 if cols else self.moved * z)
 
     def mouseReleaseEvent(self, e):
-        d = e.scenePos() - self.start
         self.start = None
-        moved = (d.x() if self.axis == "cols" else d.y()) / self.tab.zoom
+        self.tab.end_drag()
+        moved = getattr(self, "moved", 0)
         if abs(moved) < 0.5:
             return self.setPos(0, 0)
         pos = self.at + moved
@@ -571,6 +586,7 @@ class DesignTab(QWidget):
         self.groups: list[list[design.Obj]] = []  # on this page, from the PDF's own notes (see MARKS)
         self.clip, self.pastes = None, 0  # copied objects: (a copy of their page, their keys, its number)
         self.guides, self.snap_rects = [], []
+        self.size_tag = None  # the size shown while drawing or resizing
         self.blocks: list[tuple] = []  # on this page: (index in the note, Block, its parts) - see _page_blocks
         self.last_drawn = None  # the rectangle just drawn: the gallery can turn it into a block
         self.setAcceptDrops(True)
@@ -1458,6 +1474,34 @@ class DesignTab(QWidget):
         self.snap_rects = [QRectF(o.rect[0] * z, o.rect[1] * z, (o.rect[2] - o.rect[0]) * z, (o.rect[3] - o.rect[1]) * z)
                            for o in self.objects if id(o) not in chosen]
 
+    def snap_point(self, p: QPointF, axes: tuple = (0, 1)) -> QPointF:
+        """p (scene) on the nearest edge or middle in reach, only along axes (0: x, 1: y), its guides shown.
+        Alt held: as it is."""
+        self.end_drag()
+        if not self.doc or not axes or QApplication.keyboardModifiers() & Qt.AltModifier:
+            return QPointF(p)
+        page = self.doc[self.page_no].rect
+        dx, dy, guides = ui.snap_box(QRectF(p, p), self.snap_rects,
+                                     QRectF(0, 0, page.width * self.zoom, page.height * self.zoom), SNAP)
+        dx, dy = (dx if 0 in axes else 0), (dy if 1 in axes else 0)
+        self.guides = ui.draw_guides(self.scene, [g for g in guides if (0 if g[0].x1() == g[0].x2() else 1) in axes])
+        return QPointF(p.x() + dx, p.y() + dy)
+
+    def show_size(self, r: QRectF, at: QPointF) -> None:
+        """The size of r (scene) by the mouse, while drawing or resizing."""
+        if self.size_tag is None:
+            self.size_tag = QGraphicsSimpleTextItem()
+            self.size_tag.setZValue(1001)
+            self.size_tag.setBrush(QColor(ACCENT))
+            self.scene.addItem(self.size_tag)
+        self.size_tag.setText(f"{r.width() / self.zoom:.0f} × {r.height() / self.zoom:.0f} pt")
+        self.size_tag.setPos(at + QPointF(14, 14))
+        self.size_tag.show()
+
+    def hide_size(self) -> None:
+        if self.size_tag is not None:
+            self.size_tag.hide()
+
     def snap_drag(self, item) -> None:
         """While dragging: the selection's edges and middle catch the nearest ones in reach, a guide shows it."""
         self.end_drag()
@@ -2015,7 +2059,7 @@ class DesignTab(QWidget):
     def refresh(self):
         self.scene.blockSignals(True)
         self.scene.clear()
-        self.items, self.extras, self.samples = [], [], []
+        self.items, self.extras, self.samples, self.size_tag, self.guides = [], [], [], None, []
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
         self.thumbs.setVisible(has)
