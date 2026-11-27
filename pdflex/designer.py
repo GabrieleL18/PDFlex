@@ -2,6 +2,7 @@
 
 The page on screen is always the real PDF (pdflex.design changes it in place); fields and buttons are not shown
 and never touched, so they are all still there in the saved file."""
+import dataclasses
 import json
 import math
 from pathlib import Path
@@ -12,7 +13,7 @@ from PySide6.QtGui import QBrush, QColor, QDoubleValidator, QIcon, QKeySequence,
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QColorDialog, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsItem, QGraphicsPixmapItem,
     QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from pdflex import blocks, design, open_pdf, recovery, ui, write_atomic
@@ -383,6 +384,8 @@ class PageView(QGraphicsView):
         self.nudge_timer = QTimer(self, singleShot=True, interval=350, timeout=self.flush_nudge)
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape and self.tab.cell_mode is not None:
+            return self.tab.leave_cells()
         d = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}.get(e.key())
         items = [i for i in self.tab.items if i.isSelected() and i.obj.state != "locked" and not i.obj.data.get("pinned")]
         if d is None or not items:
@@ -406,8 +409,27 @@ class PageView(QGraphicsView):
         else:
             super().wheelEvent(e)
 
+    def _pdf_at(self, e) -> tuple[float, float]:
+        p = self.mapToScene(e.position().toPoint())
+        return p.x() / self.tab.zoom, p.y() / self.tab.zoom
+
+    def mouseDoubleClickEvent(self, e):
+        """On a block: picking its cells, from the one under the mouse."""
+        if self.tab.mode == "select" and e.button() == Qt.LeftButton and self.tab.cell_mode is None:
+            x, y = self._pdf_at(e)
+            for entry in self.tab.blocks:
+                cell = blocks.cell_at(entry[1], x, y)
+                if cell is not None:
+                    return self.tab.enter_cells(entry, *cell)
+        super().mouseDoubleClickEvent(e)
+
     def mousePressEvent(self, e):
         self.flush_nudge()  # before the press reaches the boxes: they are made again by the change
+        if self.tab.cell_mode is not None and e.button() == Qt.LeftButton:  # picking cells: inside, or out
+            cell = blocks.cell_at(self.tab.cell_mode[1], *self._pdf_at(e))
+            if cell is not None:
+                return self.tab.pick_cell(*cell, add=bool(e.modifiers() & Qt.ShiftModifier))
+            self.tab.leave_cells()
         if self.tab.mode == "select" or e.button() != Qt.LeftButton or not self.tab.doc:
             return super().mousePressEvent(e)
         self.start = self.mapToScene(e.position().toPoint())
@@ -428,6 +450,77 @@ class PageView(QGraphicsView):
         end, z = self.mapToScene(e.position().toPoint()), self.tab.zoom
         self.tab.drawn((self.start.x() / z, self.start.y() / z, end.x() / z, end.y() / z),
                        straight=bool(e.modifiers() & Qt.ShiftModifier))
+
+
+class DividerItem(QGraphicsRectItem):
+    """A line of the selected block that can be dragged: one inside moves between its two cells; an outer side
+    stretches the block, all its rows and columns in proportion. index: the line after column / row index
+    (-1: the left or top side)."""
+    GRIP = 4  # px each side of the line
+
+    def __init__(self, tab, entry: tuple, axis: str, index: int, at: float):
+        x0, y0, x1, y1 = entry[1].rect
+        z, g = tab.zoom, self.GRIP
+        r = (QRectF(at * z - g, y0 * z, 2 * g, (y1 - y0) * z) if axis == "cols"
+             else QRectF(x0 * z, at * z - g, (x1 - x0) * z, 2 * g))
+        super().__init__(r)
+        self.tab, self.entry, self.axis, self.index, self.at = tab, entry, axis, index, at
+        self.hover, self.start = False, None
+        self.setPen(Qt.NoPen)
+        self.setZValue(950)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.SplitHCursor if axis == "cols" else Qt.SplitVCursor)
+        n = len(getattr(entry[1], axis))
+        self.setToolTip(tr("Trascina per allargare il blocco") if index in (-1, n - 1)
+                        else tr("Trascina per spostare la linea tra le celle"))
+
+    def paint(self, p, option, widget=None):
+        r = self.rect()
+        p.setPen(QPen(QColor(ACCENT), 2 if self.hover or self.start is not None else 1,
+                      Qt.SolidLine if self.hover or self.start is not None else Qt.DashLine))
+        if self.axis == "cols":
+            p.drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()))
+        else:
+            p.drawLine(QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y()))
+
+    def hoverEnterEvent(self, e):
+        self.hover = True
+        self.update()
+
+    def hoverLeaveEvent(self, e):
+        self.hover = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        self.start = e.scenePos()
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        d = e.scenePos() - self.start
+        self.setPos(d.x() if self.axis == "cols" else 0, d.y() if self.axis == "rows" else 0)
+
+    def mouseReleaseEvent(self, e):
+        d = e.scenePos() - self.start
+        self.start = None
+        moved = (d.x() if self.axis == "cols" else d.y()) / self.tab.zoom
+        if abs(moved) < 0.5:
+            return self.setPos(0, 0)
+        pos = self.at + moved
+        QTimer.singleShot(0, lambda: self.drop_at(pos))  # the change makes the scene again, this item with it
+
+    def drop_at(self, pos: float) -> None:
+        """The line let go at pos (PDF points, along its axis)."""
+        b, axis, i = self.entry[1], self.axis, self.index
+        n = len(getattr(b, axis))
+        if 0 <= i < n - 1:
+            return self.tab.apply_block(self.entry, blocks.move_divider(b, axis, i, pos))
+        x0, y0, x1, y1 = b.rect
+        least = n * blocks.MIN_CELL
+        if axis == "cols":
+            x0, x1 = (min(pos, x1 - least), x1) if i < 0 else (x0, max(pos, x0 + least))
+        else:
+            y0, y1 = (min(pos, y1 - least), y1) if i < 0 else (y0, max(pos, y0 + least))
+        self.tab.apply_block(self.entry, blocks.scaled(b, (x0, y0, x1, y1)))
 
 
 class BlockGallery(QFrame):
@@ -646,7 +739,7 @@ class DesignTab(QWidget):
             (row if i < 2 else row2).addWidget(e)
         self.form.addRow(row)
         self.form.addRow(row2)
-        self.p_rows = (row, row2)
+        self.p_pos_rows = (row, row2)
         self.p_text = QLineEdit()
         self.p_text.editingFinished.connect(lambda: self.set_text(self.p_text.text()))
         self.p_size = QLineEdit()
@@ -714,6 +807,51 @@ class DesignTab(QWidget):
                                                                   "proporzioni"))
         self.p_image.clicked.connect(self.replace_image)
         self.form.addRow(self.p_image)
+        # a block (blocks.py): the colour, fill, thickness and corner rows above change its outside
+        self.p_rows, self.p_cols = QSpinBox(), QSpinBox()
+        for s, axis, name in ((self.p_rows, "rows", tr("Righe")), (self.p_cols, "cols", tr("Colonne"))):
+            s.setRange(1, 60)
+            s.valueChanged.connect(lambda n, axis=axis: self._count_edited(axis, n))
+            self.form.addRow(name, s)
+        self.p_head_row = ui.Toggle(tr("Prima riga come intestazione"))
+        self.p_head_col = ui.Toggle(tr("Prima colonna come intestazione"))
+        self.p_head_row.toggled.connect(lambda on: self._block_set(header_row=on))
+        self.p_head_col.toggled.connect(lambda on: self._block_set(header_col=on))
+        self.form.addRow(self.p_head_row)
+        self.form.addRow(self.p_head_col)
+        self.p_lines = button("", None, tip=tr("Colore delle linee tra le celle"))
+        self.p_lines.clicked.connect(self._pick_lines)
+        self.form.addRow(tr("Linee interne"), self.p_lines)
+        self.p_line_width = QLineEdit()
+        self.p_line_width.setValidator(QDoubleValidator(0, 20, 1, self.p_line_width))
+        self.p_line_width.editingFinished.connect(
+            lambda: self._block_number(self.p_line_width, "line_width"))
+        self.form.addRow(tr("Spessore linee interne (pt)"), self.p_line_width)
+        self.p_text_size = QLineEdit()
+        self.p_text_size.setValidator(QDoubleValidator(2, 72, 1, self.p_text_size))
+        self.p_text_size.editingFinished.connect(lambda: self._block_number(self.p_text_size, "text_size"))
+        self.form.addRow(tr("Testo delle celle (pt)"), self.p_text_size)
+        self.b_unblock = button(tr("Separa blocco"), None, tip=tr("Diventa forme e testi separati, come se li avessi "
+                                                                   "disegnati uno per uno"))
+        self.b_unblock.clicked.connect(self.unblock_selected)
+        self.form.addRow(self.b_unblock)
+        # its cells, after a double-click on it
+        self.p_cell_text = QLineEdit()
+        self.p_cell_text.editingFinished.connect(self._cell_text_edited)
+        self.form.addRow(tr("Testo della cella"), self.p_cell_text)
+        self.p_cell_btns = QWidget()
+        cb = QHBoxLayout(self.p_cell_btns)
+        cb.setContentsMargins(0, 0, 0, 0)
+        self.b_merge = button(tr("Unisci celle"), None, tip=tr("Le celle scelte diventano una (Maiusc+clic per "
+                                                                "sceglierne più di una)"))
+        self.b_split = button(tr("Dividi cella"), None, tip=tr("La cella unita torna nelle celle di prima"))
+        self.b_merge.clicked.connect(self.merge_cells)
+        self.b_split.clicked.connect(self.split_cell)
+        cb.addWidget(self.b_merge)
+        cb.addWidget(self.b_split)
+        self.form.addRow(self.p_cell_btns)
+        self.cell_mode, self.picked = None, []  # the block whose cells are being picked, and those picked
+        self.extras = []  # scene items over the page for a block: its dividers, its cells' outlines
         pr.addWidget(self.props)
         # arrangement: for one object or more
         self.arrange = QWidget()
@@ -1340,6 +1478,10 @@ class DesignTab(QWidget):
 
     def _restyle(self, **style):
         self.view.flush_nudge()  # the arrows' move first: what follows is worked out on the page after it
+        if self._one_block() is not None:
+            names = {"color": "border", "fill": "fill", "width": "border_width"}
+            self._block_set(**{names[k]: v if k == "width" else _hex(v) for k, v in style.items() if k in names})
+            return
         objs = self._targets()
         if not objs:
             return
@@ -1466,6 +1608,8 @@ class DesignTab(QWidget):
 
     def _round_edited(self):
         r, objs = self._number(self.p_round), self._targets()
+        if r is not None and self._one_block() is not None:
+            return self._block_set(radius=r)
         if r is not None and len(objs) == 1 and objs[0].kind == "rect" and abs(r - objs[0].data.get("round", 0)) > 0.05:
             self._edit(design.set_round, objs[0], r, keep=[objs[0].rect], follow=objs)
 
@@ -1486,6 +1630,55 @@ class DesignTab(QWidget):
         return objs if len(objs) == len(self.selection) else []
 
     def _show_props(self):
+        self._show_obj_props()
+        if self.cell_mode is not None and self._one_block() is None:  # the block is not selected any more
+            self.cell_mode, self.picked = None, []
+        e, rect = self._one_block(), self._plain_rect()
+        cell, blk = self.cell_mode is not None, e is not None and self.cell_mode is None
+        if cell or blk:
+            self.props.setVisible(True)
+            for i in range(self.form.rowCount()):
+                self.form.setRowVisible(i, False)
+            for w in (self.p_color, self.p_fill, self.p_width, self.p_round):
+                self.form.setRowVisible(w, blk)
+        for w in (self.p_rows, self.p_cols):
+            self.form.setRowVisible(w, blk or rect is not None)
+        for w in (self.p_head_row, self.p_head_col, self.p_lines, self.p_line_width, self.p_text_size, self.b_unblock):
+            self.form.setRowVisible(w, blk)
+        for w in (self.p_cell_text, self.p_cell_btns):
+            self.form.setRowVisible(w, cell)
+        quiet = (self.p_rows, self.p_cols, self.p_head_row, self.p_head_col)
+        for w in quiet:
+            w.blockSignals(True)
+        if blk:
+            b = e[1]
+            self.kind_label.setText(tr("Blocco: trascina le sue linee per cambiare righe e colonne, doppio clic su una "
+                                       "cella per scriverci o unirla."))
+            self.p_rows.setValue(len(b.rows))
+            self.p_cols.setValue(len(b.cols))
+            self.p_head_row.setChecked(b.header_row)
+            self.p_head_col.setChecked(b.header_col)
+            self._swatch(self.p_color, b.border)
+            self._swatch(self.p_fill, b.fill)
+            self._swatch(self.p_lines, b.lines)
+            self.p_width.setText(f"{b.border_width:.1f}")
+            self.p_round.setText(f"{b.radius:.1f}")
+            self.p_line_width.setText(f"{b.line_width:.1f}")
+            self.p_text_size.setText(f"{b.text_size:.1f}")
+        elif rect is not None:
+            self.p_rows.setValue(1)
+            self.p_cols.setValue(1)
+        for w in quiet:
+            w.blockSignals(False)
+        if cell:
+            b = self.cell_mode[1]
+            self.kind_label.setText(tr("Celle: clic per sceglierne una, Maiusc+clic per aggiungerne. Esc per uscire."))
+            self.p_cell_text.setText(b.texts.get(f"{self.picked[0][0]},{self.picked[0][1]}", "") if self.picked else "")
+            self.b_merge.setEnabled(blocks.merge(b, self.picked) is not None)
+            self.b_split.setEnabled(any((m[0], m[1]) in self.picked for m in b.merges))
+        self._show_extras(e)
+
+    def _show_obj_props(self):
         objs, free = self._targets(), self._free()
         one = objs[0] if len(objs) == 1 else None
         self.props.setVisible(bool(objs))
@@ -1516,7 +1709,7 @@ class DesignTab(QWidget):
         texts = all(o.kind == "text" for o in objs)
         drawings = all("drawing" in o.data for o in objs)
         stroked = drawings and all(o.data["drawing"].get("color") is not None for o in objs)
-        for row in self.p_rows:
+        for row in self.p_pos_rows:
             self.form.setRowVisible(row, one is not None)
         self.form.setRowVisible(self.p_text, one is not None and texts)
         for w in (self.p_size, self.p_font, self.p_looks, self.p_anchor):
@@ -1564,6 +1757,147 @@ class DesignTab(QWidget):
     def _swatch(b, hex_color: str):
         b.setText(hex_color.upper() if hex_color else tr("Nessuno"))
         b.setIcon(ui.dot(hex_color) if hex_color else QIcon())
+
+    # ---- blocks: rows, columns, cells
+    def _one_block(self) -> tuple | None:
+        """The block the selection is, all of it and nothing more (an entry of self.blocks), or None."""
+        e = self.block_of(self.selection[0]) if self.selection else None
+        if e is None or len(e[2]) != len(self.selection) or any(o.data.get("pinned") for o in self.selection):
+            return None
+        return e if all(any(p is s for s in self.selection) for p in e[2]) else None
+
+    def _plain_rect(self):
+        """The one rectangle selected, not part of a block: rows or columns turn it into one."""
+        objs = self._targets()
+        o = objs[0] if len(objs) == 1 and len(self.selection) == 1 else None
+        return o if o is not None and o.kind == "rect" and "drawing" in o.data and not self.block_of(o) else None
+
+    def _block_set(self, **change) -> None:
+        e = self._one_block()
+        if e is not None:
+            b = dataclasses.replace(e[1], **change)
+            if b != e[1]:
+                self.apply_block(e, b)
+
+    def _block_number(self, edit: QLineEdit, field: str) -> None:
+        v = self._number(edit)
+        if v is not None:
+            self._block_set(**{field: v})
+
+    def _pick_lines(self) -> None:
+        e = self._one_block()
+        if e is not None:
+            c = QColorDialog.getColor(QColor(e[1].lines or "#000000"), self, tr("Scegli il colore"))
+            if c.isValid():
+                self._block_set(lines=c.name())
+
+    def _count_edited(self, axis: str, n: int) -> None:
+        e = self._one_block()
+        if e is not None:
+            if n != len(getattr(e[1], axis)):
+                self.apply_block(e, blocks.set_count(e[1], axis, n))
+            return
+        o = self._plain_rect()
+        if o is not None and n > 1:  # a plain rectangle split: a block with its colours
+            d = o.data["drawing"]
+            stroke = _hex(d.get("color"))
+            b = blocks.Block(tuple(o.rect), [1.0], [1.0], border=stroke, border_width=d.get("width") or 1,
+                             radius=o.data.get("round", 0), fill=_hex(d.get("fill")),
+                             lines=stroke or blocks.Block.lines)
+            self.apply_block(None, blocks.set_count(b, axis, n), replace=[o])
+
+    def unblock_selected(self) -> None:
+        e = self._one_block()
+        if e is not None:
+            self._edit(lambda page: _drop_blocks(page, {e[0]}), keep=[o.rect for o in e[2]])
+
+    def enter_cells(self, entry: tuple, r: int, c: int) -> None:
+        """Picking the cells of block entry, starting from cell r, c."""
+        self.select(entry[2])
+        self.cell_mode, self.picked = entry, []
+        self.pick_cell(r, c, add=False)
+
+    def pick_cell(self, r: int, c: int, add: bool) -> None:
+        if self.cell_mode is None:
+            return
+        m = blocks._merge_at(self.cell_mode[1], r, c)
+        cell = (m[0], m[1]) if m else (r, c)
+        if not add:
+            self.picked = [cell]
+        elif cell in self.picked and len(self.picked) > 1:
+            self.picked.remove(cell)
+        elif cell not in self.picked:
+            self.picked.append(cell)
+        self._show_props()
+
+    def leave_cells(self) -> None:
+        if self.cell_mode is not None:
+            self.cell_mode, self.picked = None, []
+            self._show_props()
+
+    def _in_cells(self, new) -> None:
+        """Block new in place of the one whose cells are picked, still picking them."""
+        picked = self.picked
+        if self.apply_block(self.cell_mode, new):
+            e = self._one_block()
+            self.cell_mode = e
+            self.picked = [p for p in picked if e and blocks.cell_at(e[1], *self._cell_middle(e[1], p))] or (
+                [(0, 0)] if e else [])
+            self._show_props()
+
+    @staticmethod
+    def _cell_middle(b, cell) -> tuple[float, float]:
+        xs, ys = blocks.col_edges(b), blocks.row_edges(b)
+        r, c = cell
+        if r >= len(b.rows) or c >= len(b.cols):
+            return -1e9, -1e9
+        return (xs[c] + xs[c + 1]) / 2, (ys[r] + ys[r + 1]) / 2
+
+    def _cell_text_edited(self) -> None:
+        if self.cell_mode is None or not self.picked:
+            return
+        b, (r, c) = self.cell_mode[1], self.picked[0]
+        text, key = self.p_cell_text.text().strip(), f"{r},{c}"
+        if text != b.texts.get(key, ""):
+            texts = {k: t for k, t in b.texts.items() if k != key}
+            if text:
+                texts[key] = text
+            self._in_cells(dataclasses.replace(b, texts=texts))
+
+    def merge_cells(self) -> None:
+        new = blocks.merge(self.cell_mode[1], self.picked) if self.cell_mode else None
+        if new is not None:
+            m = new.merges[-1]
+            self.picked = [(m[0], m[1])]
+            self._in_cells(new)
+
+    def split_cell(self) -> None:
+        if self.cell_mode is not None and self.picked:
+            self._in_cells(blocks.split(self.cell_mode[1], *self.picked[0]))
+
+    def _show_extras(self, entry: tuple | None) -> None:
+        """Over the page: the dividers of the block selected, or the outlines of its cells while picking them."""
+        for i in self.extras:
+            self.scene.removeItem(i)
+        self.extras = []
+        if entry is None or self.doc is None:
+            return
+        z, b = self.zoom, entry[1]
+        if self.cell_mode is not None:
+            for r0, c0, _, _, (x0, y0, x1, y1) in blocks.cells(b):
+                on = (r0, c0) in self.picked
+                i = self.scene.addRect(QRectF(x0 * z, y0 * z, (x1 - x0) * z, (y1 - y0) * z),
+                                       QPen(QColor(ACCENT), 2 if on else 1, Qt.SolidLine if on else Qt.DotLine),
+                                       QBrush(QColor(59, 63, 174, 45)) if on else QBrush(Qt.NoBrush))
+                i.setZValue(900)
+                i.setAcceptedMouseButtons(Qt.NoButton)
+                self.extras.append(i)
+            return
+        for axis, edges in (("cols", blocks.col_edges(b)), ("rows", blocks.row_edges(b))):
+            for k, at in enumerate(edges):  # edge k is after column / row k - 1: the first and last are the sides
+                d = DividerItem(self, entry, axis, k - 1, at)
+                self.scene.addItem(d)
+                self.extras.append(d)
 
     # ---- drawing the page
     def _whole_groups(self, objs: list) -> list:
@@ -1647,7 +1981,7 @@ class DesignTab(QWidget):
     def refresh(self):
         self.scene.blockSignals(True)
         self.scene.clear()
-        self.items = []
+        self.items, self.extras = [], []
         has = self.doc is not None
         self.stack.setCurrentIndex(1 if has else 0)
         self.thumbs.setVisible(has)

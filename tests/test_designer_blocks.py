@@ -3,7 +3,7 @@ import pytest
 
 from pdflex import blocks as bl
 from pdflex import design, ui
-from pdflex.designer import DesignTab, _marks
+from pdflex.designer import DesignTab, DividerItem, _marks
 
 
 def _tab(tmp_path, pages=1):
@@ -128,3 +128,65 @@ def test_gallery_after_drawing_a_rectangle(qapp, tmp_path):
     tab.set_mode("rect")
     tab.drawn((10, 10, 25, 18))  # too small for a block: no gallery
     assert not tab.gallery.isVisible()
+
+
+def test_block_panel_rows_cols_and_header(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")
+    tab.select(tab.blocks[0][2])
+    assert tab.form.isRowVisible(tab.p_rows) and tab.p_cols.value() == 4
+    tab.p_cols.setValue(6)
+    assert len(tab.blocks[0][1].cols) == 6
+    tab.p_head_col.setChecked(True)
+    assert tab.blocks[0][1].header_col
+
+
+def test_split_a_plain_rectangle(qapp, tmp_path):
+    tab = _tab(tmp_path)
+    tab.set_mode("rect")
+    tab.drawn((100, 100, 300, 200))
+    tab.gallery.close()
+    tab.select([tab.last_drawn])
+    assert tab.p_rows.value() == 1
+    tab.p_rows.setValue(3)
+    assert len(tab.blocks) == 1 and len(tab.blocks[0][1].rows) == 3
+
+
+def test_cells_text_merge_split(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")
+    e = tab.blocks[0]
+    tab.enter_cells(e, 0, 1)
+    tab.pick_cell(0, 2, add=True)
+    tab.b_merge.click()
+    assert tab.blocks[0][1].merges == [(0, 1, 0, 2)]
+    tab.enter_cells(tab.blocks[0], 0, 1)
+    tab.p_cell_text.setText("TOTALE")
+    tab.p_cell_text.editingFinished.emit()
+    assert tab.blocks[0][1].texts["0,1"] == "TOTALE"
+    tab.b_split.click()
+    assert tab.blocks[0][1].merges == []
+
+
+def test_drag_divider(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")
+    tab.show()
+    tab.select(tab.blocks[0][2])
+    d = next(i for i in tab.scene.items() if isinstance(i, DividerItem) and i.axis == "cols" and i.index == 0)
+    d.drop_at(130)  # what the mouse release calls, in PDF points
+    assert tab.blocks[0][1].cols[0] * 300 == pytest.approx(30, abs=0.5)
+
+
+def test_drag_outer_side_scales(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")
+    tab.show()
+    tab.select(tab.blocks[0][2])
+    d = next(i for i in tab.scene.items() if isinstance(i, DividerItem) and i.axis == "cols" and i.index == 3)
+    d.drop_at(500)  # right side from 400 to 500 (an A4 page is 595 wide)
+    b = tab.blocks[0][1]
+    assert b.rect[2] == pytest.approx(500, abs=0.5) and b.cols == pytest.approx([0.25] * 4)
+
+
+def test_unblock(qapp, tmp_path):
+    tab = _block(tmp_path, "tabella")
+    tab.select(tab.blocks[0][2])
+    tab.b_unblock.click()
+    assert tab.blocks == [] and len(tab.objects) > 5

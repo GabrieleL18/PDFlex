@@ -649,4 +649,27 @@ EN = {
     "Continua": "Continue",
     "Il blocco diventa forme separate. Continuare?": "The block becomes separate shapes. Continue?",
     "PDFlex non è riuscito a disegnare il blocco.": "PDFlex could not draw the block.",
+    "Righe": "Rows",
+    "Colonne": "Columns",
+    "Prima riga come intestazione": "First row as header",
+    "Prima colonna come intestazione": "First column as header",
+    "Colore delle linee tra le celle": "Colour of the lines between cells",
+    "Linee interne": "Inner lines",
+    "Spessore linee interne (pt)": "Inner line width (pt)",
+    "Testo delle celle (pt)": "Cell text (pt)",
+    "Separa blocco": "Ungroup block",
+    "Diventa forme e testi separati, come se li avessi disegnati uno per uno":
+        "It becomes separate shapes and texts, as if you had drawn them one by one",
+    "Testo della cella": "Cell text",
+    "Unisci celle": "Merge cells",
+    "Le celle scelte diventano una (Maiusc+clic per sceglierne più di una)":
+        "The chosen cells become one (Shift+click to choose more than one)",
+    "Dividi cella": "Split cell",
+    "La cella unita torna nelle celle di prima": "The merged cell goes back to the cells it was",
+    "Blocco: trascina le sue linee per cambiare righe e colonne, doppio clic su una cella per scriverci o unirla.":
+        "Block: drag its lines to change rows and columns, double-click a cell to write in it or merge it.",
+    "Celle: clic per sceglierne una, Maiusc+clic per aggiungerne. Esc per uscire.":
+        "Cells: click to choose one, Shift+click to add more. Esc to leave.",
+    "Trascina per allargare il blocco": "Drag to resize the block",
+    "Trascina per spostare la linea tra le celle": "Drag to move the line between the cells",
 }
