@@ -85,13 +85,11 @@ def _clip(b: Block) -> Block:
 
 
 def set_count(b: Block, axis: str, n: int) -> Block:
-    """n rows or columns: a new one halves the last, one taken away joins the last two."""
+    """n rows or columns, all the same size; a header row or column keeps its own."""
     fr = list(getattr(b, axis))
     n = max(1, int(n))
-    while len(fr) < n:
-        fr[-1:] = [fr[-1] / 2, fr[-1] / 2]
-    while len(fr) > n:
-        fr[-2:] = [fr[-2] + fr[-1]]
+    head = fr[0] if (b.header_row if axis == "rows" else b.header_col) and len(fr) > 1 and n > 1 else None
+    fr = [head] + [(1 - head) / (n - 1)] * (n - 1) if head is not None else [1 / n] * n
     return _clip(dataclasses.replace(b, **{axis: fr}))
 
 
@@ -251,8 +249,8 @@ def _paint(page, b: Block) -> None:
         if head:
             w = font.text_length(text, size)
             origin = ((cx0 + cx1 - w) / 2, (cy0 + cy1) / 2 + size * 0.35)
-        else:
-            origin = (cx0 + 4, cy0 + 4 + size * 0.8)
+        else:  # on the left, in the middle of its height
+            origin = (cx0 + 4, (cy0 + cy1) / 2 + size * 0.35)
         design._write(page, origin, text, font, size, color)
 
 

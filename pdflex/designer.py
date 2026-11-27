@@ -1960,7 +1960,7 @@ class DesignTab(QWidget):
                 if head:
                     i.setPos(((x0 + x1) / 2) * z - w / 2, ((y0 + y1) / 2) * z - fm.height() / 2)
                 else:
-                    i.setPos((x0 + 4) * z, (y0 + 4 + 0.8 * b.text_size) * z - fm.ascent())
+                    i.setPos((x0 + 4) * z, ((y0 + y1) / 2 + 0.35 * b.text_size) * z - fm.ascent())
                 i.setZValue(800)
                 i.setAcceptedMouseButtons(Qt.NoButton)
                 self.scene.addItem(i)

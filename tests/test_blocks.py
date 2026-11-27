@@ -16,11 +16,17 @@ def test_cells_and_merge():
     assert bl.split(b, 0, 1).merges == []
 
 
-def test_set_count_splits_last_and_trims():
+def test_set_count_spreads_evenly_and_trims():
     b = bl.set_count(B(texts={"3,3": "x", "0,0": "a"}), "cols", 5)
-    assert b.cols == [0.25, 0.25, 0.25, 0.125, 0.125]
+    assert b.cols == pytest.approx([0.2] * 5)  # a count typed in: all the same size
     b = bl.set_count(b, "cols", 2)
-    assert b.cols == [0.25, 0.75] and b.texts == {"0,0": "a"}  # text of a removed column goes
+    assert b.cols == pytest.approx([0.5, 0.5]) and b.texts == {"0,0": "a"}  # text of a removed column goes
+
+
+def test_set_count_keeps_the_header_size():
+    b = bl.Block((0, 0, 300, 100), [0.25] * 4, [0.2, 0.8], header_row=True)
+    assert bl.set_count(b, "rows", 5).rows == pytest.approx([0.2] * 5)
+    assert bl.set_count(b, "rows", 3).rows == pytest.approx([0.2, 0.4, 0.4])
 
 
 def test_set_count_clips_merges():
