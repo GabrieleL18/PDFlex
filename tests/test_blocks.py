@@ -58,3 +58,72 @@ def test_presets():
     assert g.header_row and g.header_col and len(g.cols) == 9 and len(g.rows) == 5
     assert g.cols[0] * 300 == pytest.approx(70)
     assert bl.preset("riquadro", r).texts == {"0,0": "Titolo"} and bl.preset("sezione", r).border == ""
+
+
+import dataclasses  # noqa: E402
+
+import pymupdf  # noqa: E402
+
+from pdflex import design  # noqa: E402
+
+
+def _page():
+    doc = pymupdf.open()
+    return doc, doc.new_page()
+
+
+def test_draw_table_shapes_and_text():
+    doc, page = _page()
+    b = dataclasses.replace(bl.preset("tabella", (100, 100, 400, 250)), texts={"0,0": "CODICE"})
+    bl.draw(page, b)
+    objs = design.page_objects(page)[0]
+    assert "CODICE" in page.get_text()
+    assert any(o.kind in ("rect", "shape") and pymupdf.Rect(o.rect).contains(pymupdf.Rect(101, 101, 399, 249))
+               for o in objs)
+    lines = [o for o in objs if o.kind == "line"]
+    assert len(lines) == 3 + 5  # 3 inner column lines, 5 inner row lines
+    own = bl.own_texts(objs, b)
+    assert own and all(o.kind == "text" for o in own)
+
+
+def test_merged_cell_has_no_line_inside():
+    doc, page = _page()
+    b = bl.merge(bl.preset("tabella", (100, 100, 400, 250)), [(0, 1), (0, 2)])
+    bl.draw(page, b)
+    x = 100 + 300 * 0.5  # the line between columns 1 and 2
+    assert not any(o.kind == "line" and abs(o.rect[0] - x) < 1 and o.rect[1] < 117
+                   for o in design.page_objects(page)[0])
+
+
+def test_block_is_drawn_under_existing_text():
+    doc, page = _page()
+    page.insert_text((110, 120), "sopra")
+    bl.draw(page, bl.preset("riquadro", (100, 100, 300, 200)))
+    pix = page.get_pixmap(clip=(110, 112, 140, 121), dpi=144)
+    assert any(pix.pixel(x, y)[0] < 100 for x in range(pix.width) for y in range(pix.height))  # dark letters show
+
+
+def test_block_visible_over_page_background():
+    doc, page = _page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))  # a white sheet under everything
+    bl.draw(page, bl.preset("riquadro", (100, 100, 300, 200)))
+    pix = page.get_pixmap(clip=(150, 150, 151, 151))
+    assert pix.pixel(0, 0) != (255, 255, 255)  # the pale fill shows
+
+
+def test_own_texts_leaves_other_text_alone():
+    doc, page = _page()
+    b = dataclasses.replace(bl.preset("riquadro", (100, 100, 300, 200)), texts={"0,0": "Presenze"})
+    page.insert_text((120, 180), "altro")
+    bl.draw(page, b)
+    own = bl.own_texts(design.page_objects(page)[0], b)
+    assert [design_words(o) for o in own] == ["Presenze"]
+
+
+def design_words(o):
+    return "".join(s["text"] for s in o.data["spans"]).strip()
+
+
+def test_preview_pixmap(qapp):
+    pm = bl.preview(bl.preset("griglia", (0, 0, 300, 150)), 96, 64)
+    assert not pm.isNull() and pm.width() <= 96 and pm.height() <= 64
